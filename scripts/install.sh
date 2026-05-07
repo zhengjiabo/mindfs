@@ -5,6 +5,7 @@
 set -euo pipefail
 
 REPO="a9gent/mindfs"
+RELEASE_NOTES_URL="https://raw.githubusercontent.com/${REPO}/main/release-notes.md"
 VERSION=""
 PREFIX="${HOME}/.local"
 
@@ -41,25 +42,23 @@ detect_arch() {
 OS="$(detect_os)"
 ARCH="$(detect_arch)"
 
-extract_tag_name() {
-  sed -nE 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' | head -1
-}
-
 normalize_tag() {
   local value="${1:-}"
   value="${value#v}"
   printf 'v%s' "$value"
 }
 
-# ── Resolve version from GitHub API if not specified ───────────────────────
+extract_version() {
+  sed -nE '1s/^[[:space:]]*#[[:space:]]+MindFS[[:space:]]+(v?[0-9]+(\.[0-9]+){1,3}[^[:space:]]*).*$/\1/p'
+}
+
+# ── Resolve version from raw metadata if not specified ─────────────────────
 if [[ -z "$VERSION" ]]; then
   echo "Fetching latest release version..."
   if command -v curl &>/dev/null; then
-    VERSION="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
-      | extract_tag_name)"
+    VERSION="$(curl -fsSL "$RELEASE_NOTES_URL" | extract_version)"
   elif command -v wget &>/dev/null; then
-    VERSION="$(wget -qO- "https://api.github.com/repos/${REPO}/releases/latest" \
-      | extract_tag_name)"
+    VERSION="$(wget -qO- "$RELEASE_NOTES_URL" | extract_version)"
   else
     echo "Error: curl or wget is required." >&2; exit 1
   fi

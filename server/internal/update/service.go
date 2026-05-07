@@ -5,7 +5,6 @@ import (
 	"archive/zip"
 	"compress/gzip"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,7 +19,10 @@ import (
 	"time"
 )
 
-const defaultCheckInterval = time.Hour
+const (
+	defaultCheckInterval = time.Hour
+	releaseNotesPath     = "release-notes.md"
+)
 
 type Status struct {
 	CurrentVersion      string    `json:"current_version"`
@@ -305,25 +307,47 @@ func (s *Service) updateStatus(apply func(*Status)) {
 }
 
 func (s *Service) fetchLatestRelease(ctx context.Context) (latestRelease, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", s.repo), nil)
+	body, err := s.fetchRawText(ctx, releaseNotesPath, 1<<20)
 	if err != nil {
 		return latestRelease{}, err
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
+	tag := parseReleaseNotesVersion(body)
+	if tag == "" {
+		return latestRelease{}, fmt.Errorf("release check failed: no version found in %s", releaseNotesPath)
+	}
+	tag = normalizeTag(tag)
+	return latestRelease{
+		TagName: tag,
+		Name:    tag,
+		Body:    body,
+		HTMLURL: fmt.Sprintf("https://github.com/%s/releases/tag/%s", s.repo, tag),
+		Assets:  []releaseAsset{s.releaseAssetForVersion(tag)},
+	}, nil
+}
+
+func (s *Service) fetchRawText(ctx context.Context, path string, limit int64) (string, error) {
+	url := fmt.Sprintf("https://raw.githubusercontent.com/%s/main/%s", s.repo, strings.TrimPrefix(path, "/"))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
 	req.Header.Set("User-Agent", "mindfs-update-checker")
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return latestRelease{}, err
+		return "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return latestRelease{}, fmt.Errorf("release check failed: %s", resp.Status)
+		return "", fmt.Errorf("raw file fetch failed: %s", resp.Status)
 	}
-	var out latestRelease
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
-		return latestRelease{}, err
+	if limit <= 0 {
+		limit = 64 << 10
 	}
-	return out, nil
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit))
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
 }
 
 func (s *Service) pickAsset(release latestRelease, version string) (releaseAsset, error) {
@@ -349,6 +373,19 @@ func (s *Service) pickAsset(release latestRelease, version string) (releaseAsset
 		runtime.GOARCH,
 		strings.Join(candidates, ", "),
 	)
+}
+
+func (s *Service) releaseAssetForVersion(version string) releaseAsset {
+	version = normalizeTag(version)
+	ext := ".tar.gz"
+	if runtime.GOOS == "windows" {
+		ext = ".zip"
+	}
+	name := fmt.Sprintf("mindfs_%s_%s_%s%s", version, runtime.GOOS, runtime.GOARCH, ext)
+	return releaseAsset{
+		Name:               name,
+		BrowserDownloadURL: fmt.Sprintf("https://github.com/%s/releases/download/%s/%s", s.repo, version, name),
+	}
 }
 
 func (s *Service) downloadFile(ctx context.Context, url, dst string) error {
@@ -476,6 +513,32 @@ func normalizeVersion(v string) string {
 	v = strings.TrimSpace(v)
 	v = strings.TrimPrefix(v, "v")
 	return v
+}
+
+func normalizeTag(v string) string {
+	v = strings.TrimSpace(v)
+	v = strings.TrimPrefix(v, "v")
+	if v == "" {
+		return ""
+	}
+	return "v" + v
+}
+
+func parseReleaseNotesVersion(text string) string {
+	firstLine := strings.TrimSpace(strings.TrimSuffix(strings.SplitN(text, "\n", 2)[0], "\r"))
+	const prefix = "# MindFS "
+	if !strings.HasPrefix(firstLine, prefix) {
+		return ""
+	}
+	fields := strings.Fields(strings.TrimSpace(strings.TrimPrefix(firstLine, prefix)))
+	if len(fields) == 0 {
+		return ""
+	}
+	version := fields[0]
+	if _, ok := parseVersionParts(version); ok {
+		return version
+	}
+	return ""
 }
 
 func isNewerVersion(latest, current string) bool {

@@ -110,7 +110,7 @@ curl -fsSL https://raw.githubusercontent.com/a9gent/mindfs/main/scripts/install.
 irm https://raw.githubusercontent.com/a9gent/mindfs/main/scripts/install.ps1 | iex
 ```
 
-The install script auto-detects your OS and architecture, then downloads the matching binary from [GitHub Releases](https://github.com/a9gent/mindfs/releases).
+The install script auto-detects your OS and architecture, reads the latest version from the first line of [`release-notes.md`](https://raw.githubusercontent.com/a9gent/mindfs/main/release-notes.md), then downloads the matching binary from [GitHub Releases](https://github.com/a9gent/mindfs/releases). `make release TAG=v1.2.3` commits and pushes `release-notes.md` when it changed.
 
 **Build from source** (requires Go 1.22+, Node.js 20+)
 ```bash

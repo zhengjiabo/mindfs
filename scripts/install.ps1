@@ -9,6 +9,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Repo = "a9gent/mindfs"
+$ReleaseNotesUrl = "https://raw.githubusercontent.com/$Repo/main/release-notes.md"
 
 function Add-ToCurrentSessionPath([string]$Dir) {
     if (-not $Dir) { return }
@@ -77,12 +78,14 @@ function Normalize-Tag([string]$Tag) {
     return "v" + ($Tag -replace '^v', '')
 }
 
-# ── Resolve version from GitHub API if not specified ───────────────────────
+# ── Resolve version from raw metadata if not specified ─────────────────────
 if (-not $Version) {
     Write-Host "Fetching latest release version..."
-    $apiUrl  = "https://api.github.com/repos/$Repo/releases/latest"
-    $release = Invoke-RestMethod -Uri $apiUrl -UseBasicParsing
-    $Version = $release.tag_name
+    $metadata = Invoke-WebRequest -Uri $ReleaseNotesUrl -UseBasicParsing
+    $firstLine = (($metadata.Content -split "`r?`n") | Select-Object -First 1).Trim()
+    if ($firstLine -match '^#\s+MindFS\s+(v?[0-9]+(\.[0-9]+){1,3}[^\s]*)') {
+        $Version = $Matches[1]
+    }
     if (-not $Version) {
         Write-Error "Could not determine latest version. Use -Version to specify."
         exit 1

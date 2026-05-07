@@ -110,7 +110,7 @@ curl -fsSL https://raw.githubusercontent.com/a9gent/mindfs/main/scripts/install.
 irm https://raw.githubusercontent.com/a9gent/mindfs/main/scripts/install.ps1 | iex
 ```
 
-安装脚本会自动检测系统和架构，从 [GitHub Releases](https://github.com/a9gent/mindfs/releases) 下载对应的二进制包并完成安装。
+安装脚本会自动检测系统和架构，先从 [`release-notes.md`](https://raw.githubusercontent.com/a9gent/mindfs/main/release-notes.md) 第一行读取最新版本号，再从 [GitHub Releases](https://github.com/a9gent/mindfs/releases) 下载对应的二进制包并完成安装。`make release TAG=v1.2.3` 会在 `release-notes.md` 有变更时提交并推送。
 
 **从源码编译**（需要 Go 1.22+、Node.js 20+）
 ```bash

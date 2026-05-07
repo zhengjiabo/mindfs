@@ -1,4 +1,4 @@
-.PHONY: help dev dev-backend dev-web build-web build build-android install uninstall build-all start start-server test dist-clean release tag
+.PHONY: help dev dev-backend dev-web build-web build build-android install uninstall build-all start start-server test dist-clean publish-release-notes release tag
 
 GO ?= go
 NPM ?= npm
@@ -25,7 +25,8 @@ help:
 		"  make start-server # backend entrypoint serving built static assets" \
 		"  make test         # run Go tests" \
 		"  make tag TAG=v1.2.3  # create and push a git tag" \
-		"  make release TAG=v1.2.3  # build-all then create GitHub release using release-notes/TAG.md"
+		"  make publish-release-notes TAG=v1.2.3  # commit and push release-notes.md if changed" \
+		"  make release TAG=v1.2.3  # publish notes, build-all, then create GitHub release"
 
 dev:
 	$(GO) run ./cli/cmd -addr $(ADDR) $(ROOT)
@@ -66,7 +67,7 @@ test:
 # ── Cross-platform distribution ──────────────────────────────────────────
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 DIST_DIR ?= dist
-RELEASE_NOTES_DIR ?= release-notes
+RELEASE_NOTES_FILE ?= release-notes.md
 ANDROID_RELEASE_APK ?= $(ANDROID_DIR)/app/build/outputs/apk/release/app-release.apk
 ANDROID_DIST_APK ?= $(DIST_DIR)/mindfs_$(VERSION)_android.apk
 
@@ -101,17 +102,30 @@ tag:
 	git tag $(TAG)
 	git push origin $(TAG)
 
+# Usage: make publish-release-notes TAG=v1.2.3
+publish-release-notes:
+	@test -n "$(TAG)" || (echo "Usage: make publish-release-notes TAG=v1.2.3" >&2; exit 1)
+	@test -f "$(RELEASE_NOTES_FILE)" || (echo "Error: release notes file not found: $(RELEASE_NOTES_FILE)" >&2; exit 1)
+	@version="$$(sed -nE '1s/^#[[:space:]]+MindFS[[:space:]]+(v?[0-9]+(\.[0-9]+){1,3}[^[:space:]]*).*$$/\1/p' "$(RELEASE_NOTES_FILE)")"; \
+		test "$$version" = "$(TAG)" || (echo "Error: $(RELEASE_NOTES_FILE) first line version '$$version' does not match TAG '$(TAG)'." >&2; exit 1)
+	git add "$(RELEASE_NOTES_FILE)"
+	@if git diff --cached --quiet -- "$(RELEASE_NOTES_FILE)"; then \
+		echo "No release notes changes to commit."; \
+	else \
+		git commit -m "update release notes"; \
+		git push origin main; \
+	fi
+
 # Usage: make release TAG=v1.2.3
 # Builds all platforms and creates a GitHub release with all artifacts.
-# Requires $(RELEASE_NOTES_DIR)/$(TAG).md to exist.
 release:
 	@command -v gh >/dev/null 2>&1 || (echo "Error: gh (GitHub CLI) is required. https://cli.github.com" >&2; exit 1)
 	@test -n "$(TAG)" || (echo "Usage: make release TAG=v1.2.3" >&2; exit 1)
-	@test -f "$(RELEASE_NOTES_DIR)/$(TAG).md" || (echo "Error: release notes file not found: $(RELEASE_NOTES_DIR)/$(TAG).md" >&2; exit 1)
+	$(MAKE) publish-release-notes TAG="$(TAG)"
 	$(MAKE) dist-clean
-	$(MAKE) build-all
-	$(MAKE) build-android
+	$(MAKE) build-all VERSION="$(TAG)"
+	$(MAKE) build-android VERSION="$(TAG)"
 	@echo "Creating GitHub release $(TAG)"
 	gh release create $(TAG) $(DIST_DIR)/*.tar.gz $(DIST_DIR)/*.zip $(DIST_DIR)/*.apk \
 		--title "$(TAG)" \
-		--notes-file "$(RELEASE_NOTES_DIR)/$(TAG).md"
+		--notes-file "$(RELEASE_NOTES_FILE)"

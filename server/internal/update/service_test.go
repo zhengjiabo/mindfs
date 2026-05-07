@@ -2,6 +2,32 @@ package update
 
 import "testing"
 
+func TestParseReleaseNotesVersion(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		text string
+		want string
+	}{
+		{name: "tag heading", text: "# MindFS v0.2.3\n\n## Fixes\n", want: "v0.2.3"},
+		{name: "version without prefix", text: "# MindFS 0.2.3\n", want: "0.2.3"},
+		{name: "invalid heading", text: "# Latest v0.2.3\n", want: ""},
+		{name: "empty", text: "", want: ""},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := parseReleaseNotesVersion(tt.text)
+			if got != tt.want {
+				t.Fatalf("parseReleaseNotesVersion(%q) = %q, want %q", tt.text, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIsNewerVersion(t *testing.T) {
 	t.Parallel()
 
