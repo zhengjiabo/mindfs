@@ -52,7 +52,7 @@ const (
 	e2eeProofHeaderName   = "X-MindFS-Proof"
 	e2eeTSHeaderName      = "X-MindFS-TS"
 	localCLIHeaderName    = "X-MindFS-Local-CLI"
-	fileProofMaxSkew      = 5 * time.Minute
+	requestProofMaxSkew   = 5 * time.Minute
 )
 
 func (h *HTTPHandler) service() *usecase.Service {
@@ -78,7 +78,7 @@ func (h *HTTPHandler) requireProtectedHTTPSession(r *http.Request) (*e2ee.Sessio
 	return sess, true, nil
 }
 
-func (h *HTTPHandler) requireFileProof(r *http.Request) (*e2ee.Session, error) {
+func (h *HTTPHandler) requireRequestProof(r *http.Request) (*e2ee.Session, error) {
 	manager := h.AppContext.GetE2EEManager()
 	if manager == nil || !manager.Enabled() {
 		return nil, nil
@@ -98,7 +98,7 @@ func (h *HTTPHandler) requireFileProof(r *http.Request) (*e2ee.Session, error) {
 		return nil, errInvalidRequest("invalid_e2ee_ts")
 	}
 	now := time.Now().UTC()
-	if timestamp.Before(now.Add(-fileProofMaxSkew)) || timestamp.After(now.Add(fileProofMaxSkew)) {
+	if timestamp.Before(now.Add(-requestProofMaxSkew)) || timestamp.After(now.Add(requestProofMaxSkew)) {
 		return nil, errInvalidRequest("e2ee_proof_expired")
 	}
 	expected := e2ee.BuildRequestProof(sess.Key, r.Method, requestProofPath(r), ts, clientID)
@@ -155,6 +155,11 @@ func (h *HTTPHandler) protectedEndpoint(next http.HandlerFunc) http.HandlerFunc 
 			next(w, r)
 			return
 		}
+		if err != nil {
+			respondError(w, http.StatusUnauthorized, err)
+			return
+		}
+		sess, err = h.requireRequestProof(r)
 		if err != nil {
 			respondError(w, http.StatusUnauthorized, err)
 			return
@@ -976,7 +981,7 @@ func (h *HTTPHandler) handleFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	raw := r.URL.Query().Get("raw")
-	proofSession, err := h.requireFileProof(r)
+	proofSession, err := h.requireRequestProof(r)
 	if err != nil {
 		respondError(w, http.StatusUnauthorized, err)
 		return
@@ -1086,7 +1091,7 @@ func (h *HTTPHandler) handleUpload(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, errInvalidRequest("root required"))
 		return
 	}
-	proofSession, err := h.requireFileProof(r)
+	proofSession, err := h.requireRequestProof(r)
 	if err != nil {
 		respondError(w, http.StatusUnauthorized, err)
 		return

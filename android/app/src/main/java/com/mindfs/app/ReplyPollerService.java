@@ -25,22 +25,28 @@ import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.TimeZone;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import javax.crypto.Cipher;
+import javax.crypto.Mac;
 import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 import javax.net.ssl.HostnameVerifier;
@@ -77,6 +83,8 @@ public class ReplyPollerService extends Service {
     private static final String PREF_COMPLETED_KEYS = "completed_keys";
     private static final String E2EE_HEADER = "X-MindFS-E2EE";
     private static final String CLIENT_ID_HEADER = "X-MindFS-Client-ID";
+    private static final String PROOF_HEADER = "X-MindFS-Proof";
+    private static final String TS_HEADER = "X-MindFS-TS";
     private static final String PROGRESS_CHANNEL_ID = "mindfs_reply_progress_v1";
     private static final String VISIBLE_PROGRESS_CHANNEL_ID = "mindfs_reply_progress_visible_v1";
     private static final String ALERT_CHANNEL_ID = "mindfs_reply_alert_v3";
@@ -309,6 +317,7 @@ public class ReplyPollerService extends Service {
             }
             conn.setRequestProperty(E2EE_HEADER, "1");
             conn.setRequestProperty(CLIENT_ID_HEADER, e2eeClientId);
+            addRequestProofHeaders(conn, "GET", url);
         }
         int status = conn.getResponseCode();
         InputStream stream = status >= 200 && status < 300 ? conn.getInputStream() : conn.getErrorStream();
@@ -379,6 +388,39 @@ public class ReplyPollerService extends Service {
         cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new GCMParameterSpec(128, nonce));
         byte[] plaintext = cipher.doFinal(ciphertext);
         return new String(plaintext, StandardCharsets.UTF_8);
+    }
+
+    private void addRequestProofHeaders(HttpURLConnection conn, String method, URL url) throws Exception {
+        String ts = utcTimestamp();
+        String proofPath = requestProofPath(url);
+        byte[] key = Base64.decode(e2eeTransportKey, Base64.DEFAULT);
+        String proof = buildRequestProof(key, method, proofPath, ts, e2eeClientId);
+        conn.setRequestProperty(TS_HEADER, ts);
+        conn.setRequestProperty(PROOF_HEADER, proof);
+    }
+
+    private static String utcTimestamp() {
+        SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US);
+        format.setTimeZone(TimeZone.getTimeZone("UTC"));
+        return format.format(new Date());
+    }
+
+    private static String requestProofPath(URL url) {
+        String path = safe(url == null ? "" : url.getPath());
+        if (path.isEmpty()) {
+            path = "/";
+        }
+        String query = url == null ? "" : safe(url.getQuery());
+        return query.isEmpty() ? path : path + "?" + query;
+    }
+
+    private static String buildRequestProof(byte[] key, String method, String path, String ts, String clientId) throws Exception {
+        String joined = "mindfs-request-proof\u001f" + method + "\u001f" + path + "\u001f" + ts + "\u001f" + clientId;
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        byte[] sum = digest.digest(joined.getBytes(StandardCharsets.UTF_8));
+        Mac hmac = Mac.getInstance("HmacSHA256");
+        hmac.init(new SecretKeySpec(key, "HmacSHA256"));
+        return Base64.encodeToString(hmac.doFinal(sum), Base64.NO_WRAP);
     }
 
     private static synchronized SSLSocketFactory localTrustAllSocketFactory() throws Exception {

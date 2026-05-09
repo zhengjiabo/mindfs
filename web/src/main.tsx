@@ -119,16 +119,40 @@ function isIOSWebKit(): boolean {
   );
 }
 
+let largestCapacitorViewportHeight = 0;
+
+function readRootPixelVar(name: string): number {
+  if (typeof document === "undefined") {
+    return 0;
+  }
+  const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
+}
+
 function syncViewportHeight(): void {
   if (typeof window === "undefined" || typeof document === "undefined") {
     return;
   }
 
   const visualViewport = window.visualViewport;
-  const viewportHeight = isCapacitorRuntime() || !visualViewport
+  const isNativeShell = isCapacitorRuntime();
+  const rawViewportHeight = isNativeShell || !visualViewport
     ? window.innerHeight
     : visualViewport.height;
-  const viewportOffsetTop = isCapacitorRuntime() || !visualViewport
+  let viewportHeight = rawViewportHeight;
+  if (isNativeShell) {
+    const imeBottom = readRootPixelVar("--mindfs-ime-bottom");
+    if (imeBottom > 0) {
+      largestCapacitorViewportHeight ||= rawViewportHeight;
+    } else {
+      largestCapacitorViewportHeight = rawViewportHeight;
+    }
+    const resizedBy = Math.max(0, largestCapacitorViewportHeight - rawViewportHeight);
+    const remainingImeOverlay = Math.max(0, imeBottom - resizedBy);
+    viewportHeight = Math.max(320, rawViewportHeight - remainingImeOverlay);
+  }
+  const viewportOffsetTop = isNativeShell || !visualViewport
     ? 0
     : Math.max(0, visualViewport.offsetTop || 0);
   document.documentElement.style.setProperty("--mindfs-viewport-height", `${viewportHeight}px`);
@@ -225,6 +249,7 @@ function AppRoot() {
     window.addEventListener("orientationchange", syncViewportHeight);
     window.addEventListener("focusin", syncViewportHeightAfterKeyboardChange);
     window.addEventListener("focusout", syncViewportHeightAfterKeyboardChange);
+    window.addEventListener("mindfs:safe-area-updated", syncViewportHeight as EventListener);
     window.visualViewport?.addEventListener("resize", syncViewportHeight);
     window.visualViewport?.addEventListener("scroll", syncViewportHeight);
     const uninstallIOSKeyboardPanLock = installIOSKeyboardPanLock();
@@ -235,6 +260,7 @@ function AppRoot() {
         window.removeEventListener("orientationchange", syncViewportHeight);
         window.removeEventListener("focusin", syncViewportHeightAfterKeyboardChange);
         window.removeEventListener("focusout", syncViewportHeightAfterKeyboardChange);
+        window.removeEventListener("mindfs:safe-area-updated", syncViewportHeight as EventListener);
         window.visualViewport?.removeEventListener("resize", syncViewportHeight);
         window.visualViewport?.removeEventListener("scroll", syncViewportHeight);
         uninstallIOSKeyboardPanLock();
@@ -360,7 +386,7 @@ function AppRoot() {
       }
       window.setTimeout(() => {
         try {
-          target.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
+          target.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" });
         } catch {
           target.scrollIntoView();
         }
@@ -408,6 +434,7 @@ function AppRoot() {
       window.removeEventListener("orientationchange", syncViewportHeight);
       window.removeEventListener("focusin", syncViewportHeightAfterKeyboardChange);
       window.removeEventListener("focusout", syncViewportHeightAfterKeyboardChange);
+      window.removeEventListener("mindfs:safe-area-updated", syncViewportHeight as EventListener);
       window.visualViewport?.removeEventListener("resize", syncViewportHeight);
       window.visualViewport?.removeEventListener("scroll", syncViewportHeight);
       cleanupThemeSync?.();

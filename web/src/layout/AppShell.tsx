@@ -94,7 +94,7 @@ export function AppShell({
   
   const sidebarWidth = isMobile ? "0px" : (isTablet ? "200px" : "260px");
   const rightWidth = isMobile ? "0px" : (rightSidebar ? (isTablet ? "240px" : "280px") : "0px");
-  const mobileHeight = "calc(var(--mindfs-viewport-height, 100dvh) - var(--mindfs-ime-bottom, 0px))";
+  const mobileHeight = "var(--mindfs-viewport-height, 100dvh)";
 
   const shellStyle: React.CSSProperties & {
     "--mindfs-actionbar-bottom-padding"?: string;

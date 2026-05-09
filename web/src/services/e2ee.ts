@@ -218,6 +218,17 @@ class E2EEService {
     return next;
   }
 
+  private async requestProofHeaders(session: SessionContext, method: string, input: RequestInfo | URL, headers?: HeadersInit): Promise<Headers> {
+    const ts = new Date().toISOString();
+    const requestURL = input instanceof Request ? input.url : String(input);
+    const proofPath = canonicalProofPath(requestURL);
+    const proof = await buildRequestProof(session.transportKeyBytes, method, proofPath, ts, this.clientId);
+    const next = this.sessionProtectedHeaders(headers);
+    next.set(TS_HEADER, ts);
+    next.set(PROOF_HEADER, proof);
+    return next;
+  }
+
   isProtectedJSONResponse(response: Response): boolean {
     return String(response.headers.get(E2EE_HEADER) || "").trim() === "1";
   }
@@ -238,8 +249,8 @@ class E2EEService {
       if (!session) {
         throw new Error("e2ee_required");
       }
-      const method = String(init.method || "GET").toUpperCase();
-      const headers = this.sessionProtectedHeaders(init.headers);
+      const method = String(init.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
+      const headers = await this.requestProofHeaders(session, method, input, init.headers || (input instanceof Request ? input.headers : undefined));
       const next: RequestInit = { ...init, method, headers };
       if (init.body !== undefined && init.body !== null && method !== "GET" && method !== "HEAD") {
         const plaintext = protectedBodyText(init.body);
