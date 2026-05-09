@@ -53,7 +53,21 @@ public class ReplyPollerPlugin extends Plugin {
         Intent intent = new Intent(getContext(), ReplyPollerService.class);
         intent.setAction(ReplyPollerService.ACTION_CONFIGURE);
         intent.putExtra(ReplyPollerService.EXTRA_API_BASE_URL, apiBaseUrl);
-        intent.putExtra(ReplyPollerService.EXTRA_TOKEN, call.getString("token", ""));
+        if (call.getData().has("token")) {
+            intent.putExtra(ReplyPollerService.EXTRA_TOKEN, call.getString("token", ""));
+        }
+        if (call.getData().has("e2eeRequired")) {
+            intent.putExtra(ReplyPollerService.EXTRA_E2EE_REQUIRED, call.getBoolean("e2eeRequired", false));
+        }
+        if (call.getData().has("e2eeNodeId")) {
+            intent.putExtra(ReplyPollerService.EXTRA_E2EE_NODE_ID, call.getString("e2eeNodeId", ""));
+        }
+        if (call.getData().has("e2eeClientId")) {
+            intent.putExtra(ReplyPollerService.EXTRA_E2EE_CLIENT_ID, call.getString("e2eeClientId", ""));
+        }
+        if (call.getData().has("e2eeTransportKey")) {
+            intent.putExtra(ReplyPollerService.EXTRA_E2EE_TRANSPORT_KEY, call.getString("e2eeTransportKey", ""));
+        }
         getContext().startService(intent);
         call.resolve();
     }

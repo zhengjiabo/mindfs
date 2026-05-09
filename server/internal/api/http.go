@@ -232,7 +232,7 @@ func (h *HTTPHandler) Routes() http.Handler {
 	r.Get("/api/candidates", h.protectedEndpoint(h.handleCandidates))
 	r.Post("/api/prompts", h.protectedEndpoint(h.handlePromptSave))
 	r.Get("/api/sessions", h.protectedEndpoint(h.handleSessions))
-	r.Get("/api/replying-sessions", h.handleReplyingSessions)
+	r.Get("/api/replying-sessions", h.protectedEndpoint(h.handleReplyingSessions))
 	r.Get("/api/sessions/search", h.protectedEndpoint(h.handleSessionSearch))
 	r.Get("/api/sessions/external", h.protectedEndpoint(h.handleExternalSessionsList))
 	r.Post("/api/sessions/import", h.protectedEndpoint(h.handleExternalSessionImport))

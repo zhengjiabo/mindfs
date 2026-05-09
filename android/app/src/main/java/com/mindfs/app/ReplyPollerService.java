@@ -15,6 +15,7 @@ import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.os.VibratorManager;
 import android.text.TextUtils;
+import android.util.Base64;
 import android.util.Log;
 import java.io.BufferedReader;
 import java.io.InputStream;
@@ -22,6 +23,8 @@ import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.security.SecureRandom;
+import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -35,6 +38,16 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import javax.crypto.Cipher;
+import javax.crypto.spec.GCMParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
+import javax.net.ssl.HostnameVerifier;
+import javax.net.ssl.HttpsURLConnection;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSession;
+import javax.net.ssl.SSLSocketFactory;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -46,12 +59,22 @@ public class ReplyPollerService extends Service {
     static final String ACTION_STOP = "com.mindfs.app.reply_poller.STOP";
     static final String EXTRA_API_BASE_URL = "apiBaseUrl";
     static final String EXTRA_TOKEN = "token";
+    static final String EXTRA_E2EE_REQUIRED = "e2eeRequired";
+    static final String EXTRA_E2EE_NODE_ID = "e2eeNodeId";
+    static final String EXTRA_E2EE_CLIENT_ID = "e2eeClientId";
+    static final String EXTRA_E2EE_TRANSPORT_KEY = "e2eeTransportKey";
 
     private static final String TAG = "MindFSReplyPoller";
     private static final String PREFS_NAME = "mindfs_reply_poller";
     private static final String PREF_API_BASE_URL = "api_base_url";
     private static final String PREF_TOKEN = "token";
+    private static final String PREF_E2EE_REQUIRED = "e2ee_required";
+    private static final String PREF_E2EE_NODE_ID = "e2ee_node_id";
+    private static final String PREF_E2EE_CLIENT_ID = "e2ee_client_id";
+    private static final String PREF_E2EE_TRANSPORT_KEY = "e2ee_transport_key";
     private static final String PREF_COMPLETED_KEYS = "completed_keys";
+    private static final String E2EE_HEADER = "X-MindFS-E2EE";
+    private static final String CLIENT_ID_HEADER = "X-MindFS-Client-ID";
     private static final String PROGRESS_CHANNEL_ID = "mindfs_reply_progress_v1";
     private static final String VISIBLE_PROGRESS_CHANNEL_ID = "mindfs_reply_progress_visible_v1";
     private static final String ALERT_CHANNEL_ID = "mindfs_reply_alert_v1";
@@ -69,7 +92,12 @@ public class ReplyPollerService extends Service {
     private volatile boolean running = false;
     private String apiBaseUrl = "";
     private String token = "";
+    private boolean e2eeRequired = false;
+    private String e2eeNodeId = "";
+    private String e2eeClientId = "";
+    private String e2eeTransportKey = "";
     private NotificationMode notificationMode = NotificationMode.NONE;
+    private static SSLSocketFactory localTrustAllSocketFactory;
 
     @Override
     public void onCreate() {
@@ -121,19 +149,63 @@ public class ReplyPollerService extends Service {
     }
 
     private void configure(Intent intent) {
-        apiBaseUrl = safe(intent.getStringExtra(EXTRA_API_BASE_URL)).replaceAll("/+$", "");
-        token = safe(intent.getStringExtra(EXTRA_TOKEN));
+        String nextApiBaseUrl = safe(intent.getStringExtra(EXTRA_API_BASE_URL)).replaceAll("/+$", "");
+        if (isLocalShellOrigin(nextApiBaseUrl)) {
+            Log.w(TAG, "ignore local shell apiBaseUrl=" + nextApiBaseUrl);
+            nextApiBaseUrl = apiBaseUrl;
+        }
         SharedPreferences.Editor editor = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit();
-        editor.putString(PREF_API_BASE_URL, apiBaseUrl);
-        editor.putString(PREF_TOKEN, token);
+        if (!nextApiBaseUrl.isEmpty()) {
+            apiBaseUrl = nextApiBaseUrl;
+            editor.putString(PREF_API_BASE_URL, apiBaseUrl);
+        }
+        if (intent.hasExtra(EXTRA_TOKEN)) {
+            token = safe(intent.getStringExtra(EXTRA_TOKEN));
+            editor.putString(PREF_TOKEN, token);
+        }
+        if (intent.hasExtra(EXTRA_E2EE_REQUIRED)) {
+            e2eeRequired = intent.getBooleanExtra(EXTRA_E2EE_REQUIRED, false);
+            editor.putBoolean(PREF_E2EE_REQUIRED, e2eeRequired);
+        }
+        if (intent.hasExtra(EXTRA_E2EE_NODE_ID)) {
+            e2eeNodeId = safe(intent.getStringExtra(EXTRA_E2EE_NODE_ID));
+            editor.putString(PREF_E2EE_NODE_ID, e2eeNodeId);
+        }
+        if (intent.hasExtra(EXTRA_E2EE_CLIENT_ID)) {
+            e2eeClientId = safe(intent.getStringExtra(EXTRA_E2EE_CLIENT_ID));
+            editor.putString(PREF_E2EE_CLIENT_ID, e2eeClientId);
+        }
+        if (intent.hasExtra(EXTRA_E2EE_TRANSPORT_KEY)) {
+            e2eeTransportKey = safe(intent.getStringExtra(EXTRA_E2EE_TRANSPORT_KEY));
+            editor.putString(PREF_E2EE_TRANSPORT_KEY, e2eeTransportKey);
+        }
         editor.apply();
-        Log.i(TAG, "configured apiBaseUrl=" + apiBaseUrl);
+        Log.i(TAG, "configured apiBaseUrl=" + apiBaseUrl + " e2eeRequired=" + e2eeRequired + " e2eeReady=" + hasE2EESession());
     }
 
     private void loadConfig() {
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         apiBaseUrl = safe(prefs.getString(PREF_API_BASE_URL, ""));
         token = safe(prefs.getString(PREF_TOKEN, ""));
+        e2eeRequired = prefs.getBoolean(PREF_E2EE_REQUIRED, false);
+        e2eeNodeId = safe(prefs.getString(PREF_E2EE_NODE_ID, ""));
+        e2eeClientId = safe(prefs.getString(PREF_E2EE_CLIENT_ID, ""));
+        e2eeTransportKey = safe(prefs.getString(PREF_E2EE_TRANSPORT_KEY, ""));
+    }
+
+    private boolean isLocalShellOrigin(String value) {
+        if (value == null || value.trim().isEmpty()) {
+            return false;
+        }
+        try {
+            URL url = new URL(value);
+            String protocol = safe(url.getProtocol());
+            String host = safe(url.getHost());
+            return "http".equalsIgnoreCase(protocol) &&
+                ("localhost".equalsIgnoreCase(host) || "127.0.0.1".equals(host) || "::1".equals(host));
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     private void resumePolling() {
@@ -210,6 +282,16 @@ public class ReplyPollerService extends Service {
     private Map<String, ReplyState> fetchReplyingSessions() throws Exception {
         URL url = new URL(apiBaseUrl + "/api/replying-sessions");
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        if (conn instanceof HttpsURLConnection && MainActivity.isLocalNetworkHost(url.getHost())) {
+            HttpsURLConnection https = (HttpsURLConnection) conn;
+            https.setSSLSocketFactory(localTrustAllSocketFactory());
+            https.setHostnameVerifier(new HostnameVerifier() {
+                @Override
+                public boolean verify(String hostname, SSLSession session) {
+                    return MainActivity.isLocalNetworkHost(hostname);
+                }
+            });
+        }
         conn.setRequestMethod("GET");
         conn.setConnectTimeout(5000);
         conn.setReadTimeout(8000);
@@ -217,12 +299,27 @@ public class ReplyPollerService extends Service {
         if (!token.isEmpty()) {
             conn.setRequestProperty("Authorization", "Bearer " + token);
         }
+        if (e2eeRequired) {
+            if (!hasE2EESession()) {
+                conn.disconnect();
+                throw new IllegalStateException("e2ee session missing");
+            }
+            conn.setRequestProperty(E2EE_HEADER, "1");
+            conn.setRequestProperty(CLIENT_ID_HEADER, e2eeClientId);
+        }
         int status = conn.getResponseCode();
         InputStream stream = status >= 200 && status < 300 ? conn.getInputStream() : conn.getErrorStream();
         String body = readAll(stream);
+        boolean protectedResponse = "1".equals(safe(conn.getHeaderField(E2EE_HEADER)));
         conn.disconnect();
         if (status < 200 || status >= 300) {
+            if (status == 401 && e2eeRequired) {
+                clearE2EESession();
+            }
             throw new IllegalStateException("HTTP " + status + ": " + body);
+        }
+        if (protectedResponse) {
+            body = decryptProtectedBody(body);
         }
 
         JSONObject root = new JSONObject(body);
@@ -251,6 +348,58 @@ public class ReplyPollerService extends Service {
             next.put(sessionKey, state);
         }
         return next;
+    }
+
+    private boolean hasE2EESession() {
+        return !e2eeClientId.isEmpty() && !e2eeTransportKey.isEmpty();
+    }
+
+    private void clearE2EESession() {
+        e2eeClientId = "";
+        e2eeTransportKey = "";
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .edit()
+            .remove(PREF_E2EE_CLIENT_ID)
+            .remove(PREF_E2EE_TRANSPORT_KEY)
+            .apply();
+    }
+
+    private String decryptProtectedBody(String body) throws Exception {
+        if (!hasE2EESession()) {
+            throw new IllegalStateException("e2ee session missing");
+        }
+        JSONObject envelope = new JSONObject(body);
+        byte[] key = Base64.decode(e2eeTransportKey, Base64.DEFAULT);
+        byte[] nonce = Base64.decode(envelope.optString("nonce", ""), Base64.DEFAULT);
+        byte[] ciphertext = Base64.decode(envelope.optString("ciphertext", ""), Base64.DEFAULT);
+        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+        cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new GCMParameterSpec(128, nonce));
+        byte[] plaintext = cipher.doFinal(ciphertext);
+        return new String(plaintext, StandardCharsets.UTF_8);
+    }
+
+    private static synchronized SSLSocketFactory localTrustAllSocketFactory() throws Exception {
+        if (localTrustAllSocketFactory != null) {
+            return localTrustAllSocketFactory;
+        }
+        TrustManager[] trustManagers = new TrustManager[] {
+            new X509TrustManager() {
+                @Override
+                public void checkClientTrusted(X509Certificate[] chain, String authType) {}
+
+                @Override
+                public void checkServerTrusted(X509Certificate[] chain, String authType) {}
+
+                @Override
+                public X509Certificate[] getAcceptedIssuers() {
+                    return new X509Certificate[0];
+                }
+            },
+        };
+        SSLContext context = SSLContext.getInstance("TLS");
+        context.init(null, trustManagers, new SecureRandom());
+        localTrustAllSocketFactory = context.getSocketFactory();
+        return localTrustAllSocketFactory;
     }
 
     private long applyReplyingSessions(Map<String, ReplyState> next) {

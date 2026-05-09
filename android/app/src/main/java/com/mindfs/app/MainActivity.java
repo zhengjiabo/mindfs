@@ -9,6 +9,7 @@ import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.graphics.Color;
 import android.net.Uri;
+import android.net.http.SslError;
 import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
@@ -16,6 +17,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
+import android.webkit.SslErrorHandler;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import androidx.core.app.ActivityCompat;
@@ -25,7 +27,9 @@ import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
 import androidx.core.graphics.Insets;
+import com.getcapacitor.Bridge;
 import com.getcapacitor.BridgeActivity;
+import com.getcapacitor.BridgeWebViewClient;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
@@ -41,6 +45,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(LauncherNodeSyncPlugin.class);
         registerPlugin(ReplyPollerPlugin.class);
         super.onCreate(savedInstanceState);
+        getBridge().setWebViewClient(new MindFSWebViewClient(getBridge()));
         WebView.setWebContentsDebuggingEnabled(true);
         CookieManager.getInstance().setAcceptCookie(true);
         getBridge().getWebView().getSettings().setMixedContentMode(
@@ -57,6 +62,10 @@ public class MainActivity extends BridgeActivity {
         getBridge().getWebView().addJavascriptInterface(
             new ExternalBrowserBridge(),
             "MindFSExternalBrowser"
+        );
+        getBridge().getWebView().addJavascriptInterface(
+            new ReplyPollerBridge(),
+            "MindFSReplyPoller"
         );
         clearPendingWebViewCacheIfNeeded();
         requestPostNotificationsIfNeeded();
@@ -296,6 +305,7 @@ public class MainActivity extends BridgeActivity {
             if (!fallback.isEmpty()) {
                 return fallback;
             }
+            return "";
         }
         return scheme.toLowerCase(java.util.Locale.US) + "://" + authority;
     }
@@ -349,6 +359,63 @@ public class MainActivity extends BridgeActivity {
         return scheme.toLowerCase(java.util.Locale.US) + "://" + authority;
     }
 
+    static boolean isLocalNetworkHost(String host) {
+        if (host == null) {
+            return false;
+        }
+        String normalized = host.trim().toLowerCase(java.util.Locale.US);
+        if (normalized.startsWith("[") && normalized.endsWith("]")) {
+            normalized = normalized.substring(1, normalized.length() - 1);
+        }
+        if (
+            "localhost".equals(normalized) ||
+            "127.0.0.1".equals(normalized) ||
+            "::1".equals(normalized)
+        ) {
+            return true;
+        }
+        if (
+            normalized.startsWith("10.") ||
+            normalized.startsWith("192.168.") ||
+            normalized.startsWith("169.254.") ||
+            normalized.startsWith("fc") ||
+            normalized.startsWith("fd") ||
+            normalized.startsWith("fe80:")
+        ) {
+            return true;
+        }
+        String[] parts = normalized.split("\\.");
+        if (parts.length == 4) {
+            try {
+                int first = Integer.parseInt(parts[0]);
+                int second = Integer.parseInt(parts[1]);
+                return first == 172 && second >= 16 && second <= 31;
+            } catch (NumberFormatException ignored) {
+                return false;
+            }
+        }
+        return normalized.endsWith(".local");
+    }
+
+    private static class MindFSWebViewClient extends BridgeWebViewClient {
+        MindFSWebViewClient(Bridge bridge) {
+            super(bridge);
+        }
+
+        @Override
+        public void onReceivedSslError(WebView view, SslErrorHandler handler, SslError error) {
+            String host = "";
+            if (error != null && error.getUrl() != null) {
+                host = Uri.parse(error.getUrl()).getHost();
+            }
+            if (MainActivity.isLocalNetworkHost(host)) {
+                handler.proceed();
+                return;
+            }
+            super.onReceivedSslError(view, handler, error);
+        }
+    }
+
     private void requestPostNotificationsIfNeeded() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
             return;
@@ -396,6 +463,32 @@ public class MainActivity extends BridgeActivity {
             } catch (Exception ex) {
                 Log.w(TAG, "Failed to open external URL: " + rawURL, ex);
                 return "Failed to open external URL: " + ex.getMessage();
+            }
+        }
+    }
+
+    private class ReplyPollerBridge {
+        @JavascriptInterface
+        public void configure(String rawJSON) {
+            try {
+                JSONObject payload = new JSONObject(rawJSON == null ? "{}" : rawJSON);
+                String apiBaseUrl = payload.optString("apiBaseUrl", "").trim();
+                if (apiBaseUrl.isEmpty()) {
+                    return;
+                }
+                Intent intent = new Intent(MainActivity.this, ReplyPollerService.class);
+                intent.setAction(ReplyPollerService.ACTION_CONFIGURE);
+                intent.putExtra(ReplyPollerService.EXTRA_API_BASE_URL, apiBaseUrl);
+                if (payload.has("token")) {
+                    intent.putExtra(ReplyPollerService.EXTRA_TOKEN, payload.optString("token", ""));
+                }
+                intent.putExtra(ReplyPollerService.EXTRA_E2EE_REQUIRED, payload.optBoolean("e2eeRequired", false));
+                intent.putExtra(ReplyPollerService.EXTRA_E2EE_NODE_ID, payload.optString("e2eeNodeId", ""));
+                intent.putExtra(ReplyPollerService.EXTRA_E2EE_CLIENT_ID, payload.optString("e2eeClientId", ""));
+                intent.putExtra(ReplyPollerService.EXTRA_E2EE_TRANSPORT_KEY, payload.optString("e2eeTransportKey", ""));
+                startService(intent);
+            } catch (Exception ex) {
+                Log.w(TAG, "failed to configure reply poller from JS bridge", ex);
             }
         }
     }

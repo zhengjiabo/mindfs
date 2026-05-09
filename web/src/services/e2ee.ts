@@ -33,6 +33,13 @@ type SessionContext = {
   transportKeyBytes: Uint8Array;
 };
 
+export type NativeE2EESession = {
+  required: boolean;
+  nodeId: string;
+  clientId: string;
+  transportKey: string;
+};
+
 class E2EEService {
   private configured = false;
   private required = false;
@@ -268,6 +275,15 @@ class E2EEService {
 
   currentClientId(): string {
     return this.clientId;
+  }
+
+  nativeSession(): NativeE2EESession {
+    return {
+      required: this.required,
+      nodeId: this.nodeId,
+      clientId: this.required && this.session ? this.clientId : "",
+      transportKey: this.required && this.session ? encodeBase64(this.session.transportKeyBytes) : "",
+    };
   }
 
   handleServerError(code: string): boolean {

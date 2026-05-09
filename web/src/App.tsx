@@ -24,6 +24,7 @@ import {
   type BootstrapState,
   type RelayStatusPayload,
 } from "./services/bootstrap";
+import { syncNativeReplyPollerE2EE } from "./services/replyPoller";
 import {
   ProtectedAPIError,
   protectedJSON as apiProtectedJSON,
@@ -5761,6 +5762,12 @@ export function App({ onGoHome }: AppProps) {
       setE2eeState(state);
     });
   }, []);
+
+  useEffect(() => {
+    void syncNativeReplyPollerE2EE().catch((err) => {
+      console.warn("[ReplyPoller] Failed to sync E2EE state:", err);
+    });
+  }, [e2eeState.nodeId, e2eeState.required, e2eeState.unlocked]);
 
   useEffect(() => {
     if (!e2eeState.required) {
