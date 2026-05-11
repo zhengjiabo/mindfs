@@ -230,7 +230,12 @@ func (s *Service) runUpdate(ctx context.Context, version string) {
 		s.fail(err)
 		return
 	}
-	defer os.RemoveAll(tmpDir)
+	cleanupTmpDir := true
+	defer func() {
+		if cleanupTmpDir {
+			_ = os.RemoveAll(tmpDir)
+		}
+	}()
 
 	archivePath := filepath.Join(tmpDir, asset.Name)
 	if err := s.downloadFile(ctx, asset.BrowserDownloadURL, archivePath); err != nil {
@@ -264,7 +269,9 @@ func (s *Service) runUpdate(ctx context.Context, version string) {
 		})
 		if err := s.restartInstalledBinary(pkgDir); err != nil {
 			s.fail(err)
+			return
 		}
+		cleanupTmpDir = false
 		return
 	}
 	if err := s.installPackage(pkgDir); err != nil {

@@ -18,9 +18,11 @@ func startReplacementProcess(currentPID int, exe string, args []string, stdout, 
 	}
 
 	script := strings.Join([]string{
+		"$ErrorActionPreference = 'Stop'",
 		"$pidToWait = " + strconv.Itoa(currentPID),
 		"$exe = " + psQuote(exe),
 		"$pkgDir = " + psQuote(pkgDir),
+		"$cleanupDir = Split-Path -Parent (Split-Path -Parent $pkgDir)",
 		"$prefix = " + psQuote(prefix),
 		"$argList = @(" + strings.Join(quotedArgs, ", ") + ")",
 		"for ($i = 0; $i -lt 100; $i++) {",
@@ -44,6 +46,7 @@ func startReplacementProcess(currentPID int, exe string, args []string, stdout, 
 		"}",
 		"$env:MINDFS_INTERNAL_RESTART = '1'",
 		"Start-Process -FilePath $exe -ArgumentList $argList -WindowStyle Hidden",
+		"if ($cleanupDir -and (Test-Path $cleanupDir)) { Remove-Item -Recurse -Force $cleanupDir -ErrorAction SilentlyContinue }",
 	}, "; ")
 
 	cmd := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script)

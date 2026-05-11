@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -54,6 +55,8 @@ const (
 	localCLIHeaderName    = "X-MindFS-Local-CLI"
 	requestProofMaxSkew   = 5 * time.Minute
 )
+
+var indexResourceRefPattern = regexp.MustCompile(`(?i)\b(?:src|href)\s*=\s*["']([^"']+)["']`)
 
 func (h *HTTPHandler) service() *usecase.Service {
 	return &usecase.Service{Registry: h.AppContext}
@@ -847,6 +850,10 @@ func (h *HTTPHandler) serveStaticAsset(w http.ResponseWriter, r *http.Request) b
 	info, statErr := os.Stat(assetPath)
 	if statErr == nil && !info.IsDir() {
 		applyStaticCacheHeaders(w, cleanPath)
+		if cleanPath == "index.html" {
+			h.serveFrontendIndex(w, r, staticDir, assetPath)
+			return true
+		}
 		if isRelayedRequest(r) && shouldRewriteRelayedStaticAsset(cleanPath) {
 			serveRewrittenStaticAsset(w, r, assetPath)
 			return true
@@ -863,11 +870,72 @@ func (h *HTTPHandler) serveStaticAsset(w http.ResponseWriter, r *http.Request) b
 	indexPath := filepath.Join(staticDir, "index.html")
 	if info, err := os.Stat(indexPath); err == nil && !info.IsDir() {
 		applyStaticCacheHeaders(w, "index.html")
-		http.ServeFile(w, r, indexPath)
+		h.serveFrontendIndex(w, r, staticDir, indexPath)
 		return true
 	}
 
 	return false
+}
+
+func (h *HTTPHandler) serveFrontendIndex(w http.ResponseWriter, r *http.Request, staticDir, indexPath string) {
+	content, err := os.ReadFile(indexPath)
+	if err != nil {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte(renderFallbackFrontend(indexHTML, frontendAssetMissingNotice(r.URL.Path))))
+		return
+	}
+	if missing := missingFrontendIndexResource(staticDir, content); missing != "" {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte(renderFallbackFrontend(indexHTML, frontendAssetMissingNotice(missing))))
+		return
+	}
+	if isRelayedRequest(r) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte(rewriteRelayedFrontendContent(string(content))))
+		return
+	}
+	http.ServeFile(w, r, indexPath)
+}
+
+func missingFrontendIndexResource(staticDir string, indexContent []byte) string {
+	matches := indexResourceRefPattern.FindAllSubmatch(indexContent, -1)
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		cleanPath := cleanFrontendResourcePath(string(match[1]))
+		if cleanPath == "" {
+			continue
+		}
+		info, err := os.Stat(filepath.Join(staticDir, cleanPath))
+		if err != nil || info.IsDir() {
+			return "/" + filepath.ToSlash(cleanPath)
+		}
+	}
+	return ""
+}
+
+func cleanFrontendResourcePath(raw string) string {
+	value := strings.TrimSpace(raw)
+	if value == "" || strings.HasPrefix(value, "#") {
+		return ""
+	}
+	lower := strings.ToLower(value)
+	for _, prefix := range []string{"http://", "https://", "data:", "blob:", "mailto:", "tel:"} {
+		if strings.HasPrefix(lower, prefix) {
+			return ""
+		}
+	}
+	if idx := strings.IndexAny(value, "?#"); idx >= 0 {
+		value = value[:idx]
+	}
+	value = strings.TrimPrefix(value, "./")
+	value = strings.TrimPrefix(value, "/")
+	value = filepath.Clean(value)
+	if value == "." || strings.HasPrefix(value, ".."+string(filepath.Separator)) || value == ".." || filepath.IsAbs(value) {
+		return ""
+	}
+	return value
 }
 
 func frontendAssetMissingNotice(requestPath string) string {

@@ -6,6 +6,99 @@ import { registerServiceWorker } from "./registerServiceWorker";
 import { isCapacitorRuntime } from "./services/runtime";
 import { Login } from "./components/Login";
 
+function readableAssetPath(raw: string): string {
+  const value = String(raw || "").trim();
+  if (!value) {
+    return "unknown resource";
+  }
+  try {
+    const url = new URL(value, window.location.href);
+    return `${url.pathname}${url.search}`;
+  } catch {
+    return value;
+  }
+}
+
+function showFrontendAssetMissingNotice(rawPath: string): void {
+  if (typeof document === "undefined") {
+    return;
+  }
+  const path = readableAssetPath(rawPath);
+  const id = "mindfs-asset-missing-notice";
+  const existing = document.getElementById(id);
+  if (existing) {
+    const message = existing.querySelector("[data-message]");
+    if (message) {
+      message.textContent = `前端资源缺失或无法加载：${path}`;
+    }
+    return;
+  }
+
+  const notice = document.createElement("div");
+  notice.id = id;
+  notice.setAttribute("role", "alert");
+  notice.style.position = "fixed";
+  notice.style.left = "12px";
+  notice.style.right = "12px";
+  notice.style.top = "12px";
+  notice.style.zIndex = "2147483647";
+  notice.style.display = "flex";
+  notice.style.alignItems = "center";
+  notice.style.justifyContent = "space-between";
+  notice.style.gap = "12px";
+  notice.style.padding = "10px 12px";
+  notice.style.border = "1px solid rgba(185, 28, 28, 0.35)";
+  notice.style.borderRadius = "8px";
+  notice.style.background = "#fff5f5";
+  notice.style.color = "#7f1d1d";
+  notice.style.boxShadow = "0 10px 30px rgba(15, 23, 42, 0.18)";
+  notice.style.fontFamily = "system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif";
+  notice.style.fontSize = "13px";
+  notice.style.lineHeight = "1.4";
+
+  const message = document.createElement("div");
+  message.dataset.message = "1";
+  message.style.minWidth = "0";
+  message.style.overflowWrap = "anywhere";
+  message.textContent = `前端资源缺失或无法加载：${path}`;
+
+  const reload = document.createElement("button");
+  reload.type = "button";
+  reload.textContent = "刷新";
+  reload.style.border = "1px solid rgba(127, 29, 29, 0.3)";
+  reload.style.borderRadius = "6px";
+  reload.style.background = "#ffffff";
+  reload.style.color = "#7f1d1d";
+  reload.style.padding = "5px 9px";
+  reload.style.cursor = "pointer";
+  reload.style.flex = "0 0 auto";
+  reload.onclick = () => window.location.reload();
+
+  notice.append(message, reload);
+  document.body.appendChild(notice);
+}
+
+function resourceURLFromEventTarget(target: EventTarget | null): string {
+  if (!(target instanceof HTMLElement)) {
+    return "";
+  }
+  const value =
+    target.getAttribute("src") ||
+    target.getAttribute("href") ||
+    target.getAttribute("poster") ||
+    "";
+  return value;
+}
+
+function dynamicImportFailureURL(reason: unknown): string {
+  const message = reason instanceof Error ? reason.message : String(reason || "");
+  if (!/dynamically imported module|module script|loading chunk|import/i.test(message)) {
+    return "";
+  }
+  const match = message.match(/https?:\/\/[^\s"'<>]+|\/[^\s"'<>]+\.js(?:\?[^\s"'<>]+)?/);
+  return match?.[0] || "dynamic module";
+}
+
 function isLocalCapacitorShell(): boolean {
   if (!isCapacitorRuntime() || typeof window === "undefined") {
     return false;
@@ -461,6 +554,10 @@ registerServiceWorker();
 
 if (typeof window !== "undefined") {
   window.addEventListener("error", (event) => {
+    const resourceURL = resourceURLFromEventTarget(event.target);
+    if (resourceURL) {
+      showFrontendAssetMissingNotice(resourceURL);
+    }
     console.error("[global-error]", {
       message: event.message,
       filename: event.filename,
@@ -472,10 +569,14 @@ if (typeof window !== "undefined") {
         stack: event.error.stack,
       } : event.error,
     });
-  });
+  }, true);
 
   window.addEventListener("unhandledrejection", (event) => {
     const reason = event.reason;
+    const resourceURL = dynamicImportFailureURL(reason);
+    if (resourceURL) {
+      showFrontendAssetMissingNotice(resourceURL);
+    }
     console.error("[unhandled-rejection]", reason instanceof Error ? {
       name: reason.name,
       message: reason.message,
