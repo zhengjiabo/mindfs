@@ -2003,21 +2003,67 @@ export function App({ onGoHome }: AppProps) {
     [rootSessionKey, setBoundSessionForRoot, setDrawerSessionForRoot, bumpCacheVersion],
   );
 
-  const resolveAgentForSession = useCallback(
-    (rootID: string, sessionKey: string, fallbackAgent?: string): string => {
-      if (fallbackAgent) return fallbackAgent;
+  const resolveRuntimeMetaForSession = useCallback(
+    (
+      rootID: string,
+      sessionKey: string,
+      fallback?: {
+        agent?: string;
+        model?: string;
+        mode?: string;
+        effort?: string;
+        fast_service?: "" | "on" | "off";
+      },
+    ) => {
       const cacheKey = rootSessionKey(rootID, sessionKey);
-      const cached = sessionCacheRef.current[cacheKey] as any;
-      if (cached?.agent) return cached.agent;
-      const current = currentSessionRef.current as any;
-      if (current?.key === sessionKey && current?.agent) return current.agent;
-      const selected = selectedSessionRef.current as any;
-      if (
-        (selected?.key || selected?.session_key) === sessionKey &&
-        selected?.agent
-      )
-        return selected.agent;
-      return "";
+      const candidates = [
+        fallback,
+        sessionCacheRef.current[cacheKey] as any,
+        currentSessionRef.current?.key === sessionKey
+          ? (currentSessionRef.current as any)
+          : null,
+        (selectedSessionRef.current?.key ||
+          selectedSessionRef.current?.session_key) === sessionKey
+          ? (selectedSessionRef.current as any)
+          : null,
+      ];
+      const cachedSession = sessionCacheRef.current[cacheKey] as any;
+      const exchanges = Array.isArray(cachedSession?.exchanges)
+        ? ((cachedSession.exchanges || []) as Exchange[])
+        : [];
+      const latestMatchingExchange = [...exchanges]
+        .reverse()
+        .find(
+          (item) =>
+            item?.agent ||
+            item?.model ||
+            item?.mode ||
+            item?.effort ||
+            item?.fast_service,
+        );
+      candidates.push(latestMatchingExchange as any);
+
+      const pickText = (field: "agent" | "model" | "mode" | "effort") => {
+        for (const item of candidates) {
+          const value = `${item?.[field] || ""}`.trim();
+          if (value) return value;
+        }
+        return "";
+      };
+      const pickFastService = (): "" | "on" | "off" => {
+        for (const item of candidates) {
+          const value = normalizeFastService(item?.fast_service);
+          if (value) return value;
+        }
+        return "";
+      };
+      return {
+        agent: pickText("agent"),
+        model: pickText("model"),
+        mode: pickText("mode"),
+        effort: pickText("effort"),
+        fast_service: pickFastService(),
+      };
     },
     [rootSessionKey],
   );
@@ -2027,15 +2073,21 @@ export function App({ onGoHome }: AppProps) {
       rootID: string,
       sessionKey: string,
       content: string,
-      agentHint?: string,
+      runtimeHint?: {
+        agent?: string;
+        model?: string;
+        mode?: string;
+        effort?: string;
+        fast_service?: "" | "on" | "off";
+      },
     ) => {
       if (!content) return;
       const now = new Date().toISOString();
       const cacheKey = rootSessionKey(rootID, sessionKey);
-      const resolvedAgent = resolveAgentForSession(
+      const runtimeMeta = resolveRuntimeMetaForSession(
         rootID,
         sessionKey,
-        agentHint,
+        runtimeHint,
       );
       const updateList = (prevList: Exchange[]) => {
         const list = [...(prevList || [])];
@@ -2043,7 +2095,11 @@ export function App({ onGoHome }: AppProps) {
         if (last && (last.role === "agent" || last.role === "assistant")) {
           list[list.length - 1] = {
             ...last,
-            agent: last.agent || resolvedAgent,
+            agent: last.agent || runtimeMeta.agent,
+            model: last.model || runtimeMeta.model,
+            mode: last.mode || runtimeMeta.mode,
+            effort: last.effort || runtimeMeta.effort,
+            fast_service: last.fast_service || runtimeMeta.fast_service,
             content: `${last.content || ""}${content}`,
             timestamp: now,
           };
@@ -2051,7 +2107,11 @@ export function App({ onGoHome }: AppProps) {
         }
         list.push({
           role: "agent",
-          agent: resolvedAgent,
+          agent: runtimeMeta.agent,
+          model: runtimeMeta.model,
+          mode: runtimeMeta.mode,
+          effort: runtimeMeta.effort,
+          fast_service: runtimeMeta.fast_service,
           content,
           timestamp: now,
         });
@@ -2063,7 +2123,11 @@ export function App({ onGoHome }: AppProps) {
         ({
           key: sessionKey,
           type: "chat",
-          agent: resolvedAgent,
+          agent: runtimeMeta.agent,
+          model: runtimeMeta.model,
+          mode: runtimeMeta.mode,
+          effort: runtimeMeta.effort,
+          fast_service: runtimeMeta.fast_service,
           name: "",
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
@@ -2074,13 +2138,17 @@ export function App({ onGoHome }: AppProps) {
       );
       sessionCacheRef.current[cacheKey] = {
         ...(base as any),
-        agent: (base as any).agent || resolvedAgent,
+        agent: (base as any).agent || runtimeMeta.agent,
+        model: (base as any).model || runtimeMeta.model,
+        mode: (base as any).mode || runtimeMeta.mode,
+        effort: (base as any).effort || runtimeMeta.effort,
+        fast_service: (base as any).fast_service || runtimeMeta.fast_service,
         exchanges: nextList,
         updated_at: new Date().toISOString(),
       } as Session;
       bumpCacheVersion();
     },
-    [rootSessionKey, resolveAgentForSession, bumpCacheVersion],
+    [rootSessionKey, resolveRuntimeMetaForSession, bumpCacheVersion],
   );
 
   const appendThoughtChunkForSession = useCallback(
@@ -5392,7 +5460,15 @@ export function App({ onGoHome }: AppProps) {
             activeRoot,
             streamKey,
             event.data?.content || "",
-            pending?.agent,
+            pending
+              ? {
+                  agent: pending.agent,
+                  model: pending.model,
+                  mode: pending.agentMode,
+                  effort: pending.effort,
+                  fast_service: pending.fastService || "",
+                }
+              : undefined,
           );
           updateDrawerIfShowingStream();
           break;
