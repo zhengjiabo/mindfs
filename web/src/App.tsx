@@ -314,6 +314,15 @@ type LocalDirsPayload = {
   parent?: string;
   items?: LocalDirItemPayload[];
 };
+
+function managedDirAddErrorMessage(error: unknown, fallback: string): string {
+  const message = error instanceof Error ? error.message : String(error || "");
+  if (message.includes("root name already exists")) {
+    return "已有同名项目目录，请先重命名后再加入。";
+  }
+  return message || fallback;
+}
+
 const RELAY_LAST_NODE_ID_STORAGE_KEY = "mindfs.relay.last_node_id";
 const PLUGIN_QUERY_STORAGE_PREFIX = "vp-progress:";
 const TREE_SORT_STORAGE_KEY = "mindfs-tree-sort-mode";
@@ -4500,7 +4509,7 @@ export function App({ onGoHome }: AppProps) {
     } catch (error) {
       reportError(
         "git.worktree_switch_failed",
-        String((error as Error)?.message || "切换 worktree 失败"),
+        managedDirAddErrorMessage(error, "切换 worktree 失败"),
       );
     } finally {
       setSwitchingWorktreePath("");
@@ -4738,7 +4747,7 @@ export function App({ onGoHome }: AppProps) {
     } catch (err) {
       reportError(
         "root.create_failed",
-        String((err as Error)?.message || "新建项目失败"),
+        managedDirAddErrorMessage(err, "新建项目失败"),
       );
     } finally {
       setCreatingRootBusy(false);
@@ -4826,7 +4835,7 @@ export function App({ onGoHome }: AppProps) {
       setLocalDirState((prev) => ({
         ...prev,
         adding: false,
-        error: error instanceof Error ? error.message : "添加目录失败",
+        error: managedDirAddErrorMessage(error, "添加目录失败"),
       }));
     }
   }, [handleCreateRootStart, handleCreateWorktreeStart, loadLocalDirs, localDirState.adding, localDirState.path, localDirState.selectedPath, projectAddMode, refreshManagedRoots]);

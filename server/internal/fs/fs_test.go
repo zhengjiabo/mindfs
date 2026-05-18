@@ -1,12 +1,42 @@
 package fs
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"golang.org/x/text/encoding/simplifiedchinese"
 )
+
+func TestRegistryUpsertRejectsSameNameDifferentPath(t *testing.T) {
+	registry := NewRegistry(filepath.Join(t.TempDir(), "registry.json"))
+	first := filepath.Join(t.TempDir(), "project")
+	second := filepath.Join(t.TempDir(), "project")
+	if err := os.Mkdir(first, 0o755); err != nil {
+		t.Fatalf("Mkdir first returned error: %v", err)
+	}
+	if err := os.Mkdir(second, 0o755); err != nil {
+		t.Fatalf("Mkdir second returned error: %v", err)
+	}
+
+	created, err := registry.Upsert(first)
+	if err != nil {
+		t.Fatalf("first Upsert returned error: %v", err)
+	}
+	again, err := registry.Upsert(first)
+	if err != nil {
+		t.Fatalf("same-path Upsert returned error: %v", err)
+	}
+	if again.RootPath != created.RootPath {
+		t.Fatalf("same-path Upsert RootPath = %q, want %q", again.RootPath, created.RootPath)
+	}
+
+	_, err = registry.Upsert(second)
+	if !errors.Is(err, ErrRootNameConflict) {
+		t.Fatalf("different-path Upsert error = %v, want ErrRootNameConflict", err)
+	}
+}
 
 func TestRootInfoNormalizePathAcceptsAbsolutePathWithoutLeadingSlash(t *testing.T) {
 	root := NewRootInfo("mindfs", "mindfs", "/Users/bixin/project/mindfs")

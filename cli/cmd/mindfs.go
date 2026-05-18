@@ -556,7 +556,7 @@ func addManagedDir(addr string, useTLS bool, path string) (managedDirResponse, e
 		return out, nil
 	}
 	message := httpErrorMessage(resp)
-	return managedDirResponse{}, fmt.Errorf("failed to add managed directory: %s", message)
+	return managedDirResponse{}, fmt.Errorf("failed to add managed directory:\n%s", message)
 }
 
 func removeManagedDir(addr string, useTLS bool, path string) error {

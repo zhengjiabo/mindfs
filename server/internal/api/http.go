@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	htmpl "html/template"
 	"io"
@@ -1518,7 +1519,11 @@ func (h *HTTPHandler) handleAddDir(w http.ResponseWriter, r *http.Request) {
 	uc := h.service()
 	out, err := uc.AddManagedDir(r.Context(), usecase.AddManagedDirInput{Path: req.Path, Create: req.Create})
 	if err != nil {
-		respondError(w, http.StatusBadRequest, err)
+		status := http.StatusBadRequest
+		if errors.Is(err, fs.ErrRootNameConflict) {
+			status = http.StatusConflict
+		}
+		respondError(w, status, err)
 		return
 	}
 	if h.AppContext != nil {
