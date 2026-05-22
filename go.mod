@@ -11,6 +11,7 @@ require (
 	github.com/hashicorp/yamux v0.1.2
 	github.com/roasbeef/claude-agent-sdk-go v0.0.0-20260423113330-380f586b1dc2
 	golang.org/x/crypto v0.50.0
+	golang.org/x/sys v0.43.0
 	golang.org/x/text v0.36.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.34.5
@@ -23,7 +24,6 @@ require (
 	github.com/ncruces/go-strftime v0.1.9 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	golang.org/x/net v0.52.0 // indirect
-	golang.org/x/sys v0.43.0 // indirect
 	modernc.org/libc v1.55.3 // indirect
 	modernc.org/mathutil v1.6.0 // indirect
 	modernc.org/memory v1.8.0 // indirect
@@ -31,4 +31,4 @@ require (
 
 replace github.com/fanwenlin/codex-go-sdk => github.com/yandc/codex-go-sdk v0.0.0-20260518073759-7bc2e8d2227f
 
-replace github.com/roasbeef/claude-agent-sdk-go => github.com/yandc/claude-agent-sdk-go v0.0.0-20260423113330-380f586b1dc2
+replace github.com/roasbeef/claude-agent-sdk-go => github.com/yandc/claude-agent-sdk-go v0.0.0-20260522150919-fb65168f43b8
