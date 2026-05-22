@@ -1665,8 +1665,28 @@ export function FileTree({
           </div>
         ) : null}
       </div>
-      <div style={{ padding: "8px", flex: 1, minHeight: 0, overflow: "auto" }}>
-        {renderEntries(entries, 0, rootId || "")}
+      <div style={{ padding: "8px", flex: 1, minHeight: 0, overflow: "auto", display: "flex", flexDirection: "column" }}>
+        {entries.length === 0 && creatingRootName === null ? (
+          <div
+            style={{
+              flex: 1,
+              minHeight: 0,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              padding: "20px",
+              textAlign: "center",
+              color: "var(--text-secondary)",
+              fontSize: "13px",
+              fontWeight: 800,
+              lineHeight: 1.5,
+            }}
+          >
+            通过上面菜单中的添加项目，添加一个项目开始 vibe 吧
+          </div>
+        ) : (
+          renderEntries(entries, 0, rootId || "")
+        )}
       </div>
       <div
         style={{
