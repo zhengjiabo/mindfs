@@ -1040,6 +1040,7 @@ export function App({ onGoHome }: AppProps) {
   const [sessionListMode, setSessionListMode] = useState<"local" | "import">(
     "local",
   );
+  const sessionListModeRef = useRef<"local" | "import">("local");
   const [externalSessions, setExternalSessions] = useState<SessionItem[]>([]);
   const externalSessionsRef = useRef<SessionItem[]>([]);
   const [hasMoreExternalSessions, setHasMoreExternalSessions] = useState(false);
@@ -1048,6 +1049,7 @@ export function App({ onGoHome }: AppProps) {
   const [loadingExternalSessions, setLoadingExternalSessions] = useState(false);
   const [externalSelectedKey, setExternalSelectedKey] = useState("");
   const [externalImportAgent, setExternalImportAgent] = useState("");
+  const externalImportAgentRef = useRef("");
   const [externalFilterBound, setExternalFilterBound] = useState(true);
   const [selectedExternalImportKeys, setSelectedExternalImportKeys] = useState<
     Set<string>
@@ -1438,6 +1440,7 @@ export function App({ onGoHome }: AppProps) {
     sessionsRef.current = sessions;
   }, [sessions]);
   useEffect(() => {
+    sessionListModeRef.current = sessionListMode;
     if (sessionListMode !== "local") {
       setSessionSearchOpen(false);
       setSessionSearchResultsMode(false);
@@ -1457,6 +1460,9 @@ export function App({ onGoHome }: AppProps) {
   useEffect(() => {
     externalSessionsRef.current = externalSessions;
   }, [externalSessions]);
+  useEffect(() => {
+    externalImportAgentRef.current = externalImportAgent;
+  }, [externalImportAgent]);
   useEffect(() => {
     currentSessionRef.current = currentSession;
   }, [currentSession]);
@@ -3685,6 +3691,8 @@ export function App({ onGoHome }: AppProps) {
         reportError("session.import_failed", "导入会话失败");
         return;
       }
+      setConfirmingExternalImport(false);
+      setImportingExternalSessionKeys(new Set());
       const failedKeys = new Set(
         results
           .filter((item) => !item.success)
@@ -6363,11 +6371,45 @@ export function App({ onGoHome }: AppProps) {
         case "session.imported": {
           const rootID =
             typeof payload?.root_id === "string" ? payload.root_id : "";
+          const agentName =
+            typeof payload?.agent === "string" ? payload.agent : "";
+          const agentSessionID =
+            typeof payload?.agent_session_id === "string"
+              ? payload.agent_session_id.trim()
+              : "";
           if (!rootID) {
             break;
           }
           if (rootID === currentRootIdRef.current) {
             void loadSessionsForRoot(rootID, { replace: true });
+            if (
+              sessionListModeRef.current === "import" &&
+              agentSessionID &&
+              (!agentName || agentName === externalImportAgentRef.current)
+            ) {
+              setImportingExternalSessionKeys((current) => {
+                if (!current.has(agentSessionID)) {
+                  return current;
+                }
+                const next = new Set(current);
+                next.delete(agentSessionID);
+                return next;
+              });
+              setSelectedExternalImportKeys((current) => {
+                if (!current.has(agentSessionID)) {
+                  return current;
+                }
+                const next = new Set(current);
+                next.delete(agentSessionID);
+                return next;
+              });
+              setConfirmingExternalImport(false);
+              if (externalImportAgentRef.current) {
+                void loadExternalSessions(rootID, externalImportAgentRef.current, {
+                  replace: true,
+                });
+              }
+            }
           }
           break;
         }
@@ -6767,6 +6809,7 @@ export function App({ onGoHome }: AppProps) {
     };
   }, [
     currentRootId,
+    loadExternalSessions,
     loadSessionsForRoot,
     rootSessionKey,
     resolveRootForSessionKey,
