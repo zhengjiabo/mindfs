@@ -905,7 +905,7 @@ export function ScheduledAgentTaskDialog({
         className="scheduled-agent-task-dialog"
         role="dialog"
         aria-modal="true"
-        aria-label="定时 Agent"
+        aria-label="定时任务"
         onMouseDown={(event) => event.stopPropagation()}
         style={{
           width: "min(760px, 100%)",
@@ -952,7 +952,7 @@ export function ScheduledAgentTaskDialog({
         >
           <div style={{ fontSize: 15, fontWeight: 700 }}>
             {view === "list"
-              ? "定时 Agent"
+              ? "定时任务"
               : view === "create"
                 ? "新建定时任务"
                 : "编辑定时任务"}
