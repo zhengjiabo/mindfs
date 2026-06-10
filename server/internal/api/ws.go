@@ -550,6 +550,9 @@ func (h *WSHandler) handleSessionMessage(ctx context.Context, conn *websocket.Co
 		log.Printf("[ws] session.queue.enqueue root=%s session=%s request=%s queue=%d", rootID, key, requestID, len(queue))
 		return
 	}
+	if queue, changed := streamHub.UnfreezeQueuedSessionMessages(key); changed {
+		streamHub.BroadcastSessionQueueUpdated(rootID, key, queue)
+	}
 	h.runSessionMessage(job)
 }
 
@@ -682,11 +685,20 @@ func (h *WSHandler) handleSessionCancel(ctx context.Context, conn *websocket.Con
 	}
 	log.Printf("[ws] session.cancel root=%s session=%s request=%s", rootID, key, req.ID)
 
+	streamHub := h.AppContext.GetSessionStreamHub()
+	if queue, ok := streamHub.FreezeQueuedSessionMessages(key); ok {
+		log.Printf("[ws] session.queue.freeze root=%s session=%s request=%s", rootID, key, req.ID)
+		streamHub.BroadcastSessionQueueUpdated(rootID, key, queue)
+	}
+
 	uc := &usecase.Service{Registry: h.AppContext}
 	if err := uc.CancelSessionTurn(ctx, usecase.CancelSessionTurnInput{
 		RootID: rootID,
 		Key:    key,
 	}); err != nil {
+		if queue, changed := streamHub.UnfreezeQueuedSessionMessages(key); changed {
+			streamHub.BroadcastSessionQueueUpdated(rootID, key, queue)
+		}
 		log.Printf("[ws] session.cancel.error root=%s session=%s request=%s err=%v", rootID, key, req.ID, err)
 		h.sendWSError(conn, clientID, req.ID, "session.cancel_failed", err.Error())
 		return

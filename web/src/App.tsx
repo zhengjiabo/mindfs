@@ -995,6 +995,7 @@ export function App({ onGoHome }: AppProps) {
   const pendingBySessionRef = useRef<Record<string, PendingSend>>({});
   const pendingRequestRef = useRef<Record<string, PendingSend>>({});
   const queuedMessagesBySessionRef = useRef<Record<string, SessionQueueItem[]>>({});
+  const queueFrozenBySessionRef = useRef<Record<string, boolean>>({});
   const optimisticDequeuedIdsRef = useRef<Record<string, Set<string>>>({});
   const cancelRequestedBySessionRef = useRef<Record<string, boolean>>({});
   const sessionCacheRef = useRef<Record<string, Session>>({});
@@ -1842,14 +1843,28 @@ export function App({ onGoHome }: AppProps) {
       if (!resolvedRoot || !resolvedKey) {
         return;
       }
+      const clearPendingAck = <T,>(session: T): T => {
+        const exchanges = (session as any)?.exchanges;
+        if (!Array.isArray(exchanges)) {
+          return session;
+        }
+        return {
+          ...(session as any),
+          exchanges: exchanges.map((exchange: any) =>
+            exchange?.pending_ack === true
+              ? { ...exchange, pending_ack: false }
+              : exchange,
+          ),
+        } as T;
+      };
       const cacheKey = rootSessionKey(resolvedRoot, resolvedKey);
       delete pendingBySessionRef.current[cacheKey];
       const cached = sessionCacheRef.current[cacheKey];
       if (cached && (cached.key || (cached as any).session_key) === resolvedKey) {
-        sessionCacheRef.current[cacheKey] = {
+        sessionCacheRef.current[cacheKey] = clearPendingAck({
           ...(cached as any),
           pending: false,
-        } as Session;
+        } as Session);
       }
       setSelectedSession((prev) => {
         const prevKey = prev?.key || prev?.session_key;
@@ -1858,17 +1873,17 @@ export function App({ onGoHome }: AppProps) {
         if (!prev || prevKey !== resolvedKey || prevRoot !== resolvedRoot) {
           return prev;
         }
-        return {
+        return clearPendingAck({
           ...(prev as any),
           pending: false,
-        } as SessionItem;
+        } as SessionItem);
       });
       const drawer = drawerSessionByRootRef.current[resolvedRoot];
       if (drawer && (drawer.key || (drawer as any).session_key) === resolvedKey) {
-        setDrawerSessionForRoot(resolvedRoot, {
+        setDrawerSessionForRoot(resolvedRoot, clearPendingAck({
           ...(drawer as any),
           pending: false,
-        } as Session);
+        } as Session));
       }
       bumpCacheVersion();
     },
@@ -3168,11 +3183,14 @@ export function App({ onGoHome }: AppProps) {
         options?: { writeCache?: boolean },
       ) => {
         const shouldWriteCache = options?.writeCache !== false;
-        const pending = resolvePendingForSession(
-          targetRoot,
-          key,
-          !!(fullSession as any)?.pending || preservePending,
-        );
+        const serverPending =
+          typeof (fullSession as any)?.pending === "boolean"
+            ? !!(fullSession as any).pending
+            : undefined;
+        const pending =
+          serverPending !== undefined
+            ? serverPending
+            : resolvePendingForSession(targetRoot, key, preservePending);
         const normalized = {
           ...(fullSession as any),
           key,
@@ -4070,9 +4088,11 @@ export function App({ onGoHome }: AppProps) {
       const sent = await sessionService.cancelMessage(activeRoot, sessionKey);
       if (!sent) {
         delete cancelRequestedBySessionRef.current[cacheKey];
+        return;
       }
+      clearLocalPendingForSession(activeRoot, sessionKey);
     },
-    [rootSessionKey],
+    [clearLocalPendingForSession, rootSessionKey],
   );
 
   const markSessionPending = useCallback(
@@ -4105,7 +4125,17 @@ export function App({ onGoHome }: AppProps) {
   const handleRemoveQueuedMessage = useCallback(
     async (queueId: string) => {
       const activeRoot = currentRootIdRef.current;
-      const sessionKey = boundSessionByRootRef.current[activeRoot || ""] || "";
+      const selected = selectedSessionRef.current;
+      const selectedRoot =
+        (selected?.root_id as string | undefined) || activeRoot || "";
+      const selectedKey = selected?.key || selected?.session_key || "";
+      const sessionKey =
+        interactionModeRef.current !== "drawer" &&
+        selectedRoot === activeRoot &&
+        selectedKey &&
+        !selectedKey.startsWith("pending-")
+          ? selectedKey
+          : boundSessionByRootRef.current[activeRoot || ""] || "";
       if (!activeRoot || !sessionKey || !queueId) return;
       await sessionService.removeQueuedMessage(activeRoot, sessionKey, queueId);
     },
@@ -4115,7 +4145,17 @@ export function App({ onGoHome }: AppProps) {
   const handleUpdateQueuedMessage = useCallback(
     async (queueId: string, content: string) => {
       const activeRoot = currentRootIdRef.current;
-      const sessionKey = boundSessionByRootRef.current[activeRoot || ""] || "";
+      const selected = selectedSessionRef.current;
+      const selectedRoot =
+        (selected?.root_id as string | undefined) || activeRoot || "";
+      const selectedKey = selected?.key || selected?.session_key || "";
+      const sessionKey =
+        interactionModeRef.current !== "drawer" &&
+        selectedRoot === activeRoot &&
+        selectedKey &&
+        !selectedKey.startsWith("pending-")
+          ? selectedKey
+          : boundSessionByRootRef.current[activeRoot || ""] || "";
       if (!activeRoot || !sessionKey || !queueId || !content.trim()) return;
       await sessionService.updateQueuedMessage(activeRoot, sessionKey, queueId, content);
     },
@@ -4125,7 +4165,17 @@ export function App({ onGoHome }: AppProps) {
   const handleSendQueuedMessageNow = useCallback(
     async (queueId: string) => {
       const activeRoot = currentRootIdRef.current;
-      const sessionKey = boundSessionByRootRef.current[activeRoot || ""] || "";
+      const selected = selectedSessionRef.current;
+      const selectedRoot =
+        (selected?.root_id as string | undefined) || activeRoot || "";
+      const selectedKey = selected?.key || selected?.session_key || "";
+      const sessionKey =
+        interactionModeRef.current !== "drawer" &&
+        selectedRoot === activeRoot &&
+        selectedKey &&
+        !selectedKey.startsWith("pending-")
+          ? selectedKey
+          : boundSessionByRootRef.current[activeRoot || ""] || "";
       if (!activeRoot || !sessionKey || !queueId) return;
       const cacheKey = rootSessionKey(activeRoot, sessionKey);
       const previousQueue = queuedMessagesBySessionRef.current[cacheKey] || [];
@@ -5996,20 +6046,36 @@ export function App({ onGoHome }: AppProps) {
         delete cancelRequestedBySessionRef.current[cacheKey];
       }
       delete pendingBySessionRef.current[cacheKey];
+      const clearPendingAck = <T,>(session: T): T => {
+        const exchanges = (session as any)?.exchanges;
+        if (!wasCanceled || !Array.isArray(exchanges)) {
+          return session;
+        }
+        return {
+          ...(session as any),
+          exchanges: exchanges.map((exchange: any) =>
+            exchange?.pending_ack === true
+              ? { ...exchange, pending_ack: false }
+              : exchange,
+          ),
+        } as T;
+      };
       const queued = queuedMessagesBySessionRef.current[cacheKey] || [];
+      const queueFrozen = !!queueFrozenBySessionRef.current[cacheKey];
       const hiddenQueued = optimisticDequeuedIdsRef.current[cacheKey];
       const hasQueuedContinuation =
-        queued.length > 0 || !!(hiddenQueued && hiddenQueued.size > 0);
-      if (hasQueuedContinuation) {
+        (queued.length > 0 && !queueFrozen) ||
+        !!(hiddenQueued && hiddenQueued.size > 0);
+      if (hasQueuedContinuation && !wasCanceled) {
         markSessionPending(rootID, sessionKey);
         return;
       }
       const cached = sessionCacheRef.current[cacheKey];
       if (cached && cached.key === sessionKey) {
-        sessionCacheRef.current[cacheKey] = {
+        sessionCacheRef.current[cacheKey] = clearPendingAck({
           ...(cached as any),
           pending: false,
-        } as Session;
+        } as Session);
       }
       setSelectedPendingByKey(sessionKey, false);
       setSelectedSession((prev) => {
@@ -6024,20 +6090,20 @@ export function App({ onGoHome }: AppProps) {
         ) {
           return prev;
         }
-        return {
+        return clearPendingAck({
           ...(prev as any),
           pending: false,
-        } as SessionItem;
+        } as SessionItem);
       });
       const drawer = drawerSessionByRootRef.current[rootID];
       if (drawer && drawer.key === sessionKey) {
         const latest = wasCanceled
           ? sessionCacheRef.current[cacheKey] || drawer
           : drawer;
-        setDrawerSessionForRoot(rootID, {
+        setDrawerSessionForRoot(rootID, clearPendingAck({
           ...(latest as any),
           pending: false,
-        } as Session);
+        } as Session));
       }
       bumpCacheVersion();
     };
@@ -6501,6 +6567,7 @@ export function App({ onGoHome }: AppProps) {
           const queue = hidden && hidden.size > 0
             ? incomingQueue.filter((item) => !hidden.has(item.id))
             : incomingQueue;
+          queueFrozenBySessionRef.current[cacheKey] = payload?.queue_frozen === true;
           if (hidden) {
             for (const queueId of Array.from(hidden)) {
               if (!incomingQueue.some((item) => item.id === queueId)) {
@@ -7255,6 +7322,10 @@ export function App({ onGoHome }: AppProps) {
     : selectedInCurrentRoot
       ? (selectedSession as any)
       : null;
+  const actionBarSessionKey =
+    (actionBarSession as any)?.key ||
+    (actionBarSession as any)?.session_key ||
+    "";
   const isBoundSessionInMain =
     !!activeBoundSessionKey &&
     selectedKey === activeBoundSessionKey &&
@@ -7264,13 +7335,25 @@ export function App({ onGoHome }: AppProps) {
     isDetachedMainSessionTarget && !isDrawerOpen;
   const actionBarQueuedMessages = useMemo(() => {
     void queueVersion;
-    if (!currentRootId || !activeBoundSessionKey) return [];
+    if (!currentRootId || !actionBarSessionKey) return [];
     return (
       queuedMessagesBySessionRef.current[
-        rootSessionKey(currentRootId, activeBoundSessionKey)
+        rootSessionKey(currentRootId, actionBarSessionKey)
       ] || []
     );
-  }, [activeBoundSessionKey, currentRootId, queueVersion, rootSessionKey]);
+  }, [actionBarSessionKey, currentRootId, queueVersion, rootSessionKey]);
+
+  useEffect(() => {
+    if (
+      status !== "connected" ||
+      !currentRootId ||
+      !actionBarSessionKey ||
+      actionBarSessionKey.startsWith("pending-")
+    ) {
+      return;
+    }
+    void sessionService.markSessionReady(currentRootId, actionBarSessionKey);
+  }, [actionBarSessionKey, currentRootId, status]);
 
   const matchedPlugin = useMemo(() => {
     if (!currentRootId || !file) return null;
