@@ -27,6 +27,7 @@ import (
 const (
 	defaultCheckInterval = time.Hour
 	releaseNotesPath     = "release-notes.md"
+	relayDownloadBase    = "https://relay.a9gent.com/mindfs-downloads"
 )
 
 var releaseManifestPublicKey string
@@ -344,7 +345,7 @@ func (s *Service) installUpdate(ctx context.Context, version string, restart boo
 	}()
 
 	archivePath := filepath.Join(tmpDir, asset.Name)
-	if err := s.downloadFile(ctx, asset.BrowserDownloadURL, archivePath); err != nil {
+	if err := s.downloadReleaseAsset(ctx, asset, archivePath); err != nil {
 		return err
 	}
 	if err := verifyFileSHA256(archivePath, artifact.SHA256, artifact.Size); err != nil {
@@ -636,6 +637,35 @@ func (s *Service) downloadFile(ctx context.Context, url, dst string) error {
 	defer file.Close()
 	_, err = io.Copy(file, resp.Body)
 	return err
+}
+
+func (s *Service) downloadReleaseAsset(ctx context.Context, asset releaseAsset, dst string) error {
+	primaryURL := strings.TrimSpace(asset.BrowserDownloadURL)
+	if primaryURL == "" {
+		return errors.New("release asset download URL unavailable")
+	}
+	if err := s.downloadFile(ctx, primaryURL, dst); err == nil {
+		return nil
+	} else {
+		fallbackURL := relayAssetURL(asset.Name)
+		if fallbackURL == "" || fallbackURL == primaryURL {
+			return err
+		}
+		log.Printf("[update] download.github_failed asset=%s err=%v fallback=%s", strings.TrimSpace(asset.Name), err, fallbackURL)
+		_ = os.Remove(dst)
+		if fallbackErr := s.downloadFile(ctx, fallbackURL, dst); fallbackErr != nil {
+			return fmt.Errorf("download failed from GitHub (%v) and relay fallback (%v)", err, fallbackErr)
+		}
+		return nil
+	}
+}
+
+func relayAssetURL(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" || strings.ContainsAny(name, `/\`) {
+		return ""
+	}
+	return strings.TrimRight(relayDownloadBase, "/") + "/" + name
 }
 
 func (s *Service) fetchURL(ctx context.Context, url string, limit int64) ([]byte, error) {

@@ -6,6 +6,7 @@ set -euo pipefail
 
 REPO="a9gent/mindfs"
 RELEASE_NOTES_URL="https://raw.githubusercontent.com/${REPO}/main/release-notes.md"
+RELAY_DOWNLOAD_BASE="https://relay.a9gent.com/mindfs-downloads"
 VERSION=""
 PREFIX="${HOME}/.local"
 UNINSTALL=0
@@ -153,14 +154,25 @@ echo "  Prefix: ${PREFIX}"
 # ── Download ────────────────────────────────────────────────────────────────
 FILENAME="mindfs_${VERSION}_${OS}_${ARCH}.tar.gz"
 URL="https://github.com/${REPO}/releases/download/${VERSION}/${FILENAME}"
+FALLBACK_URL="${RELAY_DOWNLOAD_BASE}/${FILENAME}"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
+download_file() {
+  local url="$1"
+  local dst="$2"
+  if command -v curl &>/dev/null; then
+    curl -fsSL "$url" -o "$dst"
+  else
+    wget -qO "$dst" "$url"
+  fi
+}
+
 echo "  Downloading ${URL}"
-if command -v curl &>/dev/null; then
-  curl -fsSL "$URL" -o "${TMPDIR}/${FILENAME}"
-else
-  wget -qO "${TMPDIR}/${FILENAME}" "$URL"
+if ! download_file "$URL" "${TMPDIR}/${FILENAME}"; then
+  echo "  GitHub download failed; trying ${FALLBACK_URL}"
+  rm -f "${TMPDIR}/${FILENAME}"
+  download_file "$FALLBACK_URL" "${TMPDIR}/${FILENAME}"
 fi
 
 # ── Extract ─────────────────────────────────────────────────────────────────
