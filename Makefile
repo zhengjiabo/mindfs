@@ -11,10 +11,6 @@ PREFIX ?= $(HOME)/.local
 RELEASE_REPO ?= zhengjiabo/mindfs
 RELEASE_REMOTE ?= zhengjiabo
 UPDATE_REPO ?= $(RELEASE_REPO)
-BUILD_LDFLAGS := -X main.version=$(VERSION) -X mindfs/server/app.defaultUpdateRepo=$(UPDATE_REPO)
-ifneq ($(strip $(MINDFS_RELEASE_PUBLIC_KEY)),)
-BUILD_LDFLAGS += -X mindfs/server/internal/update.releaseManifestPublicKey=$(MINDFS_RELEASE_PUBLIC_KEY)
-endif
 
 help:
 	@printf "%s\n" \
@@ -77,6 +73,10 @@ test:
 
 # ── Cross-platform distribution ──────────────────────────────────────────
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+BUILD_LDFLAGS := -X main.version=$(VERSION) -X mindfs/server/app.defaultUpdateRepo=$(UPDATE_REPO)
+ifneq ($(strip $(MINDFS_RELEASE_PUBLIC_KEY)),)
+BUILD_LDFLAGS += -X mindfs/server/internal/update.releaseManifestPublicKey=$(MINDFS_RELEASE_PUBLIC_KEY)
+endif
 DIST_DIR ?= dist
 RELEASE_NOTES_FILE ?= release-notes.md
 RELEASE_NOTES_LATEST_FILE ?= $(DIST_DIR)/release-notes-$(TAG).md
