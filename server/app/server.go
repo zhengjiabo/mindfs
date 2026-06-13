@@ -191,6 +191,9 @@ func autoAddExternalProjectRoots(registry *fs.Registry) {
 		if hasMindFSMetadataDir(projectPath) {
 			continue
 		}
+		if isUnsafeAutoProjectRoot(projectPath) {
+			continue
+		}
 		if agent.IsTemporaryWorkDir(projectPath) {
 			continue
 		}
@@ -213,6 +216,17 @@ func hasMindFSMetadataDir(projectPath string) bool {
 	}
 	info, err := os.Stat(filepath.Join(projectPath, ".mindfs"))
 	return err == nil && info.IsDir()
+}
+
+func isUnsafeAutoProjectRoot(projectPath string) bool {
+	cleaned := filepath.Clean(strings.TrimSpace(projectPath))
+	if cleaned == "" || cleaned == "." {
+		return true
+	}
+	if home, err := os.UserHomeDir(); err == nil && agent.NormalizeComparablePath(cleaned) == agent.NormalizeComparablePath(home) {
+		return true
+	}
+	return strings.HasPrefix(filepath.Base(cleaned), ".")
 }
 
 func startExternalProjectDiscoveryLoop(ctx context.Context, registry *fs.Registry) {
