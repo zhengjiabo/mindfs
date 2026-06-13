@@ -7,15 +7,8 @@ VERSION="${1:-dev}"
 DIST_DIR="${2:-dist}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.."; pwd)"
 
-PLATFORMS=(
-  "darwin/amd64"
-  "darwin/arm64"
-  "linux/amd64"
-  "linux/arm64"
-  "linux/arm"
-  "windows/amd64"
-  "windows/arm64"
-)
+PLATFORM_SPEC="${MINDFS_RELEASE_PLATFORMS:-darwin/amd64,darwin/arm64,linux/amd64,linux/arm64,linux/arm,windows/amd64,windows/arm64}"
+IFS=',' read -r -a PLATFORMS <<<"${PLATFORM_SPEC}"
 
 echo "==> Building mindfs ${VERSION}"
 echo "    Output: ${DIST_DIR}/"
