@@ -1,3 +1,13 @@
+# MindFS v0.3.4-custom.1
+
+## 自定义发布
+- 默认更新源切换为 `zhengjiabo/mindfs`
+- 安装版构建默认内置自定义更新仓库
+- 发布产物启用签名 manifest 校验
+- 增加自定义安装脚本 `scripts/install-custom.sh`
+- 增加自定义发布工作流和上游同步工作流
+
+
 # MindFS v0.3.4
 
 ## 新功能
