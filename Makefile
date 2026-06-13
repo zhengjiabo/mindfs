@@ -195,11 +195,9 @@ release:
 		--title "$(TAG)" \
 		--notes-file "$(RELEASE_NOTES_LATEST_FILE)"
 	@echo "Uploading release artifacts with $(RELEASE_UPLOAD_JOBS) parallel jobs"
-	@set -- $(RELEASE_ARTIFACTS); \
-		for artifact do \
-			test -f "$$artifact" || { echo "Error: release artifact not found: $$artifact" >&2; exit 1; }; \
-		done; \
-		printf '%s\n' "$$@" | xargs -n 1 -P "$(RELEASE_UPLOAD_JOBS)" gh release upload "$(TAG)" --repo "$(RELEASE_REPO)"
+	@find "$(DIST_DIR)" -maxdepth 1 -type f \
+		\( -name 'mindfs_$(TAG)_*.tar.gz' -o -name 'mindfs_$(TAG)_*.zip' -o -name 'mindfs_$(TAG)_*.apk' -o -name 'mindfs_$(TAG)_*.hap' -o -name 'mindfs_$(TAG)_manifest.json' \) \
+		-print | sort | xargs -r -n 1 -P "$(RELEASE_UPLOAD_JOBS)" gh release upload "$(TAG)" --repo "$(RELEASE_REPO)" --clobber
 	@echo "Publishing GitHub release $(TAG)"
 	gh release edit "$(TAG)" --repo "$(RELEASE_REPO)" --draft=false
 	$(MAKE) publish-release-notes TAG="$(TAG)"
