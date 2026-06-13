@@ -6,6 +6,25 @@ import (
 	"testing"
 )
 
+func TestResolveUpdateRepoUsesDefaultWhenEnvUnset(t *testing.T) {
+	t.Setenv(updateRepoEnvKey, "")
+	old := defaultUpdateRepo
+	defaultUpdateRepo = " a9gent/mindfs "
+	t.Cleanup(func() {
+		defaultUpdateRepo = old
+	})
+	if got := resolveUpdateRepo(); got != "a9gent/mindfs" {
+		t.Fatalf("resolveUpdateRepo() = %q, want %q", got, "a9gent/mindfs")
+	}
+}
+
+func TestResolveUpdateRepoPrefersEnv(t *testing.T) {
+	t.Setenv(updateRepoEnvKey, " zhengjiabo/mindfs ")
+	if got := resolveUpdateRepo(); got != "zhengjiabo/mindfs" {
+		t.Fatalf("resolveUpdateRepo() = %q, want %q", got, "zhengjiabo/mindfs")
+	}
+}
+
 func TestResolveStaticDirFromExecutablePrefersBuiltWebDist(t *testing.T) {
 	root := t.TempDir()
 	exeDir := filepath.Join(root, "bin")

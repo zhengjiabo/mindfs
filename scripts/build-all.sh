@@ -22,6 +22,7 @@ echo "    Output: ${DIST_DIR}/"
 echo
 
 LDFLAGS="-s -w -X main.version=${VERSION}"
+LDFLAGS="${LDFLAGS} -X mindfs/server/app.defaultUpdateRepo=${MINDFS_UPDATE_REPO:-zhengjiabo/mindfs}"
 if [[ -n "${MINDFS_RELEASE_PUBLIC_KEY:-}" ]]; then
   LDFLAGS="${LDFLAGS} -X mindfs/server/internal/update.releaseManifestPublicKey=${MINDFS_RELEASE_PUBLIC_KEY}"
 fi

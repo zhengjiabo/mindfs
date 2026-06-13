@@ -23,7 +23,17 @@ import (
 )
 
 const staticDirEnvKey = "MINDFS_STATIC_DIR"
+const updateRepoEnvKey = "MINDFS_UPDATE_REPO"
 const externalProjectDiscoveryInterval = time.Minute
+
+var defaultUpdateRepo = "a9gent/mindfs"
+
+func resolveUpdateRepo() string {
+	if hinted := strings.TrimSpace(os.Getenv(updateRepoEnvKey)); hinted != "" {
+		return hinted
+	}
+	return strings.TrimSpace(defaultUpdateRepo)
+}
 
 type StartOptions struct {
 	NoRelayer    bool
@@ -90,7 +100,7 @@ func Start(ctx context.Context, addr string, opts StartOptions) error {
 		log.Printf("[preferences] init.error err=%v", err)
 	}
 	executable, _ := os.Executable()
-	updateSvc := update.NewService("a9gent/mindfs", opts.Version, executable, opts.Args, 10*time.Minute)
+	updateSvc := update.NewService(resolveUpdateRepo(), opts.Version, executable, opts.Args, 10*time.Minute)
 	updateSvc.Start(ctx)
 
 	services := &api.AppContext{

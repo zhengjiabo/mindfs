@@ -1,0 +1,62 @@
+name: Release Custom Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, for example v0.3.5-custom.1
+        required: true
+        type: string
+      release_android:
+        description: Include Android APK
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_REPO: zhengjiabo/mindfs
+      TAG: ${{ inputs.tag }}
+      RELEASE_ANDROID: ${{ inputs.release_android && '1' || '0' }}
+      MINDFS_RELEASE_PUBLIC_KEY: ${{ secrets.MINDFS_RELEASE_PUBLIC_KEY }}
+      MINDFS_RELEASE_PRIVATE_KEY: ${{ secrets.MINDFS_RELEASE_PRIVATE_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install web dependencies
+        run: npm ci
+        working-directory: web
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add zhengjiabo "https://x-access-token:${{ github.token }}@github.com/zhengjiabo/mindfs.git" || true
+
+      - name: Run tests
+        run: go test ./server/... ./cli/...
+
+      - name: Build and publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: make release TAG="$TAG" RELEASE_ANDROID="$RELEASE_ANDROID"

@@ -8,6 +8,13 @@ HARMONY_DIR ?= harmony
 ADDR ?= :7331
 ROOT ?= .
 PREFIX ?= $(HOME)/.local
+RELEASE_REPO ?= zhengjiabo/mindfs
+RELEASE_REMOTE ?= zhengjiabo
+UPDATE_REPO ?= $(RELEASE_REPO)
+BUILD_LDFLAGS := -X main.version=$(VERSION) -X mindfs/server/app.defaultUpdateRepo=$(UPDATE_REPO)
+ifneq ($(strip $(MINDFS_RELEASE_PUBLIC_KEY)),)
+BUILD_LDFLAGS += -X mindfs/server/internal/update.releaseManifestPublicKey=$(MINDFS_RELEASE_PUBLIC_KEY)
+endif
 
 help:
 	@printf "%s\n" \
@@ -29,7 +36,7 @@ help:
 		"  make tag TAG=v1.2.3  # create and push a git tag" \
 		"  make publish-release-notes TAG=v1.2.3  # commit and push release-notes.md if changed" \
 		"  make verify-release TAG=v1.2.3  # verify signed release manifest and artifacts in $(DIST_DIR)" \
-		"  make release TAG=v1.2.3  # publish notes, build-all, then create GitHub release" \
+		"  make release TAG=v1.2.3  # publish notes, build-all, then create GitHub release on $(RELEASE_REPO)" \
 		"  make release TAG=v1.2.3 RELEASE_ANDROID=1  # include Android APK"
 
 dev:
@@ -45,7 +52,7 @@ build-web:
 	cd $(WEB_DIR) && $(NPM) run build
 
 build: build-web
-	$(GO) build -ldflags "-X main.version=$(VERSION)" -o mindfs ./cli/cmd
+	$(GO) build -ldflags "$(BUILD_LDFLAGS)" -o mindfs ./cli/cmd
 
 install: build
 	install -d "$(PREFIX)/bin"
@@ -134,9 +141,9 @@ dist-clean:
 tag:
 	@test -n "$(TAG)" || (echo "Usage: make tag TAG=v1.2.3" >&2; exit 1)
 	@echo "Tagging $(TAG)"
-	git push origin main
+	git push $(RELEASE_REMOTE) main
 	git tag $(TAG)
-	git push origin $(TAG)
+	git push $(RELEASE_REMOTE) $(TAG)
 
 # Usage: make publish-release-notes TAG=v1.2.3
 publish-release-notes:
@@ -149,14 +156,14 @@ publish-release-notes:
 		echo "No release notes changes to commit."; \
 	else \
 		git commit -m "update release notes"; \
-		git push origin main; \
+		git push $(RELEASE_REMOTE) main; \
 	fi
 
 # Usage: make verify-release TAG=v1.2.3
 verify-release:
 	@test -n "$(TAG)" || (echo "Usage: make verify-release TAG=v1.2.3" >&2; exit 1)
 	@test -n "$(MINDFS_RELEASE_PUBLIC_KEY)" || (echo "Error: MINDFS_RELEASE_PUBLIC_KEY is required to verify release manifests." >&2; exit 1)
-	@$(GO) run scripts/sign-release-manifest.go -verify -version "$(TAG)" -dist "$(DIST_DIR)" -repo "a9gent/mindfs" -public-key "$(MINDFS_RELEASE_PUBLIC_KEY)"
+	@$(GO) run scripts/sign-release-manifest.go -verify -version "$(TAG)" -dist "$(DIST_DIR)" -repo "$(RELEASE_REPO)" -public-key "$(MINDFS_RELEASE_PUBLIC_KEY)"
 
 # Usage: make release TAG=v1.2.3 [RELEASE_ANDROID=1]
 # Builds desktop/server platforms and creates a GitHub release.
@@ -174,16 +181,16 @@ release:
 	$(MAKE) dist-clean
 	mkdir -p "$(DIST_DIR)"
 	@awk 'NR > 1 && /^# MindFS[[:space:]]+/ { exit } { print }' "$(RELEASE_NOTES_FILE)" > "$(RELEASE_NOTES_LATEST_FILE)"
-	MINDFS_RELEASE_PUBLIC_KEY="$(MINDFS_RELEASE_PUBLIC_KEY)" $(MAKE) build-all VERSION="$(TAG)"
+	MINDFS_RELEASE_PUBLIC_KEY="$(MINDFS_RELEASE_PUBLIC_KEY)" MINDFS_UPDATE_REPO="$(UPDATE_REPO)" $(MAKE) build-all VERSION="$(TAG)"
 	@if [ "$(RELEASE_ANDROID)" = "1" ]; then \
 		$(MAKE) build-android VERSION="$(TAG)"; \
 	else \
 		echo "Skipping Android release. Use RELEASE_ANDROID=1 to include the APK."; \
 	fi
-	@$(GO) run scripts/sign-release-manifest.go -version "$(TAG)" -dist "$(DIST_DIR)" -repo "a9gent/mindfs"
+	@$(GO) run scripts/sign-release-manifest.go -version "$(TAG)" -dist "$(DIST_DIR)" -repo "$(RELEASE_REPO)"
 	$(MAKE) verify-release TAG="$(TAG)" MINDFS_RELEASE_PUBLIC_KEY="$(MINDFS_RELEASE_PUBLIC_KEY)"
 	@echo "Creating draft GitHub release $(TAG)"
-	gh release create $(TAG) \
+	gh release create $(TAG) --repo "$(RELEASE_REPO)" \
 		--draft \
 		--title "$(TAG)" \
 		--notes-file "$(RELEASE_NOTES_LATEST_FILE)"
@@ -192,7 +199,7 @@ release:
 		for artifact do \
 			test -f "$$artifact" || { echo "Error: release artifact not found: $$artifact" >&2; exit 1; }; \
 		done; \
-		printf '%s\n' "$$@" | xargs -n 1 -P "$(RELEASE_UPLOAD_JOBS)" gh release upload "$(TAG)"
+		printf '%s\n' "$$@" | xargs -n 1 -P "$(RELEASE_UPLOAD_JOBS)" gh release upload "$(TAG)" --repo "$(RELEASE_REPO)"
 	@echo "Publishing GitHub release $(TAG)"
-	gh release edit "$(TAG)" --draft=false
+	gh release edit "$(TAG)" --repo "$(RELEASE_REPO)" --draft=false
 	$(MAKE) publish-release-notes TAG="$(TAG)"

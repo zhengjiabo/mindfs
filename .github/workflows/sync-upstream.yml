@@ -1,0 +1,47 @@
+name: Sync Upstream
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 */6 * * *'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/a9gent/mindfs.git || true
+          git fetch upstream main
+          git fetch origin main
+
+      - name: Prepare sync branch
+        run: |
+          BRANCH="sync/upstream-$(date +%Y%m%d%H%M%S)"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          git checkout -b "$BRANCH" origin/main
+          git merge --no-edit upstream/main || {
+            echo "Upstream merge requires manual conflict resolution" >&2
+            exit 1
+          }
+        id: sync
+
+      - name: Create pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git push --set-upstream origin "${{ steps.sync.outputs.branch }}"
+          gh pr create \
+            --base main \
+            --head "${{ steps.sync.outputs.branch }}" \
+            --title "sync: merge upstream main" \
+            --body "Automated upstream sync from a9gent/mindfs main. Review custom patches before merge."
