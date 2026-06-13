@@ -1,5 +1,7 @@
 import { registerPlugin } from "@capacitor/core";
 import { appURL } from "./base";
+import { e2eeService } from "./e2ee";
+import { fetchProofProtectedBlob } from "./file";
 import { getNativeBridge } from "./nativeBridge";
 import { getApiBaseURL, isNativeShellRuntime } from "./runtime";
 
@@ -71,6 +73,15 @@ function triggerBrowserDownload(url: string, filename: string): void {
   anchor.remove();
 }
 
+function triggerBrowserBlobDownload(blob: Blob, filename: string): void {
+  const blobURL = URL.createObjectURL(blob);
+  try {
+    triggerBrowserDownload(blobURL, filename);
+  } finally {
+    window.setTimeout(() => URL.revokeObjectURL(blobURL), 60_000);
+  }
+}
+
 async function downloadWithNativeShell(url: string, filename: string): Promise<void> {
   if (!/^https?:\/\//i.test(url)) {
     throw new Error("下载地址不是完整的 http/https URL，请先配置移动端 API 地址");
@@ -114,6 +125,16 @@ export async function downloadURL(url: string, filename = "download"): Promise<v
 
 export async function downloadFile(params: DownloadFileParams): Promise<void> {
   const filename = sanitizeDownloadName(params.path, params.name);
+
+  if (e2eeService.isRequired() && !isNativeShellRuntime()) {
+    const blob = await fetchProofProtectedBlob({
+      rootId: params.rootId,
+      path: params.path,
+    });
+    triggerBrowserBlobDownload(blob, filename);
+    return;
+  }
+
   const url = toAbsoluteDownloadURL(buildDownloadURL(params.rootId, params.path));
   await downloadURL(url, filename);
 }
