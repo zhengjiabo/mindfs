@@ -49,6 +49,7 @@ Access your personal AI agents and workstation data anywhere, anytime through Mi
 - **Bidirectional file–session linking**: Jump from a file to the session that created it, or from a session to all files it touched.
 - **Android, Browser app (PWA)**: Install to desktop or mobile home screen for a native-like experience — no app store required.
 - **Mobile-optimized UI**: Bottom action bar within thumb reach, independent panel swipe navigation, input box adapts to the soft keyboard.
+- **Notification Push**: Notifications are delivered via Web Push upon session status changes (iOS requires adding the page to the home screen).
 
 ### Access Modes
 
@@ -265,6 +266,7 @@ mindfs -agent-config /path/to/agents.json
 | `-agent-config string` | empty | Load one extra `agents.json` file. |
 | `-no-relayer` | `false` | Disable relay integration. Local and private-network access still work. |
 | `-e2ee` | `false` | Enable end-to-end encryption for sensitive data. The pairing code can also be used as an authentication mechanism: unpaired frontends cannot access node content. LAN access requires `-tls` to work correctly. On first enablement, the CLI prints the pairing secret. |
+| `-web-push` | `true` | Enable PWA Web Push notifications. VAPID keys are generated automatically on first start. |
 | `-tls` | `false` | Enable HTTPS. If `-cert` and `-key` are not provided, MindFS generates and reuses a local self-signed certificate. |
 | `-cert string` | empty | TLS certificate file in PEM format. Used with `-tls`; auto-generated when empty. |
 | `-key string` | empty | TLS private key file in PEM format. Used with `-tls`; auto-generated when empty. |

@@ -62,6 +62,7 @@ func main() {
 	addr := flag.String("addr", "127.0.0.1:7331", "listen address")
 	noRelayer := flag.Bool("no-relayer", false, "disable relay integration")
 	e2eeFlag := flag.Bool("e2ee", false, "enable end-to-end encryption for sensitive data")
+	webPushFlag := flag.Bool("web-push", true, "enable PWA Web Push notifications")
 	foreground := flag.Bool("foreground", false, "run in the foreground instead of as a background service")
 	stop := flag.Bool("stop", false, "stop the background mindfs service")
 	restart := flag.Bool("restart", false, "restart the background mindfs service")
@@ -83,7 +84,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, err.Error())
 		os.Exit(1)
 	}
-	applyStartupConfig(startupCfg, explicitFlags, addr, noRelayer, e2eeFlag, foreground, bindRelay, tlsFlag, certFlag, keyFlag, agentConfigFlag)
+	applyStartupConfig(startupCfg, explicitFlags, addr, noRelayer, e2eeFlag, webPushFlag, foreground, bindRelay, tlsFlag, certFlag, keyFlag, agentConfigFlag)
 	if *versionFlag {
 		printVersion()
 		return
@@ -264,6 +265,7 @@ func main() {
 			Args:            os.Args[1:],
 			AgentConfigPath: *agentConfigFlag,
 			E2EEConfig:      e2eeResult.Config,
+			WebPushEnabled:  *webPushFlag,
 			UseTLS:          *tlsFlag,
 			CertFile:        resolvedCert,
 			KeyFile:         resolvedKey,
@@ -360,6 +362,8 @@ type startupConfig struct {
 	NoRelayer     *bool   `json:"noRelayer"`
 	NoRelayerFlag *bool   `json:"no-relayer"`
 	E2EE          *bool   `json:"e2ee"`
+	WebPush       *bool   `json:"webPush"`
+	WebPushFlag   *bool   `json:"web-push"`
 	Foreground    *bool   `json:"foreground"`
 	BindRelay     *bool   `json:"bindRelay"`
 	BindRelayFlag *bool   `json:"bind-relay"`
@@ -399,6 +403,7 @@ func applyStartupConfig(
 	addr *string,
 	noRelayer *bool,
 	e2ee *bool,
+	webPush *bool,
 	foreground *bool,
 	bindRelay *bool,
 	tlsFlag *bool,
@@ -414,6 +419,9 @@ func applyStartupConfig(
 	}
 	if cfg.E2EE != nil && !explicit["e2ee"] {
 		*e2ee = *cfg.E2EE
+	}
+	if value := firstBool(cfg.WebPush, cfg.WebPushFlag); value != nil && !explicit["web-push"] {
+		*webPush = *value
 	}
 	if cfg.Foreground != nil && !explicit["foreground"] {
 		*foreground = *cfg.Foreground

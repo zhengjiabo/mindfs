@@ -30,6 +30,14 @@ import {
   switchAgentConfig,
   type AgentConfigBackup,
 } from "../services/agentConfig";
+import {
+  getWebPushStatus,
+  sendWebPushTest,
+  subscribeWebPush,
+  unsubscribeWebPush,
+  webPushReasonLabel,
+  type WebPushStatus,
+} from "../services/webPush";
 
 type BeforeInstallPromptEvent = Event & {
   prompt: () => Promise<void>;
@@ -142,6 +150,165 @@ const fileTreeMenuButtonStyle: React.CSSProperties = {
   fontSize: "12px",
 };
 
+function NotificationIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 7h18s-3 0-3-7" />
+      <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+    </svg>
+  );
+}
+
+function InfoIcon() {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 48 48" aria-hidden="true">
+      <path d="M0 0h48v48H0z" fill="none" />
+      <g fill="none">
+        <path stroke="currentColor" strokeLinejoin="round" strokeWidth="4" d="M24 44a19.94 19.94 0 0 0 14.142-5.858A19.94 19.94 0 0 0 44 24a19.94 19.94 0 0 0-5.858-14.142A19.94 19.94 0 0 0 24 4A19.94 19.94 0 0 0 9.858 9.858A19.94 19.94 0 0 0 4 24a19.94 19.94 0 0 0 5.858 14.142A19.94 19.94 0 0 0 24 44Z" />
+        <path fill="currentColor" fillRule="evenodd" d="M24 11a2.5 2.5 0 1 1 0 5a2.5 2.5 0 0 1 0-5" clipRule="evenodd" />
+        <path stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="4" d="M24.5 34V20h-2M21 34h7" />
+      </g>
+    </svg>
+  );
+}
+
+function WebPushMenuItem() {
+  const [status, setStatus] = React.useState<WebPushStatus | null>(null);
+  const [busy, setBusy] = React.useState(false);
+  const [message, setMessage] = React.useState("");
+  const [expanded, setExpanded] = React.useState(false);
+
+  const refresh = React.useCallback(async () => {
+    try {
+      setStatus(await getWebPushStatus());
+    } catch (error) {
+      setStatus(null);
+      setMessage(error instanceof Error ? error.message : "通知状态读取失败");
+    }
+  }, []);
+
+  React.useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const run = async (action: "subscribe" | "unsubscribe" | "test") => {
+    if (busy) return;
+    setBusy(true);
+    setMessage("");
+    try {
+      if (action === "subscribe") {
+        setStatus(await subscribeWebPush());
+      } else if (action === "unsubscribe") {
+        setStatus(await unsubscribeWebPush());
+      } else {
+        await sendWebPushTest();
+        setMessage("测试通知已发送");
+        await refresh();
+      }
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "通知操作失败");
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const disabledReason = webPushReasonLabel(status?.reason);
+  const enabled = Boolean(status?.enabled && status.supported);
+  const subscribed = Boolean(status?.subscribed);
+  const label = subscribed ? "通知已开启" : "开启通知";
+  const subscriptionCount = status?.subscription_count || 0;
+  const currentDeviceDetail = subscribed && subscriptionCount > 0
+    ? `已有 ${subscriptionCount} 个设备订阅`
+    : subscribed
+      ? "回复、需要输入和定时任务会通知"
+      : "iOS 需从主屏幕打开";
+  const detail = message || disabledReason || currentDeviceDetail;
+
+  return (
+    <div>
+      <div
+        style={{
+          ...fileTreeMenuButtonStyle,
+          color: subscribed ? "var(--accent-color)" : "var(--text-primary)",
+          opacity: busy || !enabled ? 0.55 : 1,
+          cursor: "default",
+          minWidth: 0,
+          whiteSpace: "nowrap",
+        }}
+      >
+        <button
+          type="button"
+          disabled={busy || !enabled}
+          onClick={() => void run(subscribed ? "unsubscribe" : "subscribe")}
+          style={{
+            minWidth: 0,
+            border: "none",
+            background: "transparent",
+            color: "inherit",
+            padding: 0,
+            display: "inline-flex",
+            alignItems: "center",
+            gap: "8px",
+            flex: "0 1 auto",
+            cursor: busy || !enabled ? "not-allowed" : "pointer",
+            font: "inherit",
+            textAlign: "left",
+            whiteSpace: "nowrap",
+          }}
+        >
+          <NotificationIcon />
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{busy ? "通知处理中" : label}</span>
+        </button>
+        <button
+          type="button"
+          aria-label="通知说明"
+          title="通知说明"
+          onClick={() => setExpanded((value) => !value)}
+          style={{
+            border: "none",
+            background: "transparent",
+            color: expanded ? "var(--accent-color)" : "var(--text-secondary)",
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            cursor: "pointer",
+            flexShrink: 0,
+            padding: 0,
+            marginLeft: "-4px",
+          }}
+        >
+          <InfoIcon />
+        </button>
+        <span style={{ marginLeft: "auto", fontSize: "11px", opacity: subscribed ? 1 : 0, flexShrink: 0 }}>✓</span>
+      </div>
+      {expanded ? (
+        <>
+          <div style={{ padding: "0 10px 6px 32px", color: "var(--text-secondary)", fontSize: "11px", lineHeight: 1.35 }}>
+            {detail}
+          </div>
+          {subscribed ? (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void run("test")}
+              style={{
+                ...fileTreeMenuButtonStyle,
+                paddingLeft: "32px",
+                color: "var(--text-secondary)",
+                opacity: busy ? 0.55 : 1,
+                cursor: busy ? "not-allowed" : "pointer",
+              }}
+            >
+              <span>发送测试通知</span>
+            </button>
+          ) : null}
+        </>
+      ) : null}
+    </div>
+  );
+}
+
 const ChevronRight = ({ isOpen }: { isOpen: boolean }) => (
   <svg
     width="14"
@@ -177,7 +344,7 @@ function DirectoryIconSlot({ entry, isOpen }: { entry: FileEntry; isOpen: boolea
 
 const getFileIcon = (filename: string) => {
   const ext = filename.split('.').pop()?.toLowerCase();
-  
+
   // 核心文件类型使用极简 SVG
   if (['js', 'ts', 'jsx', 'tsx', 'go', 'py', 'java', 'c', 'cpp'].includes(ext!)) {
     return (
@@ -201,7 +368,7 @@ const getFileIcon = (filename: string) => {
       </svg>
     );
   }
-  
+
   return (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.5 }}>
       <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/>
@@ -1646,7 +1813,7 @@ export function FileTree({
 
         const cKey = childKeyFor(entry, entryRoot);
         const children = childrenByPath[cKey] ?? [];
-        
+
         const isCurrentRootNode = isManagedRootNode && entry.path === rootId;
         // 普通目录沿用 selectedDirKey；当前 managed root 永远跟随 current root 高亮。
         const isSelected =
@@ -1903,6 +2070,7 @@ export function FileTree({
                   </svg>
                   <span>公网访问本地服务</span>
                 </button>
+                {!isNativeApp ? <WebPushMenuItem /> : null}
                 <div style={{ height: "1px", background: "var(--border-color)", margin: "6px 4px" }} />
                 <button
                   type="button"

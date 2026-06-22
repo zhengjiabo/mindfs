@@ -49,6 +49,7 @@
 - **文件与会话双向跳转**：打开文件可跳转到产生它的会话；打开会话可查看所有相关文件。
 - **Android, 浏览器应用（PWA）**：可安装到桌面或手机，体验更优。
 - **手机界面优化**：底部操作栏拇指可及，界面更简洁。
+- **通知推送**：会话状态变化时通过 Web Push 推送通知（ios 需要添加到主屏幕）。
 
 ### 访问模式
 
@@ -265,6 +266,7 @@ mindfs -agent-config /path/to/agents.json
 | `-agent-config string` | 空 | 加载一个额外的 `agents.json` 文件。 |
 | `-no-relayer` | `false` | 禁用 Relay 集成。本地访问和私有网络访问仍可使用。 |
 | `-e2ee` | `false` | 启用敏感数据端到端加密。<br>启用时，CLI 会输出配对密钥。<br>配对码也可以作为一种认证手段，未配对前端无法访问节点内容。<br>局域网访问需要开启 `-tls` 才能正常使用。 |
+| `-web-push` | `true` | 启用 PWA Web Push 通知。VAPID key 会在首次启动时自动生成。 |
 | `-tls` | `false` | 启用 HTTPS。如未指定 `-cert` 和 `-key`，MindFS 会生成并复用本地自签名证书。 |
 | `-cert string` | 空 | TLS 证书文件，PEM 格式。需配合 `-tls` 使用；为空时自动生成。 |
 | `-key string` | 空 | TLS 私钥文件，PEM 格式。需配合 `-tls` 使用；为空时自动生成。 |

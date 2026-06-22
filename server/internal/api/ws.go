@@ -754,11 +754,10 @@ func (h *WSHandler) runSessionMessage(job sessionMessageJob) {
 		OnUpdate: func(update agenttypes.Event) {
 			updateTracker.Begin()
 			defer updateTracker.End()
-			event := updateToEvent(update)
-			if event == nil {
+			if updateToEvent(update) == nil {
 				return
 			}
-			streamHub.BroadcastSessionStream(rootID, key, event)
+			h.AppContext.BroadcastSessionUpdate(rootID, key, update)
 		},
 		OnSubSessionCreated: func(created *session.Session) {
 			h.broadcastSessionMetaUpdated(rootID, created)
@@ -769,19 +768,17 @@ func (h *WSHandler) runSessionMessage(job sessionMessageJob) {
 		OnSubSessionUpdate: func(sessionKey string, update agenttypes.Event) {
 			tracker := subTrackerFor(sessionKey)
 			tracker.Begin()
-			event := updateToEvent(update)
-			if event == nil {
+			if updateToEvent(update) == nil {
 				tracker.End()
 				return
 			}
-			streamHub.BroadcastSessionStream(rootID, sessionKey, event)
+			h.AppContext.BroadcastSessionUpdate(rootID, sessionKey, update)
 			if update.Type == agenttypes.EventTypeMessageDone {
 				tracker.End()
 				if ok := tracker.WaitIdle(msgCtx, sessionDoneSettleWindow, sessionDoneMaxWait); !ok {
 					log.Printf("[ws] sub-session.done.wait_timeout root=%s session=%s", rootID, sessionKey)
 				}
-				streamHub.ClearSessionPending(sessionKey)
-				streamHub.BroadcastSessionDone(rootID, sessionKey, "")
+				h.AppContext.BroadcastSessionDone(rootID, sessionKey, "")
 				return
 			}
 			tracker.End()
@@ -799,10 +796,8 @@ func (h *WSHandler) runSessionMessage(job sessionMessageJob) {
 	if ok := updateTracker.WaitIdle(msgCtx, sessionDoneSettleWindow, sessionDoneMaxWait); !ok {
 		log.Printf("[ws] session.done.wait_timeout root=%s session=%s request=%s", rootID, key, requestID)
 	}
-	streamHub.ClearSessionPending(key)
-
 	log.Printf("[ws] session.done root=%s session=%s request=%s", rootID, key, requestID)
-	streamHub.BroadcastSessionDone(rootID, key, requestID)
+	h.AppContext.BroadcastSessionDone(rootID, key, requestID)
 	h.startNextQueuedSessionMessage(rootID, key)
 }
 

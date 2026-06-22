@@ -23,6 +23,7 @@ import (
 	"mindfs/server/internal/scheduled"
 	"mindfs/server/internal/tlsutil"
 	"mindfs/server/internal/update"
+	"mindfs/server/internal/webpush"
 )
 
 const staticDirEnvKey = "MINDFS_STATIC_DIR"
@@ -36,6 +37,7 @@ type StartOptions struct {
 	Args            []string
 	AgentConfigPath string
 	E2EEConfig      E2EEConfig
+	WebPushEnabled  bool
 	UseTLS          bool
 	CertFile        string
 	KeyFile         string
@@ -95,6 +97,14 @@ func Start(ctx context.Context, addr string, opts StartOptions) error {
 	if err != nil {
 		log.Printf("[preferences] init.error err=%v", err)
 	}
+	webPushStore, err := webpush.NewStore()
+	if err != nil {
+		log.Printf("[webpush] init.error err=%v", err)
+	}
+	webPushConfig, err := webpush.EnsureConfig(opts.WebPushEnabled)
+	if err != nil {
+		log.Printf("[webpush] config.error err=%v", err)
+	}
 	executable, _ := os.Executable()
 	updateSvc := update.NewService("a9gent/mindfs", opts.Version, executable, opts.Args, 10*time.Minute)
 	updateSvc.Start(ctx)
@@ -110,6 +120,7 @@ func Start(ctx context.Context, addr string, opts StartOptions) error {
 			NodeID:        opts.E2EEConfig.NodeID,
 			PairingSecret: opts.E2EEConfig.PairingSecret,
 		}),
+		WebPush: webpush.NewService(webPushConfig, webPushStore),
 	}
 	services.Scheduled = scheduled.NewService(services, services)
 	services.Scheduled.Start(ctx)

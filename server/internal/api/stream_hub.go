@@ -80,6 +80,13 @@ type ReplyingSessionState struct {
 	UpdatedAt    time.Time `json:"updatedAt"`
 }
 
+type PendingSessionSnapshot struct {
+	RootID       string
+	SessionTitle string
+	Summary      string
+	UpdatedAt    time.Time
+}
+
 type replayStep struct {
 	events []StreamEvent
 	live   bool
@@ -539,6 +546,21 @@ func (h *StreamHub) GetPendingUserExchange(sessionKey string) *session.Exchange 
 		return nil
 	}
 	return cloneUserExchange(state.User)
+}
+
+func (h *StreamHub) PendingSessionSnapshot(sessionKey string) PendingSessionSnapshot {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	state := h.pendingSessions[sessionKey]
+	if state == nil {
+		return PendingSessionSnapshot{}
+	}
+	return PendingSessionSnapshot{
+		RootID:       state.RootID,
+		SessionTitle: state.SessionTitle,
+		Summary:      state.Summary,
+		UpdatedAt:    state.UpdatedAt,
+	}
 }
 
 func (h *StreamHub) AppendReplyEvent(sessionKey string, event StreamEvent) {

@@ -311,6 +311,10 @@ func (h *HTTPHandler) Routes() http.Handler {
 	r.Get("/api/app/update", h.protectedEndpoint(h.handleAppUpdateGet))
 	r.Post("/api/app/update", h.protectedEndpoint(h.handleAppUpdatePost))
 	r.Post("/api/imports/github", h.protectedEndpoint(h.handleGitHubImportStart))
+	r.Get("/api/web-push/status", h.protectedEndpoint(h.handleWebPushStatus))
+	r.Post("/api/web-push/subscriptions", h.protectedEndpoint(h.handleWebPushSubscriptionSave))
+	r.Delete("/api/web-push/subscriptions", h.protectedEndpoint(h.handleWebPushSubscriptionDelete))
+	r.Post("/api/web-push/test", h.protectedEndpoint(h.handleWebPushTest))
 
 	// Agent status API
 	r.Get("/api/agents", h.protectedEndpoint(h.handleAgentsList))
