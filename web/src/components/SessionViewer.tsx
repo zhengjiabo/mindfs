@@ -364,7 +364,7 @@ function isAuxiliaryTimelineItem(item: TimelineItem | null): boolean {
   );
 }
 
-function PlanUpdateCard({ content }: { content: string }) {
+function PlanUpdateCard({ content, rootId }: { content: string; rootId?: string | null }) {
   return (
     <div
       style={{
@@ -388,7 +388,7 @@ function PlanUpdateCard({ content }: { content: string }) {
         Plan
       </div>
       <div style={{ padding: "10px" }}>
-        <MarkdownViewer content={content || ""} />
+        <MarkdownViewer content={content || ""} root={rootId || undefined} />
       </div>
     </div>
   );
@@ -1263,7 +1263,7 @@ if (useInnerScrollContainer && !container) {
     if (item.type === "plan") {
       return (
         <div key={timelineItemKey} style={{ marginTop: spacing }}>
-          <PlanUpdateCard content={item.planUpdate?.content || ""} />
+          <PlanUpdateCard content={item.planUpdate?.content || ""} rootId={rootId} />
         </div>
       );
     }
@@ -1618,6 +1618,7 @@ if (useInnerScrollContainer && !container) {
             >
               <MarkdownViewer
                 content={item.content || ""}
+                root={rootId || undefined}
                 onFileClick={onFileClickRef.current}
               />
             </div>

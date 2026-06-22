@@ -657,7 +657,7 @@ export const ToolCallCard = memo(function ToolCallCard({
           ) : detailLoadFailed && !hasContent && !hasLocations && !hasResult && !hasCollabDetails ? (
             <div style={{ marginTop: "10px", fontSize: "12px", color: "var(--text-secondary)" }}>加载失败</div>
           ) : isCollabTool ? (
-            <CollabToolDetails meta={effectiveMeta} />
+            <CollabToolDetails meta={effectiveMeta} rootId={rootId} />
           ) : hasStructuredDetails ? (
             <div style={{ display: "flex", flexDirection: "column", gap: "14px", marginTop: "10px" }}>
               {detailSections.map((section, index) => (
@@ -675,10 +675,10 @@ export const ToolCallCard = memo(function ToolCallCard({
                       >
                         {section.path}
                       </div>
-                      <MarkdownViewer content={section.markdown} />
+                      <MarkdownViewer content={section.markdown} root={rootId || undefined} />
                     </>
                   ) : (
-                    <MarkdownViewer content={section.markdown} />
+                    <MarkdownViewer content={section.markdown} root={rootId || undefined} />
                   )}
                 </div>
               ))}
@@ -707,7 +707,7 @@ export const ToolCallCard = memo(function ToolCallCard({
               {effectiveLocations!.length > 3 && <div>... +{effectiveLocations!.length - 3} 处</div>}
             </div>
           ) : null}
-          {!hasStructuredDetails && hasResult && <MarkdownViewer content={result || ""} />}
+          {!hasStructuredDetails && hasResult && <MarkdownViewer content={result || ""} root={rootId || undefined} />}
         </div>
       )}
 
@@ -765,11 +765,11 @@ export const ToolCallCard = memo(function ToolCallCard({
   );
 });
 
-function CollabToolDetails({ meta }: { meta?: Record<string, unknown> }) {
+function CollabToolDetails({ meta, rootId }: { meta?: Record<string, unknown>; rootId?: string | null }) {
   const prompt = typeof meta?.prompt === "string" ? meta.prompt.trim() : "";
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "10px", marginTop: "10px", minWidth: 0 }}>
-      {prompt ? <MarkdownViewer content={prompt} /> : null}
+      {prompt ? <MarkdownViewer content={prompt} root={rootId || undefined} /> : null}
     </div>
   );
 }
