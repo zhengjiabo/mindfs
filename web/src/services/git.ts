@@ -313,6 +313,9 @@ export async function fetchGitHistory(
       return normalized;
     }
     const existing = getHistoryCacheEntry(rootId);
+    if (!normalized.available) {
+      return normalized;
+    }
     if (!beforeCommit && !afterCommit) {
       const remoteHead = normalized.remote_head;
       setHistoryCacheEntry(rootId, {

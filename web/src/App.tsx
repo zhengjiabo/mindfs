@@ -908,6 +908,10 @@ function mapManagedRootsToEntries(dirs: ManagedRootPayload[]): FileEntry[] {
   }));
 }
 
+function comparableManagedRootPath(value: string | undefined): string {
+  return String(value || "").trim().replace(/\\/g, "/").replace(/\/+$/, "");
+}
+
 function buildDirectorySelectionKey(
   root: string,
   path: string,
@@ -2999,7 +3003,7 @@ export function App({ onGoHome }: AppProps) {
     }
     if (!options?.force) {
       const cachedHead = getCachedGitHistoryHead(rootID);
-      if (cachedHead) {
+      if (cachedHead && cachedHead.items.length > 0) {
         setGitHistory(cachedHead);
         const newest = cachedHead.items[0]?.hash || "";
         if (newest) {
@@ -5095,9 +5099,18 @@ export function App({ onGoHome }: AppProps) {
     const nextDirs = Array.isArray(dirs) ? dirs : [];
     syncRelayNodesToNative(nextDirs);
     const nextRootIds = nextDirs.map((dir) => dir.id).filter(Boolean);
-    managedRootByIdRef.current = Object.fromEntries(
+    const previousRootById = managedRootByIdRef.current;
+    const nextRootById = Object.fromEntries(
       nextDirs.filter((dir) => !!dir.id).map((dir) => [dir.id, dir]),
     );
+    for (const rootID of nextRootIds) {
+      const previousPath = comparableManagedRootPath(previousRootById[rootID]?.root_path);
+      const nextPath = comparableManagedRootPath(nextRootById[rootID]?.root_path);
+      if (previousPath && nextPath && previousPath !== nextPath) {
+        clearGitHistoryCache(rootID);
+      }
+    }
+    managedRootByIdRef.current = nextRootById;
 
     managedRootIdsRef.current = new Set(nextRootIds);
     setManagedRootIds(nextRootIds);
