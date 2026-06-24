@@ -760,7 +760,7 @@ func (h *WSHandler) handleSessionPlanModeSet(ctx context.Context, conn *websocke
 	}
 	h.sendWSAccepted(conn, clientID, requestID, rootID, key)
 	h.broadcastSessionMetaUpdated(rootID, updated)
-	_ = h.writeWSJSON(clientID, conn, buildSessionDoneResponse(rootID, key, requestID))
+	_ = h.writeWSJSON(clientID, conn, buildSessionDoneResponse(rootID, key, requestID, false))
 }
 
 func wsAgentPoolSessionKey(sessionKey, agentName string) string {

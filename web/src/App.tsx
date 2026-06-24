@@ -8038,7 +8038,9 @@ export function App({ onGoHome }: AppProps) {
                 currentRootIdRef.current ||
                 "";
           if (rootID && sessionKey) {
-            playCompletionSound();
+            if (payload?.replay !== true) {
+              playCompletionSound();
+            }
             setMultiProjectSessionPending(rootID, sessionKey, false);
             handleSessionStreamDone(rootID, sessionKey);
             const newest = sessionsRef.current[0]?.updated_at || "";

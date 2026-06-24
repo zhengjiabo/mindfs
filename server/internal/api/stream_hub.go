@@ -143,14 +143,18 @@ func buildSessionStreamResponse(rootID, sessionKey string, event *StreamEvent) W
 	}
 }
 
-func buildSessionDoneResponse(rootID, sessionKey, requestID string) WSResponse {
+func buildSessionDoneResponse(rootID, sessionKey, requestID string, replay bool) WSResponse {
+	payload := map[string]any{
+		"root_id":     rootID,
+		"session_key": sessionKey,
+	}
+	if replay {
+		payload["replay"] = true
+	}
 	return WSResponse{
-		ID:   requestID,
-		Type: "session.done",
-		Payload: map[string]any{
-			"root_id":     rootID,
-			"session_key": sessionKey,
-		},
+		ID:      requestID,
+		Type:    "session.done",
+		Payload: payload,
 	}
 }
 
@@ -769,7 +773,7 @@ func (h *StreamHub) BroadcastSessionDone(rootID, sessionKey, requestID string) {
 		Completed: time.Now().UTC(),
 	}
 	h.mu.Unlock()
-	resp := buildSessionDoneResponse(rootID, sessionKey, requestID)
+	resp := buildSessionDoneResponse(rootID, sessionKey, requestID, false)
 	for _, clientID := range h.GetSessionClientIDs(sessionKey, false) {
 		h.SendToClient(clientID, resp)
 	}
@@ -920,7 +924,7 @@ func (h *StreamHub) replayCompletionToClient(rootID, clientID, sessionKey string
 	}
 	requestID := completed.RequestID
 	h.mu.Unlock()
-	h.SendToClient(clientID, buildSessionDoneResponse(rootID, sessionKey, requestID))
+	h.SendToClient(clientID, buildSessionDoneResponse(rootID, sessionKey, requestID, true))
 }
 
 func (h *StreamHub) isReplayClientLocked(clientID, sessionKey string) bool {

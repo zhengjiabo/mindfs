@@ -32,9 +32,10 @@ Access your personal AI agents and workstation data anywhere, anytime through Mi
 - **Rich media input**: Attach files and images directly in your messages.
 - **Multi-device sync**: Access the same instance from multiple devices simultaneously with live session sync.
 - **Configuration backup and switching**: Agent configurations can be backed up and switched with one click, making it easier to move between multiple accounts or API keys.
-- **Subagents**: Codex subagents are automatically discovered and displayed.
+- **Subagents**: Codex/claudecode subagents are automatically discovered and displayed.
 - **session fork**: Session can forked from historical replies.
 - **Scheduled tasks**: Trigger agents to run tasks at specified times.
+- **Codex Remote Login**: Login to Codex remotely via the /login command.
 
 ### File Access
 
@@ -51,6 +52,7 @@ Access your personal AI agents and workstation data anywhere, anytime through Mi
 - **Android, Browser app (PWA)**: Install to desktop or mobile home screen for a native-like experience — no app store required.
 - **Mobile-optimized UI**: Bottom action bar within thumb reach, independent panel swipe navigation, input box adapts to the soft keyboard.
 - **Notification Push**: Notifications are delivered via Web Push upon session status changes (iOS requires adding the page to the home screen).
+- **User Habit Adaptation**: Support swapping the left and right sidebars, and switching between single-project and multi-project session lists.
 
 ### Access Modes
 
