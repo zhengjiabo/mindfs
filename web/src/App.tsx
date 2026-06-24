@@ -8,6 +8,7 @@ import React, {
 import { getViewModeSystemPrompt } from "./renderer/viewCatalog";
 import { Renderer } from "./renderer/Renderer";
 import {
+  clearCachedSessionsForRoot,
   deleteCachedSession,
   getCachedSession,
   sessionService,
@@ -34,6 +35,7 @@ import {
 import { reportError } from "./services/error";
 import {
   fetchFile,
+  clearFileCacheForRoot,
   getCachedFile,
   invalidateFileCache,
   type FilePayload,
@@ -781,6 +783,22 @@ function persistPluginQuery(
       pluginQueryStorageKey(root, file),
       JSON.stringify(query || {}),
     );
+  } catch {}
+}
+
+function removeLocalStorageByPrefix(prefix: string): void {
+  if (typeof window === "undefined" || !prefix) {
+    return;
+  }
+  try {
+    for (const key of Array.from(
+      { length: window.localStorage.length },
+      (_, index) => window.localStorage.key(index),
+    ).filter(Boolean) as string[]) {
+      if (key.startsWith(prefix)) {
+        window.localStorage.removeItem(key);
+      }
+    }
   } catch {}
 }
 
@@ -1801,6 +1819,136 @@ export function App({ onGoHome }: AppProps) {
     [],
   );
   const bumpCacheVersion = useCallback(() => setCacheVersion((v) => v + 1), []);
+  const clearRootScopedClientState = useCallback((rootID: string, options?: { removeLastRoot?: boolean }) => {
+    const root = String(rootID || "").trim();
+    if (!root) {
+      return;
+    }
+    const sessionPrefix = `${root}::`;
+    const treePrefix = `${root}:`;
+
+    const deleteRecordKeys = <T,>(record: Record<string, T>, predicate: (key: string) => boolean) => {
+      for (const key of Object.keys(record)) {
+        if (predicate(key)) {
+          delete record[key];
+        }
+      }
+    };
+    const deleteSessionRecordKeys = <T,>(record: Record<string, T>) => {
+      deleteRecordKeys(record, (key) => key.startsWith(sessionPrefix));
+    };
+
+    clearGitHistoryCache(root);
+    clearFileCacheForRoot(root);
+    void clearCachedSessionsForRoot(root);
+
+    delete boundSessionByRootRef.current[root];
+    delete suppressedAutoBindSessionByRootRef.current[root];
+    delete drawerSessionByRootRef.current[root];
+    delete selectedSessionByRootRef.current[root];
+    delete mainViewPreferenceByRootRef.current[root];
+    delete drawerOpenByRootRef.current[root];
+    delete pluginsLoadedByRootRef.current[root];
+    delete pluginsLoadingByRootRef.current[root];
+
+    deleteSessionRecordKeys(sessionCacheRef.current);
+    deleteSessionRecordKeys(loadedSessionRef.current);
+    deleteSessionRecordKeys(loadingSessionRef.current);
+    deleteSessionRecordKeys(pendingBySessionRef.current);
+    deleteSessionRecordKeys(queuedMessagesBySessionRef.current);
+    deleteSessionRecordKeys(queueFrozenBySessionRef.current);
+    deleteSessionRecordKeys(cancelRequestedBySessionRef.current);
+    deleteSessionRecordKeys(pendingRequestRef.current);
+    deleteRecordKeys(optimisticDequeuedIdsRef.current, (key) => key.startsWith(sessionPrefix));
+    staleSessionKeysRef.current = new Set(
+      Array.from(staleSessionKeysRef.current).filter((key) => !key.startsWith(sessionPrefix)),
+    );
+
+    deleteRecordKeys(entriesByPathRef.current, (key) => key === root || key.startsWith(treePrefix));
+    setEntriesByPath((prev) => {
+      const next = { ...prev };
+      deleteRecordKeys(next, (key) => key === root || key.startsWith(treePrefix));
+      return next;
+    });
+    invalidTreeCacheKeysRef.current = new Set(
+      Array.from(invalidTreeCacheKeysRef.current).filter(
+        (key) => key !== root && !key.startsWith(treePrefix),
+      ),
+    );
+
+    setShowGitHistoryByRoot((prev) => {
+      if (!(root in prev)) return prev;
+      const next = { ...prev };
+      delete next[root];
+      return next;
+    });
+    setGitStatusExpandedByRoot((prev) => {
+      if (!(root in prev)) return prev;
+      const next = { ...prev };
+      delete next[root];
+      return next;
+    });
+    setGitHistoryExpandedByRoot((prev) => {
+      if (!(root in prev)) return prev;
+      const next = { ...prev };
+      delete next[root];
+      return next;
+    });
+    setDirectorySortOverrides((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const key of Object.keys(next)) {
+        if (key === root || key.startsWith(treePrefix)) {
+          delete next[key];
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+    setMultiProjectPendingByKey((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const key of Object.keys(next)) {
+        if (key.startsWith(sessionPrefix)) {
+          delete next[key];
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+    setMultiProjectSessionGroups((prev) => {
+      const next = prev.filter((group) => group.rootId !== root);
+      return next.length === prev.length ? prev : next;
+    });
+    multiProjectPendingRef.current = Object.fromEntries(
+      Object.entries(multiProjectPendingRef.current).filter(([key]) => !key.startsWith(sessionPrefix)),
+    );
+    setSlashCommandResults((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const key of Object.keys(next)) {
+        if (key.startsWith(sessionPrefix)) {
+          delete next[key];
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+
+    deleteRecordKeys(fileScrollPositionsRef.current, (key) => key.startsWith(sessionPrefix));
+    persistFileScrollPositions(fileScrollPositionsRef.current);
+    removeLocalStorageByPrefix(`${PLUGIN_QUERY_STORAGE_PREFIX}${root}:`);
+    if (
+      options?.removeLastRoot === true &&
+      typeof window !== "undefined" &&
+      window.localStorage.getItem(LAST_ROOT_STORAGE_KEY) === root
+    ) {
+      window.localStorage.removeItem(LAST_ROOT_STORAGE_KEY);
+    }
+
+    bumpCacheVersion();
+    setQueueVersion((value) => value + 1);
+  }, [bumpCacheVersion]);
   const clearSlashCommandResultForSession = useCallback(
     (rootID: string, sessionKey: string) => {
       const key = rootSessionKey(rootID, sessionKey);
@@ -5689,14 +5837,26 @@ export function App({ onGoHome }: AppProps) {
     const nextRootById = Object.fromEntries(
       nextDirs.filter((dir) => !!dir.id).map((dir) => [dir.id, dir]),
     );
+    let clearedRootScopedState = false;
+    for (const rootID of Object.keys(previousRootById)) {
+      if (!(rootID in nextRootById)) {
+        clearRootScopedClientState(rootID, { removeLastRoot: true });
+        clearedRootScopedState = true;
+      }
+    }
     for (const rootID of nextRootIds) {
       const previousPath = comparableManagedRootPath(previousRootById[rootID]?.root_path);
       const nextPath = comparableManagedRootPath(nextRootById[rootID]?.root_path);
       if (previousPath && nextPath && previousPath !== nextPath) {
-        clearGitHistoryCache(rootID);
+        clearRootScopedClientState(rootID);
+        clearedRootScopedState = true;
       }
     }
     managedRootByIdRef.current = nextRootById;
+    if (clearedRootScopedState && multiProjectSessionsEnabled) {
+      void refreshMultiProjectReplyingSessions();
+      void loadMultiProjectSessionGroups();
+    }
 
     managedRootIdsRef.current = new Set(nextRootIds);
     setManagedRootIds(nextRootIds);
@@ -5745,7 +5905,14 @@ export function App({ onGoHome }: AppProps) {
       preservePluginQuery: true,
       isRoot: true,
     });
-  }, [loadManagedRootPayloads, replaceURLState]);
+  }, [
+    clearRootScopedClientState,
+    loadManagedRootPayloads,
+    loadMultiProjectSessionGroups,
+    multiProjectSessionsEnabled,
+    refreshMultiProjectReplyingSessions,
+    replaceURLState,
+  ]);
 
   const applyManagedRootRename = useCallback(
     (oldRootID: string, rootPayload: ManagedRootPayload | null | undefined) => {
@@ -6508,6 +6675,7 @@ export function App({ onGoHome }: AppProps) {
           method: "DELETE",
         },
       );
+      clearRootScopedClientState(rootID, { removeLastRoot: true });
       await refreshManagedRoots();
     } catch (err) {
       reportError(
@@ -6515,7 +6683,7 @@ export function App({ onGoHome }: AppProps) {
         String((err as Error)?.message || "移除项目失败"),
       );
     }
-  }, [refreshManagedRoots]);
+  }, [clearRootScopedClientState, refreshManagedRoots]);
 
   const handleRemoveCurrentWorktree = useCallback(async () => {
     const rootID = currentRootIdRef.current;
@@ -6527,6 +6695,7 @@ export function App({ onGoHome }: AppProps) {
     }
     try {
       await removeGitWorktree(rootID);
+      clearRootScopedClientState(rootID, { removeLastRoot: true });
       await refreshManagedRoots();
     } catch (err) {
       reportError(
@@ -6534,7 +6703,7 @@ export function App({ onGoHome }: AppProps) {
         String((err as Error)?.message || "移除 worktree 失败"),
       );
     }
-  }, [refreshManagedRoots]);
+  }, [clearRootScopedClientState, refreshManagedRoots]);
 
   const ensurePluginsLoaded = useCallback(async (rootId: string) => {
     if (!rootId || pluginsLoadedByRootRef.current[rootId]) {

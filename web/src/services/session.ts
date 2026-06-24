@@ -1613,6 +1613,25 @@ export async function deleteCachedSession(
   } catch {}
 }
 
+export async function clearCachedSessionsForRoot(rootId: string): Promise<void> {
+  if (!rootId) {
+    return;
+  }
+  try {
+    await withSessionStore("readwrite", async (store) => {
+      const entries =
+        (await sessionRequestToPromise(
+          store.getAll() as IDBRequest<CachedSessionRecord[]>,
+        )) || [];
+      await Promise.all(
+        entries
+          .filter((record) => record.rootId === rootId)
+          .map((record) => sessionRequestToPromise(store.delete(record.cacheKey))),
+      );
+    });
+  } catch {}
+}
+
 function cloneSession(session: Session): Session {
   return {
     ...session,
