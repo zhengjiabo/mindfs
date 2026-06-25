@@ -10107,6 +10107,15 @@ export function App({ onGoHome }: AppProps) {
         onSync={handleSyncSession}
         onRename={handleRenameSession}
         onDelete={handleDeleteSession}
+        onProjectClick={(rootId) => {
+          actionHandlers.open_dir({
+            path: rootId,
+            root: rootId,
+            isRoot: true,
+            suppressTreeExpand: true,
+          });
+          if (isMobile) setIsRightOpen(false);
+        }}
         onLoadMoreProject={loadMoreMultiProjectSessions}
         onLoadChildren={loadChildSessionsForParent}
       />
