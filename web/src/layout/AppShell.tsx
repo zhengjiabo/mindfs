@@ -240,7 +240,7 @@ export function AppShell({
             aria-label={physicalLeftOpen ? `收起${physicalLeftLabel}` : `展开${physicalLeftLabel}`}
             title={physicalLeftOpen ? `收起${physicalLeftLabel}` : `展开${physicalLeftLabel}`}
             style={{
-              left: physicalLeftOpen ? `calc(${physicalLeftWidth} - 4px)` : 0,
+              left: physicalLeftOpen ? `calc(${physicalLeftWidth} - 6px)` : 0,
               cursor: physicalLeftOpen ? "w-resize" : "e-resize",
             }}
           />
@@ -252,7 +252,7 @@ export function AppShell({
               aria-label={physicalRightOpen ? `收起${physicalRightLabel}` : `展开${physicalRightLabel}`}
               title={physicalRightOpen ? `收起${physicalRightLabel}` : `展开${physicalRightLabel}`}
               style={{
-                right: physicalRightOpen ? `calc(${physicalRightWidth} - 4px)` : 0,
+                right: physicalRightOpen ? `calc(${physicalRightWidth} - 6px)` : 0,
                 cursor: physicalRightOpen ? "e-resize" : "w-resize",
               }}
             />
