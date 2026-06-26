@@ -35,6 +35,43 @@ func TestManagerUsesSessionDBLink(t *testing.T) {
 	}
 }
 
+func TestManagerRecordRelatedWorktreeDoesNotOverwriteExisting(t *testing.T) {
+	rootDir := t.TempDir()
+	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
+	manager := NewManager(root)
+
+	created, err := manager.Create(context.Background(), CreateInput{Type: TypeChat, Name: "Worktree"})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	firstPath := filepath.Join(rootDir, "..", "mindfs-worktree-a")
+	secondPath := filepath.Join(rootDir, "..", "mindfs-worktree-b")
+	if added, err := manager.RecordRelatedWorktree(context.Background(), created.Key, root.ID, firstPath, "feature/a", "abc123"); err != nil {
+		t.Fatalf("record first worktree: %v", err)
+	} else if !added {
+		t.Fatal("record first worktree added = false, want true")
+	}
+	if added, err := manager.RecordRelatedWorktree(context.Background(), created.Key, root.ID, secondPath, "feature/b", "def456"); err != nil {
+		t.Fatalf("record second worktree: %v", err)
+	} else if added {
+		t.Fatal("record second worktree added = true, want false")
+	}
+
+	current, err := manager.Get(context.Background(), created.Key, 0)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if current.RelatedWorktree == nil {
+		t.Fatal("RelatedWorktree is nil")
+	}
+	if current.RelatedWorktree.Path != filepath.Clean(firstPath) {
+		t.Fatalf("RelatedWorktree.Path = %q, want %q", current.RelatedWorktree.Path, filepath.Clean(firstPath))
+	}
+	if current.RelatedWorktree.Branch != "feature/a" {
+		t.Fatalf("RelatedWorktree.Branch = %q, want feature/a", current.RelatedWorktree.Branch)
+	}
+}
+
 func TestManagerFallsBackToUserDataSessionDBOnSQLitePanic(t *testing.T) {
 	rootDir := t.TempDir()
 	root := rootfs.NewRootInfo("panic-root", "panic-root", rootDir)

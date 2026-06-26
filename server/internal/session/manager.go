@@ -32,7 +32,7 @@ const (
 	exchangeFileTpl  = "sessions/%s.jsonl"
 	auxFileTpl       = "sessions/%s.aux.jsonl"
 	selectSessionSQL = `
-	SELECT key, type, parent_session_key, parent_tool_call_id, source, model, shell, plan_mode, name, related_files_json, created_at, updated_at, closed_at
+	SELECT key, type, parent_session_key, parent_tool_call_id, source, model, shell, plan_mode, name, related_files_json, related_worktree_json, created_at, updated_at, closed_at
 	FROM sessions`
 	deleteSessionSQL = `
 DELETE FROM sessions
@@ -42,8 +42,8 @@ DELETE FROM session_agent_bindings
 WHERE session_key = ?`
 	upsertSessionMetaSQL = `
 INSERT INTO sessions (
-		key, type, parent_session_key, parent_tool_call_id, source, model, shell, plan_mode, name, related_files_json, created_at, updated_at, closed_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		key, type, parent_session_key, parent_tool_call_id, source, model, shell, plan_mode, name, related_files_json, related_worktree_json, created_at, updated_at, closed_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(key) DO UPDATE SET
 	type = excluded.type,
 	parent_session_key = excluded.parent_session_key,
@@ -54,6 +54,7 @@ ON CONFLICT(key) DO UPDATE SET
 		plan_mode = excluded.plan_mode,
 		name = excluded.name,
 	related_files_json = excluded.related_files_json,
+	related_worktree_json = excluded.related_worktree_json,
 	created_at = excluded.created_at,
 	updated_at = excluded.updated_at,
 	closed_at = excluded.closed_at`
@@ -69,6 +70,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 		plan_mode INTEGER NOT NULL DEFAULT 0,
 		name TEXT NOT NULL,
 	related_files_json TEXT NOT NULL,
+	related_worktree_json TEXT NOT NULL DEFAULT '',
 	created_at TEXT NOT NULL,
 	updated_at TEXT NOT NULL,
 	closed_at TEXT
@@ -602,6 +604,40 @@ func (m *Manager) RecordOutputFile(ctx context.Context, key, path string) error 
 		Relation:         "output",
 		CreatedBySession: true,
 	})
+}
+
+func (m *Manager) RecordRelatedWorktree(_ context.Context, key, rootID, path, branch, head string) (bool, error) {
+	rootID = strings.TrimSpace(rootID)
+	path = strings.TrimSpace(path)
+	if rootID == "" {
+		return false, errors.New("root id required")
+	}
+	if path == "" {
+		return false, errors.New("worktree path required")
+	}
+	if !filepath.IsAbs(path) {
+		return false, errors.New("worktree path must be absolute")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	session, err := m.getSessionUnsafe(key, 0)
+	if err != nil {
+		return false, err
+	}
+	if session.RelatedWorktree != nil && strings.TrimSpace(session.RelatedWorktree.Path) != "" {
+		return false, nil
+	}
+	session.RelatedWorktree = &RelatedWorktree{
+		RootID:    rootID,
+		Path:      filepath.Clean(path),
+		Branch:    strings.TrimSpace(branch),
+		Head:      strings.TrimSpace(head),
+		UpdatedAt: m.now().UTC(),
+	}
+	if err := m.upsertSessionMetaUnsafe(session); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (m *Manager) UpdateAgentState(_ context.Context, session *Session, agent string, lastCtxSeq int, agentSessionID string) error {
@@ -1541,6 +1577,7 @@ func openSessionMetaDB(dbFile string) (db *sql.DB, err error) {
 		`ALTER TABLE sessions ADD COLUMN parent_session_key TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE sessions ADD COLUMN parent_tool_call_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE sessions ADD COLUMN source TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sessions ADD COLUMN related_worktree_json TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := db.Exec(stmt); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
 			db.Close()
@@ -1601,6 +1638,14 @@ func sessionMetaUpsertArgs(session *Session) ([]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	relatedWorktreeJSON := ""
+	if session.RelatedWorktree != nil && strings.TrimSpace(session.RelatedWorktree.Path) != "" {
+		payload, err := json.Marshal(session.RelatedWorktree)
+		if err != nil {
+			return nil, err
+		}
+		relatedWorktreeJSON = string(payload)
+	}
 	var closedAt any
 	if session.ClosedAt != nil {
 		closedAt = session.ClosedAt.UTC().Format(time.RFC3339Nano)
@@ -1616,6 +1661,7 @@ func sessionMetaUpsertArgs(session *Session) ([]any, error) {
 		boolToSQLiteInt(session.PlanMode),
 		session.Name,
 		string(relatedFilesJSON),
+		relatedWorktreeJSON,
 		session.CreatedAt.UTC().Format(time.RFC3339Nano),
 		session.UpdatedAt.UTC().Format(time.RFC3339Nano),
 		closedAt,
@@ -1635,19 +1681,20 @@ type rowScanner interface {
 
 func scanSessionMetaRow(scanner rowScanner) (*Session, error) {
 	var (
-		key              string
-		typ              string
-		parentSessionKey string
-		parentToolCallID string
-		source           string
-		model            string
-		shell            string
-		planMode         int
-		name             string
-		relatedFilesJSON string
-		createdAtRaw     string
-		updatedAtRaw     string
-		closedAtRaw      sql.NullString
+		key                 string
+		typ                 string
+		parentSessionKey    string
+		parentToolCallID    string
+		source              string
+		model               string
+		shell               string
+		planMode            int
+		name                string
+		relatedFilesJSON    string
+		relatedWorktreeJSON string
+		createdAtRaw        string
+		updatedAtRaw        string
+		closedAtRaw         sql.NullString
 	)
 	if err := scanner.Scan(
 		&key,
@@ -1660,6 +1707,7 @@ func scanSessionMetaRow(scanner rowScanner) (*Session, error) {
 		&planMode,
 		&name,
 		&relatedFilesJSON,
+		&relatedWorktreeJSON,
 		&createdAtRaw,
 		&updatedAtRaw,
 		&closedAtRaw,
@@ -1682,6 +1730,12 @@ func scanSessionMetaRow(scanner rowScanner) (*Session, error) {
 	if strings.TrimSpace(relatedFilesJSON) != "" {
 		if err := json.Unmarshal([]byte(relatedFilesJSON), &session.RelatedFiles); err != nil {
 			session.RelatedFiles = []RelatedFile{}
+		}
+	}
+	if strings.TrimSpace(relatedWorktreeJSON) != "" {
+		var relatedWorktree RelatedWorktree
+		if err := json.Unmarshal([]byte(relatedWorktreeJSON), &relatedWorktree); err == nil && strings.TrimSpace(relatedWorktree.Path) != "" {
+			session.RelatedWorktree = &relatedWorktree
 		}
 	}
 	createdAt, err := time.Parse(time.RFC3339Nano, createdAtRaw)
@@ -1710,6 +1764,15 @@ func normalizeSessionMeta(s *Session) {
 	}
 	if s.RelatedFiles == nil {
 		s.RelatedFiles = []RelatedFile{}
+	}
+	if s.RelatedWorktree != nil {
+		s.RelatedWorktree.RootID = strings.TrimSpace(s.RelatedWorktree.RootID)
+		s.RelatedWorktree.Path = strings.TrimSpace(s.RelatedWorktree.Path)
+		s.RelatedWorktree.Branch = strings.TrimSpace(s.RelatedWorktree.Branch)
+		s.RelatedWorktree.Head = strings.TrimSpace(s.RelatedWorktree.Head)
+		if s.RelatedWorktree.Path == "" {
+			s.RelatedWorktree = nil
+		}
 	}
 	if s.Exchanges == nil {
 		s.Exchanges = []Exchange{}

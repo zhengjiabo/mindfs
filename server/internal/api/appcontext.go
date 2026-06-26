@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"mindfs/server/internal/e2ee"
 	"mindfs/server/internal/fs"
 	"mindfs/server/internal/githubimport"
+	"mindfs/server/internal/gitview"
 	"mindfs/server/internal/preferences"
 	"mindfs/server/internal/relay"
 	"mindfs/server/internal/scheduled"
@@ -124,7 +126,7 @@ func (s *AppContext) GetFileWatcher(rootID string, manager *session.Manager) (*f
 	if rootCtx.Watcher != nil {
 		return rootCtx.Watcher, nil
 	}
-	watcher, err := fs.NewSharedFileWatcher(rootCtx.Root, manager)
+	watcher, err := fs.NewSharedFileWatcher(rootCtx.Root, manager, resolveRelatedWorktree)
 	if err != nil {
 		return nil, err
 	}
@@ -133,6 +135,60 @@ func (s *AppContext) GetFileWatcher(rootID string, manager *session.Manager) (*f
 	watcher.SetOnRelatedFile(s.emitRelatedFile)
 	rootCtx.Watcher = watcher
 	return watcher, nil
+}
+
+func resolveRelatedWorktree(ctx context.Context, root fs.RootInfo, filePath string) (fs.RelatedWorktreeMatch, bool) {
+	cleanPath := cleanToolFilePath(filePath)
+	if cleanPath == "" {
+		return fs.RelatedWorktreeMatch{}, false
+	}
+	if !filepath.IsAbs(cleanPath) {
+		cleanPath = filepath.Join(root.RootPath, cleanPath)
+	}
+	cleanPath = filepath.Clean(cleanPath)
+	worktrees, err := gitview.ListWorktrees(ctx, root.RootPath)
+	if err != nil {
+		return fs.RelatedWorktreeMatch{}, false
+	}
+	for _, item := range worktrees.Items {
+		if strings.TrimSpace(item.Branch) == "" {
+			continue
+		}
+		if !pathInsideDir(cleanPath, item.Path) {
+			continue
+		}
+		return fs.RelatedWorktreeMatch{
+			Path:    item.Path,
+			Branch:  item.Branch,
+			Head:    item.Head,
+			Current: item.Current,
+		}, true
+	}
+	return fs.RelatedWorktreeMatch{}, false
+}
+
+func cleanToolFilePath(path string) string {
+	path = strings.TrimSpace(strings.SplitN(path, "#", 2)[0])
+	if path == "" {
+		return ""
+	}
+	return filepath.Clean(path)
+}
+
+func pathInsideDir(path, dir string) bool {
+	path = filepath.Clean(path)
+	dir = filepath.Clean(strings.TrimSpace(dir))
+	if path == "" || dir == "" {
+		return false
+	}
+	if path == dir {
+		return true
+	}
+	rel, err := filepath.Rel(dir, path)
+	if err != nil {
+		return false
+	}
+	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func (s *AppContext) ReleaseFileWatcher(rootID, sessionKey string) {

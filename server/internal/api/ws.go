@@ -337,13 +337,23 @@ func (h *WSHandler) broadcastFileChangeBatch(change fs.FileChangeBatchEvent) {
 }
 
 func (h *WSHandler) broadcastRelatedFileChange(change fs.RelatedFileEvent) {
+	payload := map[string]any{
+		"root_id":     change.RootID,
+		"session_key": change.SessionKey,
+		"path":        change.Path,
+	}
 	resp := WSResponse{
-		Type: "session.related_files.updated",
-		Payload: map[string]any{
-			"root_id":     change.RootID,
-			"session_key": change.SessionKey,
-			"path":        change.Path,
-		},
+		Type:    "session.related_files.updated",
+		Payload: payload,
+	}
+	if change.RelatedWorktree != nil {
+		payload["related_worktree"] = map[string]any{
+			"root_id": change.RootID,
+			"path":    change.RelatedWorktree.Path,
+			"branch":  change.RelatedWorktree.Branch,
+			"head":    change.RelatedWorktree.Head,
+			"current": change.RelatedWorktree.Current,
+		}
 	}
 	h.broadcastWS(resp)
 }
@@ -368,6 +378,7 @@ func (h *WSHandler) broadcastSessionMetaUpdated(rootID string, sess *session.Ses
 				"effort":              session.InferEffortFromSession(sess),
 				"fast_service":        session.InferFastServiceFromSession(sess),
 				"plan_mode":           sess.PlanMode,
+				"related_worktree":    sess.RelatedWorktree,
 				"updated_at":          sess.UpdatedAt,
 			},
 		},

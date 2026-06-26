@@ -14,21 +14,22 @@ const (
 )
 
 type Session struct {
-	Key              string         `json:"key"`
-	Type             string         `json:"type"`
-	ParentSessionKey string         `json:"parent_session_key,omitempty"`
-	ParentToolCallID string         `json:"parent_tool_call_id,omitempty"`
-	Source           string         `json:"source,omitempty"`
-	AgentCtxSeq      map[string]int `json:"agent_ctx_seq,omitempty"`
-	Model            string         `json:"model,omitempty"`
-	Shell            string         `json:"shell,omitempty"`
-	PlanMode         bool           `json:"plan_mode,omitempty"`
-	Name             string         `json:"name"`
-	Exchanges        []Exchange     `json:"exchanges"`
-	RelatedFiles     []RelatedFile  `json:"related_files"`
-	CreatedAt        time.Time      `json:"created_at"`
-	UpdatedAt        time.Time      `json:"updated_at"`
-	ClosedAt         *time.Time     `json:"closed_at,omitempty"`
+	Key              string           `json:"key"`
+	Type             string           `json:"type"`
+	ParentSessionKey string           `json:"parent_session_key,omitempty"`
+	ParentToolCallID string           `json:"parent_tool_call_id,omitempty"`
+	Source           string           `json:"source,omitempty"`
+	AgentCtxSeq      map[string]int   `json:"agent_ctx_seq,omitempty"`
+	Model            string           `json:"model,omitempty"`
+	Shell            string           `json:"shell,omitempty"`
+	PlanMode         bool             `json:"plan_mode,omitempty"`
+	Name             string           `json:"name"`
+	Exchanges        []Exchange       `json:"exchanges"`
+	RelatedFiles     []RelatedFile    `json:"related_files"`
+	RelatedWorktree  *RelatedWorktree `json:"related_worktree,omitempty"`
+	CreatedAt        time.Time        `json:"created_at"`
+	UpdatedAt        time.Time        `json:"updated_at"`
+	ClosedAt         *time.Time       `json:"closed_at,omitempty"`
 }
 
 type Exchange struct {
@@ -214,6 +215,14 @@ type RelatedFile struct {
 	Path             string `json:"path"`
 	Relation         string `json:"relation"`
 	CreatedBySession bool   `json:"created_by_session"`
+}
+
+type RelatedWorktree struct {
+	RootID    string    `json:"root_id"`
+	Path      string    `json:"path"`
+	Branch    string    `json:"branch,omitempty"`
+	Head      string    `json:"head,omitempty"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type SearchOptions struct {

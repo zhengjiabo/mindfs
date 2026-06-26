@@ -63,12 +63,14 @@ type SharedFileWatcher struct {
 	onFileChange      func(FileChangeEvent)
 	onFileChangeBatch func(FileChangeBatchEvent)
 	onRelatedFile     func(RelatedFileEvent)
+	worktreeResolver  WorktreeResolver
 
 	done chan struct{}
 }
 
 type SessionFileRecorder interface {
 	RecordOutputFile(ctx context.Context, key, path string) error
+	RecordRelatedWorktree(ctx context.Context, key, rootID, path, branch, head string) (bool, error)
 }
 
 type sessionInfo struct {
@@ -90,20 +92,35 @@ type FileChangeBatchEvent struct {
 }
 
 type RelatedFileEvent struct {
-	RootID     string `json:"root_id"`
-	SessionKey string `json:"session_key"`
-	Path       string `json:"path"`
+	RootID          string                `json:"root_id"`
+	SessionKey      string                `json:"session_key"`
+	Path            string                `json:"path"`
+	RelatedWorktree *RelatedWorktreeMatch `json:"related_worktree,omitempty"`
 }
 
-func NewSharedFileWatcher(root RootInfo, sessions SessionFileRecorder) (*SharedFileWatcher, error) {
+type RelatedWorktreeMatch struct {
+	Path    string
+	Branch  string
+	Head    string
+	Current bool
+}
+
+type WorktreeResolver func(ctx context.Context, root RootInfo, filePath string) (RelatedWorktreeMatch, bool)
+
+func NewSharedFileWatcher(root RootInfo, sessions SessionFileRecorder, worktreeResolvers ...WorktreeResolver) (*SharedFileWatcher, error) {
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
+	}
+	var resolver WorktreeResolver
+	if len(worktreeResolvers) > 0 {
+		resolver = worktreeResolvers[0]
 	}
 	sw := &SharedFileWatcher{
 		root:              root,
 		watcher:           w,
 		sessionStore:      sessions,
+		worktreeResolver:  resolver,
 		sessions:          make(map[string]*sessionInfo),
 		watchedDirs:       make(map[string]struct{}),
 		pendingWrites:     make(map[string]string),
@@ -159,6 +176,7 @@ func (sw *SharedFileWatcher) RecordSessionFile(sessionKey, filePath string) {
 	if sw.sessionStore == nil || sessionKey == "" || filePath == "" {
 		return
 	}
+	sw.recordSessionWorktree(context.Background(), sessionKey, filePath)
 	relPath, err := sw.root.NormalizePath(filePath)
 	if err != nil {
 		return
@@ -179,6 +197,23 @@ func (sw *SharedFileWatcher) RecordSessionFile(sessionKey, filePath string) {
 		SessionKey: sessionKey,
 		Path:       relPath,
 	})
+}
+
+func (sw *SharedFileWatcher) recordSessionWorktree(ctx context.Context, sessionKey, filePath string) {
+	if sw.sessionStore == nil || sw.worktreeResolver == nil || sessionKey == "" || filePath == "" {
+		return
+	}
+	match, ok := sw.worktreeResolver(ctx, sw.root, filePath)
+	if !ok {
+		return
+	}
+	if added, err := sw.sessionStore.RecordRelatedWorktree(ctx, sessionKey, sw.root.ID, match.Path, match.Branch, match.Head); err == nil && added {
+		sw.emitRelatedFile(RelatedFileEvent{
+			RootID:          sw.root.ID,
+			SessionKey:      sessionKey,
+			RelatedWorktree: &match,
+		})
+	}
 }
 
 func (sw *SharedFileWatcher) SetOnFileChange(handler func(FileChangeEvent)) {

@@ -17,6 +17,7 @@ import {
   type MultiRootSessionGroup,
   type SyncSessionResult,
   type RelatedFile,
+  type RelatedWorktree,
   type Session,
   type QueuedUserMessage,
 } from "./services/session";
@@ -166,6 +167,7 @@ export type SessionItem = {
   search_snippet?: string;
   search_match_type?: "name" | "user" | "reply";
   related_files?: RelatedFile[];
+  related_worktree?: RelatedWorktree | null;
   exchanges?: Array<{
     seq?: number;
     role?: string;
@@ -2339,6 +2341,52 @@ export function App({ onGoHome }: AppProps) {
         setDrawerSessionForRoot(rootID, {
           ...(current as any),
           related_files: nextRelatedFiles,
+        } as Session);
+      }
+      bumpCacheVersion();
+    },
+    [rootSessionKey, setDrawerSessionForRoot, bumpCacheVersion],
+  );
+
+  const updateSessionRelatedWorktreeForKey = useCallback(
+    (rootID: string, sessionKey: string, relatedWorktree: RelatedWorktree | null | undefined) => {
+      if (!rootID || !sessionKey || !relatedWorktree) return;
+      const cacheKey = rootSessionKey(rootID, sessionKey);
+      const cached = sessionCacheRef.current[cacheKey];
+      if (cached) {
+        sessionCacheRef.current[cacheKey] = {
+          ...(cached as any),
+          related_worktree: relatedWorktree,
+        } as Session;
+      }
+
+      const lastMain = lastMainSessionSnapshotRef.current;
+      const lastMainKey = lastMain?.key || lastMain?.session_key;
+      const lastMainRoot =
+        (lastMain?.root_id as string | undefined) || currentRootIdRef.current;
+      if (lastMain && lastMainKey === sessionKey && lastMainRoot === rootID) {
+        lastMainSessionSnapshotRef.current = {
+          ...(lastMain as any),
+          related_worktree: relatedWorktree,
+        } as Session;
+      }
+
+      setSelectedSession((prev) => {
+        const prevKey = prev?.key || prev?.session_key;
+        const prevRoot =
+          (prev?.root_id as string | undefined) || currentRootIdRef.current;
+        if (!prev || prevKey !== sessionKey || prevRoot !== rootID) return prev;
+        return {
+          ...(prev as any),
+          related_worktree: relatedWorktree,
+        } as SessionItem;
+      });
+
+      const current = drawerSessionByRootRef.current[rootID];
+      if (current && current.key === sessionKey) {
+        setDrawerSessionForRoot(rootID, {
+          ...(current as any),
+          related_worktree: relatedWorktree,
         } as Session);
       }
       bumpCacheVersion();
@@ -8346,6 +8394,10 @@ export function App({ onGoHome }: AppProps) {
                   typeof payload.session.source === "string"
                     ? payload.session.source
                     : (cached as any).source,
+                related_worktree:
+                  payload.session.related_worktree !== undefined
+                    ? payload.session.related_worktree
+                    : (cached as any).related_worktree,
                 updated_at: payload.session.updated_at || cached.updated_at,
               } as Session;
               bumpCacheVersion();
@@ -8393,6 +8445,10 @@ export function App({ onGoHome }: AppProps) {
                         typeof payload.session.source === "string"
                           ? payload.session.source
                           : (prev as any).source,
+                      related_worktree:
+                        payload.session.related_worktree !== undefined
+                          ? payload.session.related_worktree
+                          : (prev as any).related_worktree,
                       updated_at: payload.session.updated_at || prev.updated_at,
                     } as SessionItem)
                   : prev,
@@ -8421,6 +8477,13 @@ export function App({ onGoHome }: AppProps) {
             typeof payload?.session_key === "string" ? payload.session_key : "";
           if (rootID && sessionKey) {
             void refreshSessionRelatedFiles(rootID, sessionKey);
+            if (payload?.related_worktree && typeof payload.related_worktree === "object") {
+              updateSessionRelatedWorktreeForKey(
+                rootID,
+                sessionKey,
+                payload.related_worktree as RelatedWorktree,
+              );
+            }
           }
           break;
         }
@@ -8511,6 +8574,7 @@ export function App({ onGoHome }: AppProps) {
     refreshCurrentFileContent,
     refreshGitStatus,
     refreshManagedRoots,
+    updateSessionRelatedWorktreeForKey,
     updateSessionRelatedFilesForKey,
     treeCacheKey,
   ]);
@@ -9647,8 +9711,43 @@ export function App({ onGoHome }: AppProps) {
     currentRootId;
   const relatedSessionKey = relatedSessionSnapshot?.key || relatedSessionSnapshot?.session_key;
   const relatedSelectedPath = gitDiff?.path || file?.path || "";
+  const relatedWorktree = relatedSessionSnapshot?.related_worktree || null;
+
+  useEffect(() => {
+    const rootID = String(relatedWorktree?.root_id || "");
+    const worktreePath = String(relatedWorktree?.path || "");
+    if (projectTreeTab !== "worktrees" || !rootID || !worktreePath) {
+      return;
+    }
+    setExpandedWorktreeByRoot((prev) => {
+      if (prev[rootID]) {
+        return prev;
+      }
+      return { ...prev, [rootID]: worktreePath };
+    });
+    void loadProjectTreeWorktreeStatus(worktreePath);
+  }, [
+    loadProjectTreeWorktreeStatus,
+    projectTreeTab,
+    relatedWorktree?.path,
+    relatedWorktree?.root_id,
+  ]);
+
   const renderRootWorktreeContent = (root: string): React.ReactNode => {
-    const items = worktreeItemsByRoot[root] || [];
+    const relatedPath =
+      relatedWorktree?.root_id === root ? String(relatedWorktree?.path || "") : "";
+    const items = [...(worktreeItemsByRoot[root] || [])].sort((left, right) => {
+      if (!relatedPath) {
+        return 0;
+      }
+      if (left.path === relatedPath) {
+        return -1;
+      }
+      if (right.path === relatedPath) {
+        return 1;
+      }
+      return 0;
+    });
     const loading = worktreeLoadingByRoot[root] === true;
     const error = worktreeErrorByRoot[root] || "";
     const expandedPath = expandedWorktreeByRoot[root] || "";

@@ -65,6 +65,15 @@ export type RelatedFile = {
   created_by_session?: boolean;
 };
 
+export type RelatedWorktree = {
+  root_id: string;
+  path: string;
+  branch?: string;
+  head?: string;
+  current?: boolean;
+  updated_at?: string;
+};
+
 export type ExchangeAux = {
   seq: number;
   line: number;
@@ -97,6 +106,7 @@ export type Session = {
     modelContextWindow: number;
   };
   related_files?: RelatedFile[];
+  related_worktree?: RelatedWorktree | null;
   exchange_aux?: Record<string, ExchangeAux[]>;
   exchanges?: Array<{
     seq?: number;
