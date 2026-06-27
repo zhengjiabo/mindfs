@@ -298,6 +298,7 @@ func (h *HTTPHandler) Routes() http.Handler {
 	r.Post("/api/sessions/import/batch", h.protectedEndpoint(h.handleExternalSessionImportBatch))
 	r.Post("/api/sessions/fork", h.protectedEndpoint(h.handleSessionFork))
 	r.Get("/api/sessions/{key}/toolcalls/{callID}", h.protectedEndpoint(h.handleSessionToolCallGet))
+	r.Post("/api/sessions/{key}/sync", h.protectedEndpoint(h.handleSessionSync))
 	r.Get("/api/sessions/{key}", h.protectedEndpoint(h.handleSessionGet))
 	r.Get("/api/sessions/{key}/related-files", h.protectedEndpoint(h.handleSessionRelatedFilesGet))
 	r.Post("/api/sessions/{key}/rename", h.protectedEndpoint(h.handleSessionRename))
@@ -747,6 +748,48 @@ func (h *HTTPHandler) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 		Seq:    afterSeq,
 	})
 	respondJSON(w, http.StatusOK, h.sessionResponse(out, pendingUser, contextWindow, exchangeAux))
+}
+
+func (h *HTTPHandler) handleSessionSync(w http.ResponseWriter, r *http.Request) {
+	rootID := r.URL.Query().Get("root")
+	key := chi.URLParam(r, "key")
+	if strings.TrimSpace(key) == "" {
+		respondError(w, http.StatusBadRequest, errInvalidRequest("session key required"))
+		return
+	}
+	afterSeq, err := parsePositiveIntQuery(r, "seq")
+	if err != nil {
+		respondError(w, http.StatusBadRequest, errInvalidRequest("seq must be a positive integer"))
+		return
+	}
+	uc := h.service()
+	if _, err := uc.SyncExternalSessionDelta(r.Context(), usecase.SyncExternalSessionDeltaInput{
+		RootID: rootID,
+		Key:    key,
+		Full:   true,
+	}); err != nil {
+		respondError(w, http.StatusBadRequest, err)
+		return
+	}
+	out, err := uc.GetSession(r.Context(), usecase.GetSessionInput{
+		RootID: rootID,
+		Key:    key,
+		Seq:    afterSeq,
+	})
+	if err != nil {
+		respondError(w, http.StatusNotFound, err)
+		return
+	}
+	contextWindow, _ := uc.GetSessionContextWindow(r.Context(), usecase.GetSessionContextWindowInput{
+		RootID: rootID,
+		Key:    key,
+	})
+	exchangeAux, _ := uc.GetSessionExchangeAux(r.Context(), usecase.GetSessionExchangeAuxInput{
+		RootID: rootID,
+		Key:    key,
+		Seq:    afterSeq,
+	})
+	respondJSON(w, http.StatusOK, h.sessionResponse(out, nil, contextWindow, exchangeAux))
 }
 
 func (h *HTTPHandler) handleSessionToolCallGet(w http.ResponseWriter, r *http.Request) {

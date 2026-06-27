@@ -1150,6 +1150,27 @@ class SessionService {
     }
   }
 
+  async syncExternalSession(
+    rootId: string,
+    sessionKey: string,
+    seq?: number,
+  ): Promise<Session | null> {
+    try {
+      const params = new URLSearchParams({ root: rootId });
+      if (typeof seq === "number" && seq > 0) {
+        params.set("seq", String(seq));
+      }
+      const data = await protectedJSON<Session>(
+        appURL(`/api/sessions/${encodeURIComponent(sessionKey)}/sync`, params),
+        { method: "POST" },
+      );
+      return data as Session;
+    } catch (err) {
+      console.error("[Session] Failed to sync session:", err);
+      return null;
+    }
+  }
+
   async getToolCall(
     rootId: string,
     sessionKey: string,
@@ -1719,10 +1740,13 @@ export async function setCachedSessionRelatedFiles(
 export async function syncSession(
   rootId: string,
   sessionKey: string,
+  options?: { full?: boolean },
 ): Promise<SyncSessionResult> {
   const base = await getCachedSession(rootId, sessionKey);
   const seq = getSessionMaxSeq(base);
-  const incoming = await sessionService.getSession(rootId, sessionKey, seq);
+  const incoming = options?.full
+    ? await sessionService.syncExternalSession(rootId, sessionKey, seq)
+    : await sessionService.getSession(rootId, sessionKey, seq);
   if (!incoming) {
     return { session: base, hasDelta: false };
   }

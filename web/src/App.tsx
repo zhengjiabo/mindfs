@@ -1192,6 +1192,9 @@ export function App({ onGoHome }: AppProps) {
   const [sessionSearchAppliedQuery, setSessionSearchAppliedQuery] = useState("");
   const [sessionSearchResults, setSessionSearchResults] = useState<SessionItem[]>([]);
   const [sessionSearchLoading, setSessionSearchLoading] = useState(false);
+  const [syncingSessionKeys, setSyncingSessionKeys] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [hasMoreSessions, setHasMoreSessions] = useState(false);
   const [loadingOlderSessions, setLoadingOlderSessions] = useState(false);
   const [sessionListMode, setSessionListMode] = useState<"local" | "import">(
@@ -4444,8 +4447,14 @@ export function App({ onGoHome }: AppProps) {
       if (!rootID || !sessionKey || sessionKey.startsWith("pending-")) return;
 
       const cacheKey = rootSessionKey(rootID, sessionKey);
+      setSyncingSessionKeys((prev) => {
+        const next = new Set(prev);
+        next.add(cacheKey);
+        next.add(sessionKey);
+        return next;
+      });
       try {
-        const result = await syncSession(rootID, sessionKey);
+        const result = await syncSession(rootID, sessionKey, { full: true });
         const synced = result.session;
         if (!synced) {
           reportError("session.sync_failed", "同步会话失败");
@@ -4487,6 +4496,13 @@ export function App({ onGoHome }: AppProps) {
         bumpCacheVersion();
       } catch {
         reportError("session.sync_failed", "同步会话失败");
+      } finally {
+        setSyncingSessionKeys((prev) => {
+          const next = new Set(prev);
+          next.delete(cacheKey);
+          next.delete(sessionKey);
+          return next;
+        });
       }
     },
     [
@@ -10945,6 +10961,7 @@ export function App({ onGoHome }: AppProps) {
         headerAction={sessionImportMenu}
         loading={multiProjectSessionsLoading}
         emptyText="暂无会话记录"
+        syncingSessionKeys={syncingSessionKeys}
         onSearchToggle={() => {
           setSessionSearchOpen(true);
           setSessionSearchResultsMode(false);
@@ -10985,6 +11002,7 @@ export function App({ onGoHome }: AppProps) {
         searchResultsMode={sessionSearchResultsMode}
         searchQuery={sessionSearchQuery}
         searchLoading={sessionSearchLoading}
+        syncingSessionKeys={syncingSessionKeys}
         emptyText={
           sessionSearchResultsMode
             ? "未找到匹配会话"

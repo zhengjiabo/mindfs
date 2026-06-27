@@ -40,6 +40,7 @@ type SessionListProps = {
   onSearchQueryChange?: (query: string) => void;
   onSearchSubmit?: () => void;
   onSearchBlur?: () => void;
+  syncingSessionKeys?: Set<string>;
   onSelect?: (session: SessionItem) => void;
   onRestore?: (session: SessionItem) => void;
   onSync?: (session: SessionItem) => Promise<void> | void;
@@ -85,6 +86,7 @@ type ProjectSessionListProps = {
   headerAction?: React.ReactNode;
   loading?: boolean;
   emptyText?: React.ReactNode;
+  syncingSessionKeys?: Set<string>;
   onSearchToggle?: () => void;
   onSelect?: (session: SessionItem) => void;
   onSync?: (session: SessionItem) => Promise<void> | void;
@@ -266,6 +268,24 @@ function forkSessionDisplayName(
   return source.seq > 0 ? `${base}#${source.seq}` : base;
 }
 
+function isSessionSyncing(
+  session: SessionItem,
+  syncingSessionKeys?: Set<string>,
+): boolean {
+  if (!syncingSessionKeys || syncingSessionKeys.size === 0) {
+    return false;
+  }
+  const key = session.key || session.session_key || "";
+  if (!key) {
+    return false;
+  }
+  const rootId = session.root_id || "";
+  return (
+    syncingSessionKeys.has(key) ||
+    (!!rootId && syncingSessionKeys.has(`${rootId}::${key}`))
+  );
+}
+
 export function SessionList({
   sessions,
   selectedKey = "",
@@ -280,6 +300,7 @@ export function SessionList({
   onSearchQueryChange,
   onSearchSubmit,
   onSearchBlur,
+  syncingSessionKeys,
   onSelect,
   onSync,
   onRename,
@@ -653,6 +674,7 @@ export function SessionList({
                   selected={session.key === selectedKey}
                   parentHighlighted={!!selectedParentKey && session.key === selectedParentKey}
                   highlightQuery={searchResultsMode ? searchQuery : ""}
+                  syncing={isSessionSyncing(session, syncingSessionKeys)}
                   childCount={childCountByParent.get(session.key) || 0}
                   onSelect={onSelect}
                   onSync={onSync}
@@ -688,6 +710,10 @@ export function SessionList({
           0%, 100% { opacity: 1; box-shadow: 0 0 0 1.5px rgba(37,99,235,0.14); }
           50% { opacity: 0.18; box-shadow: 0 0 0 4px rgba(37,99,235,0.08); }
         }
+        @keyframes spin {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
       `}</style>
     </div>
   );
@@ -700,6 +726,7 @@ export function MultiProjectSessionList({
   headerAction,
   loading = false,
   emptyText = "暂无会话记录",
+  syncingSessionKeys,
   onSearchToggle,
   onSelect,
   onSync,
@@ -1116,6 +1143,7 @@ export function MultiProjectSessionList({
                           selected={session.key === selectedKey && sessionRoot === selectedRootId}
                           parentHighlighted={false}
                           highlightQuery=""
+                          syncing={isSessionSyncing({ ...session, root_id: sessionRoot }, syncingSessionKeys)}
                           childCount={childCountByParent.get(session.key) || 0}
                           onSelect={onSelect}
                           onSync={onSync}
@@ -1155,6 +1183,10 @@ export function MultiProjectSessionList({
           0%, 100% { opacity: 1; box-shadow: 0 0 0 1.5px rgba(37,99,235,0.14); }
           50% { opacity: 0.18; box-shadow: 0 0 0 4px rgba(37,99,235,0.08); }
         }
+        @keyframes spin {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
       `}</style>
     </div>
   );
@@ -1166,6 +1198,7 @@ function SessionCard({
   selected,
   parentHighlighted,
   highlightQuery,
+  syncing = false,
   childCount = 0,
   onSelect,
   onSync,
@@ -1177,6 +1210,7 @@ function SessionCard({
   selected: boolean;
   parentHighlighted?: boolean;
   highlightQuery?: string;
+  syncing?: boolean;
   childCount?: number;
   onSelect?: (session: SessionItem) => void;
   onSync?: (session: SessionItem) => Promise<void> | void;
@@ -1581,7 +1615,22 @@ function SessionCard({
             paddingLeft: "2px",
           }}
         >
-          {session.pending ? (
+          {syncing ? (
+            <span
+              aria-label="同步中"
+              title="同步中"
+              style={{
+                width: "12px",
+                height: "12px",
+                borderRadius: "50%",
+                border: "1.5px solid rgba(100,116,139,0.35)",
+                borderTopColor: "var(--accent-color)",
+                display: "inline-block",
+                flexShrink: 0,
+                animation: "spin 0.8s linear infinite",
+              }}
+            />
+          ) : session.pending ? (
             <span
               aria-label="正在回复"
               title="正在回复"
@@ -1671,6 +1720,7 @@ function SessionCard({
           >
             <button
               type="button"
+              disabled={syncing}
               onClick={(e) => {
                 e.stopPropagation();
                 setMenuOpen(false);
@@ -1679,6 +1729,8 @@ function SessionCard({
               style={{
                 ...menuItemStyle,
                 color: "var(--text-primary)",
+                opacity: syncing ? 0.55 : 1,
+                cursor: syncing ? "default" : "pointer",
               }}
             >
               <svg

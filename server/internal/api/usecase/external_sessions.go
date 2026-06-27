@@ -65,6 +65,7 @@ type ImportExternalSessionsBatchOutput struct {
 type SyncExternalSessionDeltaInput struct {
 	RootID string
 	Key    string
+	Full   bool
 }
 
 type SyncExternalSessionDeltaOutput struct {
@@ -306,17 +307,25 @@ func (s *Service) SyncExternalSessionDelta(ctx context.Context, in SyncExternalS
 	if err != nil {
 		return out, err
 	}
-	imported, err := importer.ImportExternalSession(ctx, agenttypes.ImportExternalSessionInput{
+	importInput := agenttypes.ImportExternalSessionInput{
 		RootPath:       root.RootPath,
 		Agent:          agentName,
 		AgentSessionID: binding.AgentSessionID,
-	})
+	}
+	if !in.Full {
+		importInput.AfterTimestamp = lastTimestamp
+	}
+	imported, err := importer.ImportExternalSession(ctx, importInput)
 	if err != nil {
 		return out, err
 	}
 
+	delta := imported.Exchanges
+	if in.Full {
+		delta = externalSessionDeltaAfterCtxSeq(imported.Exchanges, binding.AgentCtxSeq)
+	}
 	importedCount := 0
-	for _, exchange := range externalSessionDeltaAfterCtxSeq(imported.Exchanges, binding.AgentCtxSeq) {
+	for _, exchange := range delta {
 		role := strings.TrimSpace(exchange.Role)
 		if role != "user" && role != "agent" {
 			continue
