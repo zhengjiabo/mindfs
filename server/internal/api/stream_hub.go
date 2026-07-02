@@ -32,6 +32,7 @@ type PendingUserMessage struct {
 	Mode        string    `json:"mode,omitempty"`
 	Effort      string    `json:"effort,omitempty"`
 	FastService string    `json:"fast_service,omitempty"`
+	PlanMode    bool      `json:"plan_mode,omitempty"`
 	Content     string    `json:"content"`
 	Timestamp   time.Time `json:"timestamp"`
 }
@@ -185,7 +186,7 @@ func buildSlashCommandDoneResponse(rootID, sessionKey, command, requestID string
 	}
 }
 
-func buildSessionUserMessageResponse(rootID, sessionKey, sessionType, sessionName, agentName, model, mode, effort, fastService string, content string, timestamp time.Time, queued bool) WSResponse {
+func buildSessionUserMessageResponse(rootID, sessionKey, sessionType, sessionName, agentName, model, mode, effort, fastService string, planMode bool, content string, timestamp time.Time, queued bool) WSResponse {
 	queueState := "active"
 	if queued {
 		queueState = "dequeued"
@@ -198,6 +199,7 @@ func buildSessionUserMessageResponse(rootID, sessionKey, sessionType, sessionNam
 		"mode":         mode,
 		"effort":       effort,
 		"fast_service": fastService,
+		"plan_mode":    planMode,
 		"created_at":   timestamp,
 		"updated_at":   timestamp,
 	}
@@ -343,7 +345,7 @@ func (h *StreamHub) getAllClientIDs() []string {
 	return clientIDs
 }
 
-func (h *StreamHub) SetPendingUser(rootID, sessionKey, sessionTitle, agent, model, mode, effort, fastService string, content string) *PendingUserMessage {
+func (h *StreamHub) SetPendingUser(rootID, sessionKey, sessionTitle, agent, model, mode, effort, fastService string, planMode bool, content string) *PendingUserMessage {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	state := h.ensurePendingSessionLocked(sessionKey)
@@ -357,6 +359,7 @@ func (h *StreamHub) SetPendingUser(rootID, sessionKey, sessionTitle, agent, mode
 		Mode:        mode,
 		Effort:      effort,
 		FastService: fastService,
+		PlanMode:    planMode,
 		Content:     content,
 		Timestamp:   time.Now().UTC(),
 	}
@@ -370,6 +373,7 @@ func (h *StreamHub) SetPendingUser(rootID, sessionKey, sessionTitle, agent, mode
 		Mode:        state.User.Mode,
 		Effort:      state.User.Effort,
 		FastService: state.User.FastService,
+		PlanMode:    state.User.PlanMode,
 		Content:     state.User.Content,
 		Timestamp:   state.User.Timestamp,
 	}
@@ -789,12 +793,13 @@ func (h *StreamHub) BroadcastSessionUserMessage(
 	mode string,
 	effort string,
 	fastService string,
+	planMode bool,
 	content string,
 	excludeClientID string,
 	queued bool,
 ) {
-	pendingUser := h.SetPendingUser(rootID, sessionKey, sessionName, agentName, model, mode, effort, fastService, content)
-	resp := buildSessionUserMessageResponse(rootID, sessionKey, sessionType, sessionName, agentName, model, mode, effort, fastService, content, pendingUser.Timestamp, queued)
+	pendingUser := h.SetPendingUser(rootID, sessionKey, sessionName, agentName, model, mode, effort, fastService, planMode, content)
+	resp := buildSessionUserMessageResponse(rootID, sessionKey, sessionType, sessionName, agentName, model, mode, effort, fastService, planMode, content, pendingUser.Timestamp, queued)
 	for _, clientID := range h.GetSessionClientIDs(sessionKey, false) {
 		if clientID == excludeClientID {
 			continue

@@ -99,6 +99,35 @@ func TestSharedFileWatcherResolveRelatedFileRecordSiblingGitWorktree(t *testing.
 	}
 }
 
+func TestSharedFileWatcherResolveRelatedFileRecordTaskWorktreeAbsolutePath(t *testing.T) {
+	rootDir := t.TempDir()
+	worktreeDir := filepath.Join(rootDir, ".worktree", "task-55")
+	root := NewRootInfo("root", "main-root", rootDir)
+	watcher := &SharedFileWatcher{
+		root: root,
+		worktreeResolver: func(ctx context.Context, root RootInfo, filePath string) (RelatedWorktreeMatch, bool) {
+			return RelatedWorktreeMatch{
+				Path: worktreeDir,
+				Head: "task-head",
+			}, true
+		},
+	}
+
+	record, ok := watcher.resolveRelatedFileRecord(context.Background(), filepath.Join(worktreeDir, "test.json"))
+	if !ok {
+		t.Fatal("resolveRelatedFileRecord returned false")
+	}
+	if record.repoPath != filepath.Clean(worktreeDir) {
+		t.Fatalf("repoPath = %q, want %q", record.repoPath, filepath.Clean(worktreeDir))
+	}
+	if record.path != "test.json" {
+		t.Fatalf("path = %q, want test.json", record.path)
+	}
+	if record.head != "task-head" {
+		t.Fatalf("head = %q, want task-head", record.head)
+	}
+}
+
 func TestRootInfoNormalizePathAcceptsAbsolutePathWithoutLeadingSlash(t *testing.T) {
 	root := NewRootInfo("mindfs", "mindfs", "/Users/bixin/project/mindfs")
 

@@ -74,6 +74,13 @@ func main() {
 	configFlag := flag.String("config", "", "mindfs startup config file; command-line flags override file values")
 	agentConfigFlag := flag.String("agent-config", "", "extra agents.json file for customizable agent(ACP-protocol) and shell")
 	remove := flag.Bool("remove", false, "remove the managed directory")
+	taskID := flag.String("task", "", "task id for task stage control")
+	taskStatus := flag.Bool("status-task", false, "show task status (or use -status with -task)")
+	taskNext := flag.Bool("next", false, "advance task to next stage")
+	taskPrev := flag.Bool("prev", false, "move task to previous stage")
+	taskJump := flag.Int("jump", -1, "jump task to stage index")
+	taskFail := flag.Bool("fail", false, "mark task as failed")
+	taskReason := flag.String("reason", "", "task stage control reason")
 	tlsFlag := flag.Bool("tls", false, "enable HTTPS (auto-generates self-signed cert if -cert/-key not provided)")
 	certFlag := flag.String("cert", "", "TLS certificate file (PEM); auto-generated if empty with -tls")
 	keyFlag := flag.String("key", "", "TLS private key file (PEM); auto-generated if empty with -tls")
@@ -87,6 +94,18 @@ func main() {
 	applyStartupConfig(startupCfg, explicitFlags, addr, noRelayer, e2eeFlag, webPushFlag, foreground, bindRelay, tlsFlag, certFlag, keyFlag, agentConfigFlag)
 	if *versionFlag {
 		printVersion()
+		return
+	}
+	if strings.TrimSpace(*taskID) != "" {
+		rootID := ""
+		if flag.NArg() > 0 {
+			rootID = flag.Arg(0)
+		}
+		action := taskCLIAction(*statusFlag || *taskStatus, *taskNext, *taskPrev, taskJump, *taskFail)
+		if err := handleTaskCommand(*addr, *tlsFlag, rootID, strings.TrimSpace(*taskID), action, *taskJump, *taskReason); err != nil {
+			fmt.Fprintln(os.Stderr, err.Error())
+			os.Exit(1)
+		}
 		return
 	}
 	if *uninstallFlag {
@@ -778,6 +797,85 @@ func removeManagedDir(addr string, useTLS bool, path string) error {
 	}
 	message := httpErrorMessage(resp)
 	return fmt.Errorf("failed to remove managed directory: %s", message)
+}
+
+func taskCLIAction(status, next, prev bool, jump *int, fail bool) string {
+	actions := []string{}
+	if status {
+		actions = append(actions, "status")
+	}
+	if next {
+		actions = append(actions, "next")
+	}
+	if prev {
+		actions = append(actions, "prev")
+	}
+	if jump != nil && *jump >= 0 {
+		actions = append(actions, "jump")
+	}
+	if fail {
+		actions = append(actions, "fail")
+	}
+	if len(actions) != 1 {
+		return ""
+	}
+	return actions[0]
+}
+
+func handleTaskCommand(addr string, useTLS bool, rootID, taskID, action string, stageIndex int, reason string) error {
+	rootID = strings.TrimSpace(rootID)
+	taskID = strings.TrimSpace(taskID)
+	if rootID == "" {
+		return errors.New("root id argument required: mindfs <rootid> -task <task_id> -status")
+	}
+	if taskID == "" {
+		return errors.New("task id required")
+	}
+	if action == "" {
+		return errors.New("exactly one task action required: -status, -next, -prev, -jump, or -fail")
+	}
+	token, err := app.ReadLocalCLIToken(addr)
+	if err != nil {
+		return err
+	}
+	method := http.MethodGet
+	path := "/api/tasks/" + url.PathEscape(taskID) + "?root=" + url.QueryEscape(rootID)
+	var body io.Reader
+	if action != "status" {
+		method = http.MethodPost
+		path = "/api/tasks/" + url.PathEscape(taskID) + "/" + action
+		payload := map[string]any{"root_id": rootID, "reason": reason}
+		if action == "jump" {
+			payload["stage_index"] = stageIndex
+		}
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		body = bytes.NewReader(data)
+	}
+	req, err := http.NewRequest(method, addrToURL(addr, path, useTLS), body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("X-MindFS-Local-CLI-Token", token)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	client := newHTTPClient(useTLS, 10*time.Second)
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("task command failed: %s", httpErrorMessage(resp))
+	}
+	_, err = io.Copy(os.Stdout, resp.Body)
+	if err == nil {
+		fmt.Fprintln(os.Stdout)
+	}
+	return err
 }
 
 func httpErrorMessage(resp *http.Response) string {

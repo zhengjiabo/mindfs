@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"log"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +19,7 @@ import (
 	"mindfs/server/internal/fs"
 	"mindfs/server/internal/githubimport"
 	"mindfs/server/internal/gitview"
+	"mindfs/server/internal/kanban"
 	"mindfs/server/internal/preferences"
 	"mindfs/server/internal/relay"
 	"mindfs/server/internal/scheduled"
@@ -43,6 +46,7 @@ type AppContext struct {
 	WebPush   *webpush.Service
 	Prefs     *preferences.Store
 	Scheduled *scheduled.Service
+	Kanban    *kanban.Service
 
 	mu                       sync.RWMutex
 	roots                    map[string]*RootContext // root id -> root context
@@ -115,6 +119,210 @@ func (s *AppContext) GetSessionManager(rootID string) (*session.Manager, error) 
 	return mgr, nil
 }
 
+func (s *AppContext) GetKanbanService() (*kanban.Service, error) {
+	if s == nil {
+		return nil, errors.New("app context required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.Kanban != nil {
+		return s.Kanban, nil
+	}
+	store, err := kanban.NewTemplateStore()
+	if err != nil {
+		return nil, err
+	}
+	s.Kanban = kanban.NewService(store, s)
+	s.Kanban.SetRunner(s)
+	return s.Kanban, nil
+}
+
+func (s *AppContext) CreateTaskWorktree(ctx context.Context, rootID, name, branchMode, branch string) (kanban.WorktreeInfo, error) {
+	root, err := s.GetRoot(rootID)
+	if err != nil {
+		return kanban.WorktreeInfo{}, err
+	}
+	branchMode = strings.TrimSpace(branchMode)
+	if branchMode == "" {
+		branchMode = "new"
+	}
+	parentPath := filepath.Join(root.RootPath, ".worktree")
+	if err := os.MkdirAll(parentPath, 0o755); err != nil {
+		return kanban.WorktreeInfo{}, err
+	}
+	if err := ensureTaskWorktreeExcluded(root.RootPath); err != nil {
+		log.Printf("[kanban] worktree.exclude.error root=%s err=%v", root.RootPath, err)
+	}
+	uc := &usecase.Service{Registry: s}
+	out, err := uc.CreateGitWorktree(ctx, usecase.CreateGitWorktreeInput{
+		RootID:     rootID,
+		ParentPath: parentPath,
+		Name:       name,
+		BranchMode: branchMode,
+		Branch:     branch,
+		Register:   false,
+	})
+	if err != nil {
+		return kanban.WorktreeInfo{}, err
+	}
+	return kanban.WorktreeInfo{RootID: rootID, Path: out.Dir.RootPath}, nil
+}
+
+func ensureTaskWorktreeExcluded(rootPath string) error {
+	gitDir := filepath.Join(rootPath, ".git")
+	if info, err := os.Stat(gitDir); err != nil || !info.IsDir() {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	gitInfoDir := filepath.Join(gitDir, "info")
+	if err := os.MkdirAll(gitInfoDir, 0o755); err != nil {
+		return err
+	}
+	excludePath := filepath.Join(gitInfoDir, "exclude")
+	const entry = "/.worktree/"
+	if data, err := os.ReadFile(excludePath); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.TrimSpace(line) == entry {
+				return nil
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	file, err := os.OpenFile(excludePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	if stat, err := file.Stat(); err == nil && stat.Size() > 0 {
+		if _, err := file.WriteString("\n"); err != nil {
+			return err
+		}
+	}
+	_, err = file.WriteString(entry + "\n")
+	return err
+}
+
+func (s *AppContext) EnsureAgentSession(ctx context.Context, exec kanban.AgentStageExecution) (string, error) {
+	if strings.TrimSpace(exec.RootID) == "" {
+		return "", errors.New("root_id required")
+	}
+	if strings.TrimSpace(exec.Run.SessionKey) != "" && exec.Stage.SessionReusePolicy != kanban.SessionReuseAlwaysNew {
+		return strings.TrimSpace(exec.Run.SessionKey), nil
+	}
+	uc := &usecase.Service{Registry: s}
+	switch strings.TrimSpace(exec.Stage.SessionReusePolicy) {
+	case kanban.SessionReuseTaskMain, "":
+		if strings.TrimSpace(exec.Task.MainSessionKey) != "" {
+			return strings.TrimSpace(exec.Task.MainSessionKey), nil
+		}
+	case kanban.SessionReuseSameStage:
+		if strings.TrimSpace(exec.Run.SessionKey) != "" {
+			return strings.TrimSpace(exec.Run.SessionKey), nil
+		}
+	}
+	name := strings.TrimSpace(exec.Task.TaskTemplateName)
+	if exec.Task.TaskNumber > 0 {
+		number := "#" + strconv.Itoa(exec.Task.TaskNumber)
+		if name == "" {
+			name = number
+		} else {
+			name = name + " / " + number
+		}
+	}
+	if strings.TrimSpace(name) == "" {
+		name = usecase.BuildFallbackSessionName(exec.Prompt)
+	}
+	created, err := uc.CreateSession(ctx, usecase.CreateSessionInput{
+		RootID: exec.RootID,
+		Input: session.CreateInput{
+			Type:     session.TypeChat,
+			Agent:    exec.Stage.Agent,
+			Model:    exec.Stage.Model,
+			PlanMode: exec.Stage.PlanMode,
+			Name:     name,
+			TaskID:   exec.Task.ID,
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	s.BroadcastSessionMetaUpdated(exec.RootID, created)
+	return created.Key, nil
+}
+
+func (s *AppContext) RunAgentStage(ctx context.Context, exec kanban.AgentStageExecution) error {
+	if strings.TrimSpace(exec.RootID) == "" {
+		return errors.New("root_id required")
+	}
+	if strings.TrimSpace(exec.Run.SessionKey) == "" {
+		return errors.New("session_key required")
+	}
+	if strings.TrimSpace(exec.Prompt) == "" {
+		return errors.New("agent prompt required")
+	}
+	uc := &usecase.Service{Registry: s}
+	sessionKey := strings.TrimSpace(exec.Run.SessionKey)
+	sessionName := s.sessionTitle(exec.RootID, sessionKey)
+	updateTracker := newTurnUpdateTracker()
+	planMode := exec.Stage.PlanMode
+	err := uc.SendMessage(ctx, usecase.SendMessageInput{
+		RootID:          exec.RootID,
+		RuntimeRootPath: exec.RuntimeRootPath,
+		Key:             sessionKey,
+		Agent:           exec.Stage.Agent,
+		Model:           exec.Stage.Model,
+		Mode:            exec.Stage.Mode,
+		Effort:          exec.Stage.Effort,
+		FastService:     normalizeFastServiceValue(exec.Stage.FastService),
+		PlanMode:        &planMode,
+		Content:         exec.Prompt,
+		OnStart: func() {
+			s.BroadcastSessionUserMessage(exec.RootID, sessionKey, session.TypeChat, sessionName, exec.Stage.Agent, exec.Stage.Model, exec.Stage.Mode, exec.Stage.Effort, exec.Stage.FastService, planMode, exec.Prompt)
+		},
+		OnUpdate: func(update agenttypes.Event) {
+			updateTracker.Begin()
+			defer updateTracker.End()
+			s.BroadcastSessionUpdate(exec.RootID, sessionKey, update)
+		},
+		OnSubSessionCreated: func(created *session.Session) {
+			s.BroadcastSessionMetaUpdated(exec.RootID, created)
+			if created != nil {
+				s.SetSessionPendingReply(exec.RootID, created.Key, created.Name)
+			}
+		},
+		OnSubSessionUpdate: func(sessionKey string, update agenttypes.Event) {
+			updateTracker.Begin()
+			defer updateTracker.End()
+			s.BroadcastSessionUpdate(exec.RootID, sessionKey, update)
+			if update.Type == agenttypes.EventTypeMessageDone {
+				s.BroadcastSessionDone(exec.RootID, sessionKey, "")
+			}
+		},
+	})
+	if err != nil {
+		s.BroadcastSessionError(exec.RootID, sessionKey, err.Error())
+	}
+	if ok := updateTracker.WaitIdle(ctx, sessionDoneSettleWindow, sessionDoneMaxWait); !ok {
+		log.Printf("[kanban] session.done.wait_timeout root=%s session=%s task=%s", exec.RootID, sessionKey, exec.Task.ID)
+	}
+	s.BroadcastSessionDone(exec.RootID, sessionKey, "")
+	return err
+}
+
+func (s *AppContext) TaskUpdated(rootID string, detail kanban.TaskDetail) {
+	s.GetSessionStreamHub().BroadcastAll(WSResponse{
+		Type: "task.updated",
+		Payload: map[string]any{
+			"root_id": rootID,
+			"task":    detail.Task,
+			"detail":  detail,
+		},
+	})
+}
+
 func (s *AppContext) GetFileWatcher(rootID string, manager *session.Manager) (*fs.SharedFileWatcher, error) {
 	rootCtx, err := s.GetRootContext(rootID)
 	if err != nil {
@@ -150,19 +358,26 @@ func resolveRelatedWorktree(ctx context.Context, root fs.RootInfo, filePath stri
 	if err != nil {
 		return fs.RelatedWorktreeMatch{}, false
 	}
+	var best fs.RelatedWorktreeMatch
+	bestPathLen := -1
 	for _, item := range worktrees.Items {
-		if strings.TrimSpace(item.Branch) == "" {
-			continue
-		}
 		if !pathInsideDir(cleanPath, item.Path) {
 			continue
 		}
-		return fs.RelatedWorktreeMatch{
+		candidate := fs.RelatedWorktreeMatch{
 			Path:    item.Path,
 			Branch:  item.Branch,
 			Head:    item.Head,
 			Current: item.Current,
-		}, true
+		}
+		pathLen := len(filepath.Clean(item.Path))
+		if pathLen > bestPathLen {
+			best = candidate
+			bestPathLen = pathLen
+		}
+	}
+	if bestPathLen >= 0 {
+		return best, true
 	}
 	if repo, err := gitview.ResolveRepositoryForPath(ctx, cleanPath); err == nil && strings.TrimSpace(repo.Path) != "" {
 		return fs.RelatedWorktreeMatch{
@@ -185,6 +400,12 @@ func cleanToolFilePath(path string) string {
 func pathInsideDir(path, dir string) bool {
 	path = filepath.Clean(path)
 	dir = filepath.Clean(strings.TrimSpace(dir))
+	if resolvedPath, err := filepath.EvalSymlinks(path); err == nil {
+		path = filepath.Clean(resolvedPath)
+	}
+	if resolvedDir, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = filepath.Clean(resolvedDir)
+	}
 	if path == "" || dir == "" {
 		return false
 	}
@@ -450,7 +671,9 @@ func (s *AppContext) BroadcastSessionMetaUpdated(rootID string, sess *session.Se
 				"type":                sess.Type,
 				"parent_session_key":  sess.ParentSessionKey,
 				"parent_tool_call_id": sess.ParentToolCallID,
+				"task_id":             sess.TaskID,
 				"name":                sess.Name,
+				"agent":               session.InferAgentFromSession(sess),
 				"model":               sess.Model,
 				"mode":                session.InferModeFromSession(sess),
 				"effort":              session.InferEffortFromSession(sess),
@@ -466,8 +689,9 @@ func (s *AppContext) SetSessionPendingReply(rootID, sessionKey, sessionTitle str
 	s.GetSessionStreamHub().SetPendingReply(rootID, sessionKey, sessionTitle)
 }
 
-func (s *AppContext) BroadcastSessionUserMessage(rootID, sessionKey, sessionType, sessionName, agentName, model, mode, effort, fastService, content string) {
-	s.GetSessionStreamHub().BroadcastSessionUserMessage(rootID, sessionKey, sessionType, sessionName, agentName, model, mode, effort, fastService, content, "", false)
+func (s *AppContext) BroadcastSessionUserMessage(rootID, sessionKey, sessionType, sessionName, agentName, model, mode, effort, fastService string, planMode bool, content string) {
+	s.ClearTaskAuxFlagsForSession(rootID, sessionKey)
+	s.GetSessionStreamHub().BroadcastSessionUserMessage(rootID, sessionKey, sessionType, sessionName, agentName, model, mode, effort, fastService, planMode, content, "", false)
 }
 
 func (s *AppContext) BroadcastSessionUpdate(rootID, sessionKey string, update agenttypes.Event) {
@@ -475,15 +699,39 @@ func (s *AppContext) BroadcastSessionUpdate(rootID, sessionKey string, update ag
 	if event == nil {
 		return
 	}
+	s.updateTaskAuxFlagsFromEvent(rootID, sessionKey, event)
 	s.notifyAskUserIfNeeded(rootID, sessionKey, event)
 	s.GetSessionStreamHub().BroadcastSessionStream(rootID, sessionKey, event)
 }
 
 func (s *AppContext) BroadcastSessionError(rootID, sessionKey, message string) {
+	s.UpdateTaskSessionErrorForSession(rootID, sessionKey, message)
 	s.GetSessionStreamHub().BroadcastSessionStream(rootID, sessionKey, &StreamEvent{
 		Type: "error",
 		Data: map[string]string{"message": normalizeAgentErrorMessage(errors.New(message))},
 	})
+}
+
+func (s *AppContext) ClearTaskAuxFlagsForSession(rootID, sessionKey string) {
+	empty := ""
+	no := false
+	s.updateTaskAuxFlagsForSession(rootID, sessionKey, kanban.TaskAuxFlagsPatch{
+		AskUserWaiting: &no,
+		HasPlan:        &no,
+		HasTodos:       &no,
+		HasTask:        &no,
+		SessionError:   &empty,
+	}, "aux_flags_cleared")
+}
+
+func (s *AppContext) UpdateTaskSessionErrorForSession(rootID, sessionKey, message string) {
+	trimmed := strings.TrimSpace(message)
+	if trimmed == "" {
+		return
+	}
+	s.updateTaskAuxFlagsForSession(rootID, sessionKey, kanban.TaskAuxFlagsPatch{
+		SessionError: &trimmed,
+	}, "agent_session_error")
 }
 
 func (s *AppContext) BroadcastSessionDone(rootID, sessionKey, requestID string) {
@@ -531,11 +779,14 @@ func (s *AppContext) notifySessionDone(rootID, sessionKey, requestID string, pen
 }
 
 func (s *AppContext) notifyAskUserIfNeeded(rootID, sessionKey string, event *StreamEvent) {
-	if s == nil || s.WebPush == nil || !s.WebPush.Enabled() || event == nil || event.Type != string(agenttypes.EventTypeToolCall) {
+	if s == nil || event == nil || event.Type != string(agenttypes.EventTypeToolCall) {
 		return
 	}
 	toolCall, ok := event.Data.(agenttypes.ToolCall)
 	if !ok || toolCall.Kind != agenttypes.ToolKindAskUser {
+		return
+	}
+	if s.WebPush == nil || !s.WebPush.Enabled() {
 		return
 	}
 	s.WebPush.NotifySession(context.Background(), webpush.SessionNotification{
@@ -547,6 +798,73 @@ func (s *AppContext) notifyAskUserIfNeeded(rootID, sessionKey string, event *Str
 		Summary:      askUserSummary(toolCall),
 		EventID:      "session.ask_user:" + rootID + ":" + sessionKey + ":" + toolCall.CallID,
 	})
+}
+
+func (s *AppContext) updateTaskAuxFlagsFromEvent(rootID, sessionKey string, event *StreamEvent) {
+	if s == nil || event == nil {
+		return
+	}
+	patch := kanban.TaskAuxFlagsPatch{}
+	eventType := ""
+	switch event.Type {
+	case string(agenttypes.EventTypeToolCall):
+		toolCall, ok := event.Data.(agenttypes.ToolCall)
+		if !ok {
+			return
+		}
+		switch toolCall.Kind {
+		case agenttypes.ToolKindAskUser:
+			value := true
+			patch.AskUserWaiting = &value
+			eventType = "aux_ask_user_waiting"
+		case agenttypes.ToolKindTask:
+			value := true
+			patch.HasTask = &value
+			eventType = "aux_task_seen"
+		default:
+			return
+		}
+	case string(agenttypes.EventTypeToolUpdate):
+		toolCall, ok := event.Data.(agenttypes.ToolCall)
+		if !ok || toolCall.Kind != agenttypes.ToolKindAskUser || strings.TrimSpace(toolCall.Status) != "complete" {
+			return
+		}
+		value := false
+		patch.AskUserWaiting = &value
+		eventType = "aux_ask_user_answered"
+	case string(agenttypes.EventTypePlanUpdate):
+		value := true
+		patch.HasPlan = &value
+		eventType = "aux_plan_seen"
+	case string(agenttypes.EventTypeTodoUpdate):
+		value := true
+		patch.HasTodos = &value
+		eventType = "aux_todos_seen"
+	default:
+		return
+	}
+	s.updateTaskAuxFlagsForSession(rootID, sessionKey, patch, eventType)
+}
+
+func (s *AppContext) updateTaskAuxFlagsForSession(rootID, sessionKey string, patch kanban.TaskAuxFlagsPatch, eventType string) {
+	if s == nil {
+		return
+	}
+	manager, err := s.GetSessionManager(rootID)
+	if err != nil {
+		return
+	}
+	sess, err := manager.Get(context.Background(), sessionKey, 0)
+	if err != nil || sess == nil || strings.TrimSpace(sess.TaskID) == "" {
+		return
+	}
+	svc, err := s.GetKanbanService()
+	if err != nil {
+		return
+	}
+	if _, err := svc.UpdateTaskAuxFlags(context.Background(), rootID, sess.TaskID, patch, eventType); err != nil {
+		log.Printf("[kanban] task.aux_flags.update.error root=%s task=%s session=%s err=%v", rootID, sess.TaskID, sessionKey, err)
+	}
 }
 
 func (s *AppContext) notifyScheduled(rootID, taskID, taskName, sessionKey, summary, message string, success bool) {

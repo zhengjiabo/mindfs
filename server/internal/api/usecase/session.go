@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"mindfs/server/internal/agent"
 	agenttypes "mindfs/server/internal/agent/types"
 	"mindfs/server/internal/commandexec"
+	"mindfs/server/internal/fs"
 	"mindfs/server/internal/session"
 )
 
@@ -766,7 +768,38 @@ func (s *Service) GetSessionRelatedFiles(ctx context.Context, in GetSessionRelat
 	if err != nil {
 		return nil, err
 	}
-	return append([]session.RelatedFile(nil), current.RelatedFiles...), nil
+	return normalizeSessionRelatedFiles(ctx, manager.Root(), current.RelatedFiles), nil
+}
+
+func normalizeSessionRelatedFiles(ctx context.Context, root fs.RootInfo, files []session.RelatedFile) []session.RelatedFile {
+	next := append([]session.RelatedFile(nil), files...)
+	rootPath := strings.TrimSpace(root.RootPath)
+	if rootPath == "" {
+		return next
+	}
+	for i := range next {
+		file := &next[i]
+		if !strings.HasPrefix(filepath.ToSlash(strings.TrimSpace(file.Path)), ".worktree/task-") {
+			continue
+		}
+		repoPath := strings.TrimSpace(file.RepoPath)
+		if repoPath != "" && !sameManagedDirPath(repoPath, rootPath) {
+			continue
+		}
+		resolvedRepoPath, resolvedPath, resolvedHead, ok := resolveTaskWorktreeRelatedFile(ctx, rootPath, file.Path)
+		if !ok {
+			continue
+		}
+		file.RootID = strings.TrimSpace(file.RootID)
+		file.RepoKind = "git"
+		file.RepoPath = resolvedRepoPath
+		file.RepoName = filepath.Base(resolvedRepoPath)
+		file.Path = resolvedPath
+		if file.Head == "" {
+			file.Head = resolvedHead
+		}
+	}
+	return next
 }
 
 type RemoveSessionRelatedFileInput struct {
@@ -786,7 +819,33 @@ func (s *Service) RemoveSessionRelatedFile(ctx context.Context, in RemoveSession
 	if err != nil {
 		return err
 	}
-	return manager.RemoveRelatedFileAtHead(ctx, in.Key, in.Path, in.Head, in.RepoPath, in.RepoKind)
+	if err := manager.RemoveRelatedFileAtHead(ctx, in.Key, in.Path, in.Head, in.RepoPath, in.RepoKind); err != nil {
+		return err
+	}
+	root := manager.Root()
+	if legacyPath, ok := legacyTaskWorktreeRelatedPath(root.RootPath, in.RepoPath, in.Path); ok {
+		return manager.RemoveRelatedFileAtHead(ctx, in.Key, legacyPath, in.Head, root.RootPath, in.RepoKind)
+	}
+	return nil
+}
+
+func legacyTaskWorktreeRelatedPath(rootPath, repoPath, path string) (string, bool) {
+	rootPath = strings.TrimSpace(rootPath)
+	repoPath = strings.TrimSpace(repoPath)
+	path = strings.TrimSpace(path)
+	if rootPath == "" || repoPath == "" || path == "" || sameManagedDirPath(rootPath, repoPath) {
+		return "", false
+	}
+	absPath := filepath.Clean(filepath.Join(repoPath, filepath.FromSlash(filepath.ToSlash(path))))
+	rel, err := filepath.Rel(filepath.Clean(rootPath), absPath)
+	if err != nil || rel == "." || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	rel = filepath.ToSlash(rel)
+	if !strings.HasPrefix(rel, ".worktree/task-") {
+		return "", false
+	}
+	return rel, true
 }
 
 type CloseSessionInput struct {
@@ -930,13 +989,14 @@ func (s *Service) RenameSession(ctx context.Context, in RenameSessionInput) (*se
 }
 
 type BuildPromptInput struct {
-	Session       *session.Session
-	Manager       *session.Manager
-	Agent         string
-	Message       string
-	ClientContext ClientContext
-	AgentCtxSeq   *int
-	IsInitial     bool
+	Session        *session.Session
+	Manager        *session.Manager
+	Agent          string
+	Message        string
+	ClientContext  ClientContext
+	AgentCtxSeq    *int
+	RuntimeRootAbs string
+	IsInitial      bool
 }
 
 func (s *Service) BuildPrompt(in BuildPromptInput) string {
@@ -967,19 +1027,21 @@ func prependSwitchHint(in BuildPromptInput, prompt string) string {
 	if linesToRead <= 0 {
 		return prompt
 	}
-	logPath := in.Manager.ExchangeLogPath(in.Session.Key)
+	logPath := switchReadHintPath(in.Manager, in.Session.Key, in.RuntimeRootAbs)
 	readHint := buildSwitchReadHint(logPath, linesToRead)
 	return readHint + prompt
 }
 
 type SendMessageInput struct {
 	RootID              string
+	RuntimeRootPath     string
 	Key                 string
 	Agent               string
 	Model               string
 	Mode                string
 	Effort              string
 	FastService         string
+	PlanMode            *bool
 	Shell               string
 	TerminalCols        int
 	Content             string
@@ -1120,6 +1182,27 @@ func calculateSwitchReadLines(total, lastCtxSeq int) int {
 		return switchContextTailLines
 	}
 	return delta
+}
+
+func switchReadHintPath(manager *session.Manager, sessionKey, runtimeRootAbs string) string {
+	if manager == nil {
+		return ""
+	}
+	logPath := manager.ExchangeLogPath(sessionKey)
+	runtimeRootAbs = strings.TrimSpace(runtimeRootAbs)
+	if logPath == "" || runtimeRootAbs == "" {
+		return logPath
+	}
+	rootAbs, err := manager.Root().RootDir()
+	if err != nil || strings.TrimSpace(rootAbs) == "" {
+		return logPath
+	}
+	absLogPath := filepath.Join(rootAbs, filepath.FromSlash(logPath))
+	rel, err := filepath.Rel(runtimeRootAbs, absLogPath)
+	if err != nil || strings.TrimSpace(rel) == "" {
+		return logPath
+	}
+	return filepath.ToSlash(rel)
 }
 
 func buildSwitchReadHint(exchangeLogPath string, lines int) string {
@@ -1859,6 +1942,11 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 	if err != nil {
 		return err
 	}
+	if in.PlanMode != nil && current.PlanMode != *in.PlanMode {
+		if err := manager.UpdatePlanMode(ctx, current, *in.PlanMode); err != nil {
+			return err
+		}
+	}
 	if current.Type == session.TypeCommand {
 		return s.sendCommandMessage(turnCtx, in, manager, current)
 	}
@@ -1877,7 +1965,11 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 		watcher.MarkSessionActive(current.Key)
 	}
 	root := manager.Root()
-	rootAbs, _ := root.RootDir()
+	managedRootAbs, _ := root.RootDir()
+	rootAbs := managedRootAbs
+	if runtimeRootPath := strings.TrimSpace(in.RuntimeRootPath); runtimeRootPath != "" {
+		rootAbs = filepath.Clean(runtimeRootPath)
+	}
 	planMode := current != nil && current.PlanMode
 	sess, agentCtxSeq, err := s.ensureAgentSession(turnCtx, agentPool, manager, current, in.Agent, in.Model, in.Mode, in.Effort, in.FastService, rootAbs)
 	if err != nil {
@@ -1886,13 +1978,14 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 	setActiveTurnSession(in.RootID, current.Key, sess)
 
 	prompt := s.BuildPrompt(BuildPromptInput{
-		Session:       current,
-		Manager:       manager,
-		Agent:         in.Agent,
-		Message:       in.Content,
-		ClientContext: in.ClientCtx,
-		AgentCtxSeq:   agentCtxSeq,
-		IsInitial:     isInitial,
+		Session:        current,
+		Manager:        manager,
+		Agent:          in.Agent,
+		Message:        in.Content,
+		ClientContext:  in.ClientCtx,
+		AgentCtxSeq:    agentCtxSeq,
+		RuntimeRootAbs: rootAbs,
+		IsInitial:      isInitial,
 	})
 	var responseText string
 	sawAssistantChunk := false
@@ -1958,11 +2051,12 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 						if watcher == nil {
 							continue
 						}
+						recordPath := relatedFileRecordPath(managedRootAbs, rootAbs, path)
 						if update.Type == agenttypes.EventTypeToolCall && toolCall.Status == "running" {
-							watcher.RecordPendingWrite(current.Key, path)
+							watcher.RecordPendingWrite(current.Key, recordPath)
 						}
 						if update.Type == agenttypes.EventTypeToolUpdate || toolCall.Status == "complete" {
-							watcher.RecordSessionFile(current.Key, path)
+							watcher.RecordSessionFile(current.Key, recordPath)
 						}
 					}
 				}
@@ -3444,6 +3538,26 @@ func normalizeToolPath(root pathNormalizer, path string) string {
 		return path
 	}
 	return normalized
+}
+
+func relatedFileRecordPath(managedRootAbs, runtimeRootAbs, path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path)
+	}
+	slashPath := filepath.ToSlash(path)
+	if strings.HasPrefix(slashPath, ".worktree/task-") {
+		return filepath.Clean(filepath.Join(managedRootAbs, filepath.FromSlash(slashPath)))
+	}
+	runtimeRootAbs = strings.TrimSpace(runtimeRootAbs)
+	managedRootAbs = strings.TrimSpace(managedRootAbs)
+	if runtimeRootAbs != "" && managedRootAbs != "" && !sameManagedDirPath(runtimeRootAbs, managedRootAbs) {
+		return filepath.Clean(filepath.Join(runtimeRootAbs, filepath.FromSlash(slashPath)))
+	}
+	return path
 }
 
 func normalizeDiffTextPaths(root pathNormalizer, text string) string {

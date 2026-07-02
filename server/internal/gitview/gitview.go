@@ -158,6 +158,20 @@ func IsWorktree(rootPath string) (bool, error) {
 	return info.Mode().IsRegular(), nil
 }
 
+func IsInsideWorktree(ctx context.Context, path string) (bool, error) {
+	repo, err := loadRepoContext(ctx, path)
+	if err != nil {
+		if errors.Is(err, exec.ErrNotFound) {
+			return false, err
+		}
+		if isNotRepoError(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return IsWorktree(repo.repoRoot)
+}
+
 func ListBranches(ctx context.Context, rootPath string) (BranchListResult, error) {
 	repo, err := loadRepoContext(ctx, rootPath)
 	if err != nil {

@@ -53,6 +53,67 @@ func TestReadRelatedFileDiffUsesNextCommitAfterBase(t *testing.T) {
 	}
 }
 
+func TestReadRelatedFileDiffUsesWorktreeRoot(t *testing.T) {
+	root := initTestRepo(t)
+	writeTestFile(t, root, "note.txt", "base\n")
+	runTestGit(t, root, "add", "note.txt")
+	runTestGit(t, root, "commit", "-m", "initial")
+	runTestGit(t, root, "checkout", "-b", "task-1")
+	base := strings.TrimSpace(runTestGit(t, root, "rev-parse", "HEAD"))
+	runTestGit(t, root, "checkout", "-")
+
+	worktreeRoot := filepath.Join(root, ".worktree", "task-1")
+	runTestGit(t, root, "worktree", "add", worktreeRoot, "task-1")
+	writeTestFile(t, root, "note.txt", "main-only\n")
+	writeTestFile(t, worktreeRoot, "note.txt", "worktree-only\n")
+
+	diff, err := ReadRelatedFileDiff(context.Background(), worktreeRoot, base, "note.txt")
+	if err != nil {
+		t.Fatalf("ReadRelatedFileDiff: %v", err)
+	}
+	if diff.Source != "worktree" {
+		t.Fatalf("Source = %q, want worktree", diff.Source)
+	}
+	if !strings.Contains(diff.Content, "+worktree-only") {
+		t.Fatalf("diff content does not contain worktree change:\n%s", diff.Content)
+	}
+	if strings.Contains(diff.Content, "main-only") {
+		t.Fatalf("diff content used main worktree instead of task worktree:\n%s", diff.Content)
+	}
+}
+
+func TestIsInsideWorktreeDetectsSubdirectories(t *testing.T) {
+	root := initTestRepo(t)
+	writeTestFile(t, root, "note.txt", "base\n")
+	runTestGit(t, root, "add", "note.txt")
+	runTestGit(t, root, "commit", "-m", "initial")
+	runTestGit(t, root, "checkout", "-b", "task-1")
+	runTestGit(t, root, "checkout", "-")
+
+	worktreeRoot := filepath.Join(root, ".worktree", "task-1")
+	runTestGit(t, root, "worktree", "add", worktreeRoot, "task-1")
+	subdir := filepath.Join(worktreeRoot, "src")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatalf("mkdir subdir: %v", err)
+	}
+
+	inside, err := IsInsideWorktree(context.Background(), subdir)
+	if err != nil {
+		t.Fatalf("IsInsideWorktree: %v", err)
+	}
+	if !inside {
+		t.Fatal("IsInsideWorktree returned false for worktree subdir")
+	}
+
+	inside, err = IsInsideWorktree(context.Background(), root)
+	if err != nil {
+		t.Fatalf("IsInsideWorktree main root: %v", err)
+	}
+	if inside {
+		t.Fatal("IsInsideWorktree returned true for main root")
+	}
+}
+
 func TestReadRelatedFileDiffRejectsHeadOutsideCurrentHistory(t *testing.T) {
 	root := initTestRepo(t)
 	writeTestFile(t, root, "note.txt", "main\n")

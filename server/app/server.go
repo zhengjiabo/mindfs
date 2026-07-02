@@ -18,6 +18,7 @@ import (
 	"mindfs/server/internal/e2ee"
 	"mindfs/server/internal/fs"
 	"mindfs/server/internal/githubimport"
+	"mindfs/server/internal/gitview"
 	"mindfs/server/internal/preferences"
 	"mindfs/server/internal/relay"
 	"mindfs/server/internal/scheduled"
@@ -285,6 +286,12 @@ func autoAddExternalProjectRoots(registry *fs.Registry) {
 			continue
 		}
 		if agent.IsTemporaryWorkDir(projectPath) {
+			continue
+		}
+		gitCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		isWorktree, err := gitview.IsInsideWorktree(gitCtx, projectPath)
+		cancel()
+		if err == nil && isWorktree {
 			continue
 		}
 		if _, err := registry.Upsert(projectPath); err != nil {

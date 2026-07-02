@@ -53,6 +53,37 @@
   --root-badge-text: #4f46e5;
 }
 
+@keyframes mindfs-task-ask-user-pulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(1.08);
+  }
+}
+
+@keyframes mindfs-update-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes mindfs-bound-pulse {
+  0%, 100% {
+    opacity: 1;
+    box-shadow: 0 0 0 1.5px rgba(37,99,235,0.14);
+  }
+  50% {
+    opacity: 0.18;
+    box-shadow: 0 0 0 4px rgba(37,99,235,0.08);
+  }
+}
+
 html {
   height: 100%;
   height: var(--mindfs-viewport-height, 100dvh);

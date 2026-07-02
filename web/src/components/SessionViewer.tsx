@@ -52,6 +52,7 @@ type SessionViewerProps = {
   session: SessionItem | null;
   loading?: boolean;
   slashCommandResult?: {
+    sessionKey?: string;
     command: string;
     content: string;
     status: "running" | "complete" | "failed";
@@ -1103,7 +1104,7 @@ function SessionViewerInner({
   const userMessageSummaries = useMemo(
     () =>
       timeline
-        .filter((item): item is Extract<TimelineItem, { type: "user_text" }> => item.type === "user_text")
+        .filter((item): item is TimelineItem & { type: "user_text"; id: string; content: string } => item.type === "user_text")
         .map((item, index) => ({
           id: item.id || `user-${index}`,
           index: index + 1,

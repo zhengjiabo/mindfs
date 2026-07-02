@@ -540,15 +540,22 @@ export function buildGitDiffCacheSignature(item?: Partial<GitStatusItem> | null)
 export async function fetchGitDiff(
   rootId: string,
   path: string,
-  options?: { cacheSignature?: string },
+  options?: { cacheSignature?: string; repoPath?: string },
 ): Promise<GitDiffPayload> {
   const cacheSignature = options?.cacheSignature || "";
-  const cached = await getCachedGitDiff(rootId, path, cacheSignature);
-  if (cached) {
-    return cached as GitDiffPayload;
+  const repoPath = String(options?.repoPath || "").trim();
+  if (!repoPath) {
+    const cached = await getCachedGitDiff(rootId, path, cacheSignature);
+    if (cached) {
+      return cached as GitDiffPayload;
+    }
   }
 
-  const payload = await protectedJSON<any>(appURL("/api/git/diff", new URLSearchParams({ root: rootId, path })));
+  const params = new URLSearchParams({ root: rootId, path });
+  if (repoPath) {
+    params.set("repo_path", repoPath);
+  }
+  const payload = await protectedJSON<any>(appURL("/api/git/diff", params));
   const diff = {
     path: typeof payload?.path === "string" ? payload.path : path,
     display_path: typeof payload?.display_path === "string" ? payload.display_path : undefined,
@@ -560,7 +567,9 @@ export async function fetchGitDiff(
     file_meta: Array.isArray(payload?.file_meta) ? payload.file_meta : [],
     source: "worktree" as const,
   };
-  await setCachedGitDiff(rootId, path, diff, cacheSignature);
+  if (!repoPath) {
+    await setCachedGitDiff(rootId, path, diff, cacheSignature);
+  }
   return diff;
 }
 

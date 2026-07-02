@@ -13,6 +13,7 @@ export type SessionItem = {
   parent_session_key?: string;
   parent_tool_call_id?: string;
   source?: string;
+  task_id?: string;
   agent?: string;
   shell?: string;
   name?: string;
@@ -1361,7 +1362,7 @@ function SessionCard({
               isForkSession ? (
                 <ForkSessionIcon />
               ) : (
-                <ModeIcon type={session.type || "chat"} size={16} />
+                <ModeIcon type={session.task_id ? "task" : session.type || "chat"} size={16} />
               )
             )}
             {!isSubagent && session.type === "command" ? (

@@ -92,10 +92,13 @@ export type ExchangeAux = {
 
 export type Session = {
   key: string;
+  session_key?: string;
+  root_id?: string;
   type: SessionType;
   parent_session_key?: string;
   parent_tool_call_id?: string;
   source?: string;
+  task_id?: string;
   agent?: string;
   model?: string;
   shell?: string;
@@ -1071,6 +1074,9 @@ class SessionService {
         totalCount: Number(group?.total_count ?? group?.totalCount ?? 0) || 0,
       })).filter((group: MultiRootSessionGroup) => !!group.rootId);
     } catch (err) {
+      if (err instanceof Error && err.message === "api_not_ready") {
+        return [];
+      }
       console.error("[Session] Failed to fetch multi-root sessions:", err);
       return [];
     }

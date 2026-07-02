@@ -17,6 +17,7 @@ import (
 	"mindfs/server/internal/e2ee"
 	"mindfs/server/internal/fs"
 	"mindfs/server/internal/githubimport"
+	"mindfs/server/internal/kanban"
 	"mindfs/server/internal/session"
 	"mindfs/server/internal/update"
 
@@ -372,6 +373,7 @@ func (h *WSHandler) broadcastSessionMetaUpdated(rootID string, sess *session.Ses
 				"type":                sess.Type,
 				"parent_session_key":  sess.ParentSessionKey,
 				"parent_tool_call_id": sess.ParentToolCallID,
+				"task_id":             sess.TaskID,
 				"name":                sess.Name,
 				"model":               sess.Model,
 				"mode":                session.InferModeFromSession(sess),
@@ -391,6 +393,7 @@ func (h *WSHandler) broadcastAgentStatusChange(status agent.Status) {
 		Type: "agent.status.changed",
 		Payload: map[string]any{
 			"name":                  status.Name,
+			"protocol":              status.Protocol,
 			"installed":             status.Installed,
 			"available":             status.Available,
 			"version":               status.Version,
@@ -511,6 +514,16 @@ func (h *WSHandler) handleSessionAnswerQuestion(ctx context.Context, conn *webso
 		h.sendWSError(conn, clientID, req.ID, "session.answer_question_failed", err.Error())
 		return
 	}
+	if manager, err := h.AppContext.GetSessionManager(rootID); err == nil {
+		if sess, getErr := manager.Get(ctx, key, 0); getErr == nil && sess != nil && strings.TrimSpace(sess.TaskID) != "" {
+			if svc, svcErr := h.AppContext.GetKanbanService(); svcErr == nil {
+				value := false
+				if _, clearErr := svc.UpdateTaskAuxFlags(ctx, rootID, sess.TaskID, kanban.TaskAuxFlagsPatch{AskUserWaiting: &value}, "aux_ask_user_answered"); clearErr != nil {
+					log.Printf("[kanban] ask_user.answered.flag_clear.error root=%s task=%s session=%s err=%v", rootID, sess.TaskID, key, clearErr)
+				}
+			}
+		}
+	}
 	_ = h.writeWSJSON(clientID, conn, WSResponse{
 		ID:      req.ID,
 		Type:    "session.answer_question.accepted",
@@ -536,6 +549,7 @@ func (h *WSHandler) handleSessionMessage(ctx context.Context, conn *websocket.Co
 	if planRequested {
 		content = strippedContent
 	}
+	planMode := planRequested
 	sessionType := getString(req.Payload, "type")
 	agentName := getString(req.Payload, "agent")
 	model := getString(req.Payload, "model")
@@ -601,6 +615,7 @@ func (h *WSHandler) handleSessionMessage(ctx context.Context, conn *websocket.Co
 		}
 	} else if current, err := uc.GetSession(ctx, usecase.GetSessionInput{RootID: rootID, Key: key}); err == nil && current != nil {
 		sessionName = current.Name
+		planMode = current.PlanMode
 		if planRequested && !current.PlanMode {
 			if manager, managerErr := h.AppContext.GetSessionManager(rootID); managerErr == nil {
 				if updateErr := manager.UpdatePlanMode(ctx, current, true); updateErr != nil {
@@ -611,6 +626,7 @@ func (h *WSHandler) handleSessionMessage(ctx context.Context, conn *websocket.Co
 				updated, getErr := manager.Get(ctx, key, 0)
 				if getErr == nil && updated != nil {
 					current = updated
+					planMode = updated.PlanMode
 					h.broadcastSessionMetaUpdated(rootID, updated)
 				}
 			} else {
@@ -632,6 +648,7 @@ func (h *WSHandler) handleSessionMessage(ctx context.Context, conn *websocket.Co
 		Mode:        agentMode,
 		Effort:      effort,
 		FastService: fastService,
+		PlanMode:    planMode,
 		Content:     content,
 		Timestamp:   time.Now().UTC(),
 	}
@@ -832,12 +849,14 @@ func (h *WSHandler) runSessionMessage(job sessionMessageJob) {
 		Mode:         job.User.Mode,
 		Effort:       job.User.Effort,
 		FastService:  job.User.FastService,
+		PlanMode:     &job.User.PlanMode,
 		Shell:        job.Shell,
 		TerminalCols: job.TerminalCols,
 		Content:      job.User.Content,
 		ClientCtx:    job.ClientCtx,
 		OnStart: func() {
-			streamHub.BroadcastSessionUserMessage(rootID, key, job.SessionType, job.SessionName, job.User.Agent, job.User.Model, job.User.Mode, job.User.Effort, job.User.FastService, job.User.Content, job.ExcludeClientID, job.Queued)
+			h.AppContext.ClearTaskAuxFlagsForSession(rootID, key)
+			streamHub.BroadcastSessionUserMessage(rootID, key, job.SessionType, job.SessionName, job.User.Agent, job.User.Model, job.User.Mode, job.User.Effort, job.User.FastService, job.User.PlanMode, job.User.Content, job.ExcludeClientID, job.Queued)
 		},
 		OnUpdate: func(update agenttypes.Event) {
 			updateTracker.Begin()
@@ -874,12 +893,7 @@ func (h *WSHandler) runSessionMessage(job sessionMessageJob) {
 	})
 	if err != nil {
 		log.Printf("[ws] session.message.error root=%s session=%s request=%s err=%v", rootID, key, requestID, err)
-		errorMessage := normalizeAgentErrorMessage(err)
-		event := &StreamEvent{
-			Type: "error",
-			Data: map[string]string{"message": errorMessage},
-		}
-		streamHub.BroadcastSessionStream(rootID, key, event)
+		h.AppContext.BroadcastSessionError(rootID, key, err.Error())
 	}
 	if ok := updateTracker.WaitIdle(msgCtx, sessionDoneSettleWindow, sessionDoneMaxWait); !ok {
 		log.Printf("[ws] session.done.wait_timeout root=%s session=%s request=%s", rootID, key, requestID)

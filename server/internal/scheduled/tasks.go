@@ -27,7 +27,7 @@ const tasksMetaFile = "scheduled-agent-tasks.json"
 type SessionActivityBroadcaster interface {
 	BroadcastSessionMetaUpdated(rootID string, sess *session.Session)
 	SetSessionPendingReply(rootID, sessionKey, sessionTitle string)
-	BroadcastSessionUserMessage(rootID, sessionKey, sessionType, sessionName, agentName, model, mode, effort, fastService, content string)
+	BroadcastSessionUserMessage(rootID, sessionKey, sessionType, sessionName, agentName, model, mode, effort, fastService string, planMode bool, content string)
 	BroadcastSessionUpdate(rootID, sessionKey string, update agenttypes.Event)
 	BroadcastSessionError(rootID, sessionKey, message string)
 	BroadcastSessionDone(rootID, sessionKey, requestID string)
@@ -490,7 +490,7 @@ func (s *Service) runTask(ctx context.Context, task Task, force bool) error {
 			CurrentRoot: current.RootID,
 		},
 		OnStart: func() {
-			broadcaster.BroadcastSessionUserMessage(current.RootID, sessionKey, session.TypeChat, sessionName, current.Agent, current.Model, current.Mode, current.Effort, current.FastService, current.Prompt)
+			broadcaster.BroadcastSessionUserMessage(current.RootID, sessionKey, session.TypeChat, sessionName, current.Agent, current.Model, current.Mode, current.Effort, current.FastService, false, current.Prompt)
 		},
 		OnUpdate: func(update agenttypes.Event) {
 			broadcaster.BroadcastSessionUpdate(current.RootID, sessionKey, update)

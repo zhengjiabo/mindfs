@@ -235,12 +235,24 @@ func isLocalCLIPath(r *http.Request) bool {
 	}
 	switch r.Method {
 	case http.MethodPost:
-		return r.URL.Path == "/api/dirs" || r.URL.Path == "/api/relay/bind/start"
+		return r.URL.Path == "/api/dirs" || r.URL.Path == "/api/relay/bind/start" || isLocalCLITaskPath(r.URL.Path)
 	case http.MethodDelete:
 		return r.URL.Path == "/api/dirs"
+	case http.MethodGet:
+		return isLocalCLITaskPath(r.URL.Path)
 	default:
 		return false
 	}
+}
+
+func isLocalCLITaskPath(path string) bool {
+	if !strings.HasPrefix(path, "/api/tasks/") {
+		return false
+	}
+	if strings.TrimPrefix(path, "/api/tasks/") == "" {
+		return false
+	}
+	return true
 }
 
 func (h *HTTPHandler) broadcastRootChanged(action, rootID string, extra ...map[string]any) {
@@ -309,6 +321,24 @@ func (h *HTTPHandler) Routes() http.Handler {
 	r.Put("/api/scheduled-agent-tasks/{id}", h.protectedEndpoint(h.handleScheduledAgentTaskUpdate))
 	r.Delete("/api/scheduled-agent-tasks/{id}", h.protectedEndpoint(h.handleScheduledAgentTaskDelete))
 	r.Post("/api/scheduled-agent-tasks/{id}/run", h.protectedEndpoint(h.handleScheduledAgentTaskRun))
+	r.Get("/api/task-stage-templates", h.protectedEndpoint(h.handleTaskStageTemplatesList))
+	r.Post("/api/task-stage-templates", h.protectedEndpoint(h.handleTaskStageTemplateSave))
+	r.Delete("/api/task-stage-templates/{id}", h.protectedEndpoint(h.handleTaskStageTemplateDelete))
+	r.Get("/api/task-templates", h.protectedEndpoint(h.handleTaskTemplatesList))
+	r.Post("/api/task-templates", h.protectedEndpoint(h.handleTaskTemplateSave))
+	r.Put("/api/task-templates/{id}", h.protectedEndpoint(h.handleTaskTemplateSave))
+	r.Delete("/api/task-templates/{id}", h.protectedEndpoint(h.handleTaskTemplateDelete))
+	r.Get("/api/tasks", h.protectedEndpoint(h.handleKanbanTasksList))
+	r.Post("/api/tasks", h.protectedEndpoint(h.handleKanbanTaskCreate))
+	r.Post("/api/tasks/{id}/input", h.protectedEndpoint(h.handleKanbanTaskInputUpdate))
+	r.Post("/api/tasks/{id}/next", h.protectedEndpoint(h.handleKanbanTaskNext))
+	r.Post("/api/tasks/{id}/prev", h.protectedEndpoint(h.handleKanbanTaskPrev))
+	r.Post("/api/tasks/{id}/jump", h.protectedEndpoint(h.handleKanbanTaskJump))
+	r.Post("/api/tasks/{id}/pause", h.protectedEndpoint(h.handleKanbanTaskPause))
+	r.Post("/api/tasks/{id}/resume", h.protectedEndpoint(h.handleKanbanTaskResume))
+	r.Post("/api/tasks/{id}/complete", h.protectedEndpoint(h.handleKanbanTaskComplete))
+	r.Post("/api/tasks/{id}/cancel", h.protectedEndpoint(h.handleKanbanTaskCancel))
+	r.Post("/api/tasks/{id}/fail", h.protectedEndpoint(h.handleKanbanTaskFail))
 	r.Get("/api/dirs", h.protectedEndpoint(h.handleDirs))
 	r.Post("/api/dirs", h.protectedEndpoint(h.handleAddDir))
 	r.Post("/api/dirs/{id}/rename", h.protectedEndpoint(h.handleRenameDir))
@@ -1002,6 +1032,7 @@ func (h *HTTPHandler) sessionResponse(
 		"parent_session_key":  s.ParentSessionKey,
 		"parent_tool_call_id": s.ParentToolCallID,
 		"source":              s.Source,
+		"task_id":             s.TaskID,
 		"agent":               session.InferAgentFromSession(s),
 		"model":               s.Model,
 		"mode":                session.InferModeFromSession(s),
@@ -1031,6 +1062,7 @@ func (h *HTTPHandler) sessionListResponse(s *session.Session) map[string]any {
 		"parent_session_key":  s.ParentSessionKey,
 		"parent_tool_call_id": s.ParentToolCallID,
 		"source":              s.Source,
+		"task_id":             s.TaskID,
 		"agent":               session.InferAgentFromSession(s),
 		"model":               s.Model,
 		"mode":                session.InferModeFromSession(s),
@@ -1551,6 +1583,7 @@ func (h *HTTPHandler) handleGitStatus(w http.ResponseWriter, r *http.Request) {
 
 func (h *HTTPHandler) handleGitDiff(w http.ResponseWriter, r *http.Request) {
 	rootID := strings.TrimSpace(r.URL.Query().Get("root"))
+	repoPath := strings.TrimSpace(r.URL.Query().Get("repo_path"))
 	path := strings.TrimSpace(r.URL.Query().Get("path"))
 	if rootID == "" {
 		respondError(w, http.StatusBadRequest, errInvalidRequest("root required"))
@@ -1562,8 +1595,9 @@ func (h *HTTPHandler) handleGitDiff(w http.ResponseWriter, r *http.Request) {
 	}
 	uc := h.service()
 	out, err := uc.GetGitDiff(r.Context(), usecase.GitDiffInput{
-		RootID: rootID,
-		Path:   path,
+		RootID:   rootID,
+		RepoPath: repoPath,
+		Path:     path,
 	})
 	if err != nil {
 		respondError(w, http.StatusBadRequest, err)
@@ -1881,6 +1915,7 @@ func (h *HTTPHandler) handleGitWorktreeCreate(w http.ResponseWriter, r *http.Req
 		Name:       req.Name,
 		BranchMode: req.BranchMode,
 		Branch:     req.Branch,
+		Register:   true,
 	})
 	if err != nil {
 		respondError(w, http.StatusBadRequest, err)

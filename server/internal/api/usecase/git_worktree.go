@@ -190,6 +190,7 @@ type CreateGitWorktreeInput struct {
 	Name       string
 	BranchMode string
 	Branch     string
+	Register   bool
 }
 
 type CreateGitWorktreeOutput struct {
@@ -251,6 +252,9 @@ func (s *Service) CreateGitWorktree(ctx context.Context, in CreateGitWorktreeInp
 
 	if err := gitview.AddWorktree(ctx, root.RootPath, targetPath, branchMode, branch); err != nil {
 		return CreateGitWorktreeOutput{}, err
+	}
+	if !in.Register {
+		return CreateGitWorktreeOutput{Dir: fs.NewRootInfo(name, name, targetPath)}, nil
 	}
 	if _, err := fs.NewRootInfo(name, name, targetPath).EnsureMetaDir(); err != nil {
 		return CreateGitWorktreeOutput{}, err

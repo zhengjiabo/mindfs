@@ -31,6 +31,7 @@ import {
 import { syncNativeReplyPollerE2EE } from "./services/replyPoller";
 import {
   ProtectedAPIError,
+  protectedAPIReady,
   protectedJSON as apiProtectedJSON,
 } from "./services/api";
 import { reportError } from "./services/error";
@@ -100,7 +101,7 @@ import { GitDiffViewer } from "./components/GitDiffViewer";
 import { GitHistoryPanel } from "./components/GitHistoryPanel";
 import { GitStatusPanel } from "./components/GitStatusPanel";
 import { SessionViewer } from "./components/SessionViewer";
-import { DefaultListView } from "./components/DefaultListView";
+import { DefaultListView, type MainContentViewMode } from "./components/DefaultListView";
 import { MultiProjectSessionList, SessionList, type ProjectSessionGroup } from "./components/SessionList";
 import { ExternalSessionList } from "./components/ExternalSessionList";
 import { AgentIcon } from "./components/AgentIcon";
@@ -109,6 +110,9 @@ import { ActionBar } from "./components/ActionBar";
 import { ToastContainer } from "./components/Toast";
 import { BottomSheet } from "./components/BottomSheet";
 import { ScheduledAgentTaskDialog } from "./components/ScheduledAgentTaskDialog";
+import { TaskTemplateDialog } from "./components/TaskTemplateDialog";
+import { renderToolIcon } from "./components/stream/ToolCallCard";
+import TokenEditor, { type TokenEditorHandle } from "./components/editor/TokenEditor";
 import {
   type GitHubImportState,
   type LocalDirBrowserState,
@@ -116,6 +120,24 @@ import {
   type ProjectAddMode,
 } from "./components/ProjectAddPopover";
 import { fetchAgents, type AgentStatus } from "./services/agents";
+import { fetchCandidates, type CandidateItem } from "./services/candidates";
+import {
+  createTask,
+  deleteTaskTemplate,
+  fetchTaskDetails,
+  fetchTaskTemplates,
+  getCachedTaskDetails,
+  getCachedTaskMeta,
+  moveTask,
+  saveTaskTemplate,
+  upsertCachedTaskDetails,
+  updateTaskInput,
+  type KanbanTask,
+  type StageRun,
+  type TaskDetail,
+  type StageTemplate,
+  type TaskTemplate,
+} from "./services/tasks";
 
 // 类型定义
 type SessionMode = "chat" | "plugin" | "command";
@@ -128,6 +150,113 @@ const MULTI_PROJECT_SESSION_STORAGE_KEY = "mindfs-multi-project-session-list";
 
 function isTopLevelSessionItem(session: SessionItem): boolean {
   return !String(session?.parent_session_key || "").trim();
+}
+
+function firstUserInputTemplate(template: TaskTemplate | null): string {
+  const first = template?.stages?.[0]?.snapshot;
+  return first?.role === "user" ? first.prompt_template || "" : "";
+}
+
+function firstAgentStage(template: TaskTemplate | null): StageTemplate | null {
+  return template?.stages?.map((stage) => stage.snapshot).find((stage) => stage.role === "agent") || null;
+}
+
+function isUnfinishedKanbanTask(task: KanbanTask): boolean {
+  return task.status !== "success" && task.status !== "fail" && task.status !== "cancelled";
+}
+
+function isTerminalKanbanTask(task: KanbanTask): boolean {
+  return task.status === "success" || task.status === "fail" || task.status === "cancelled";
+}
+
+function parseTaskSessionErrorMessage(error?: string): string {
+  const raw = String(error || "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = JSON.parse(raw) as { message?: unknown };
+    return typeof parsed.message === "string" && parsed.message.trim() ? parsed.message.trim() : raw;
+  } catch {
+    return raw;
+  }
+}
+
+function parseTaskSessionErrorDetails(error?: string): string[] {
+  const raw = String(error || "").trim();
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as { data?: unknown };
+    if (Array.isArray(parsed.data)) return parsed.data.map((item) => String(item)).filter(Boolean);
+    if (parsed.data === undefined || parsed.data === null) return [];
+    return [String(parsed.data)];
+  } catch {
+    return [];
+  }
+}
+
+function taskStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    pending: "待开始",
+    queued: "待调度",
+    running: "运行中",
+    waiting_user: "待确认",
+    paused: "已暂停",
+    success: "已完成",
+    fail: "失败",
+    cancelled: "已取消",
+    approved: "已通过",
+    rejected: "已退回",
+  };
+  return labels[status] || status || "-";
+}
+
+function firstTaskInputFromDetail(detail: TaskDetail): string {
+  return detail.stage_runs.find((run) => run.stage_index === 0)?.input || "";
+}
+
+function latestTaskStageRun(detail: TaskDetail, stageIndex: number): StageRun | null {
+  const runs = detail.stage_runs
+    .filter((run) => run.stage_index === stageIndex)
+    .sort((a, b) => {
+      const aTime = Date.parse(a.created_at || a.updated_at || "");
+      const bTime = Date.parse(b.created_at || b.updated_at || "");
+      return (Number.isFinite(bTime) ? bTime : 0) - (Number.isFinite(aTime) ? aTime : 0);
+    });
+  return runs[0] || null;
+}
+
+function currentTaskInputFromDetail(detail: TaskDetail): string {
+  return latestTaskStageRun(detail, detail.task.current_stage_index)?.input || "";
+}
+
+function previousTaskInputsFromDetail(detail: TaskDetail): Array<{ id: string; label: string; input: string }> {
+  const items: Array<{ id: string; label: string; input: string }> = [];
+  for (let index = 0; index < detail.task.current_stage_index; index += 1) {
+    const run = latestTaskStageRun(detail, index);
+    const input = run?.input || "";
+    if (!run || !input.trim()) continue;
+    items.push({
+      id: run.id,
+      label: run.stage_name || `阶段${index + 1}`,
+      input,
+    });
+  }
+  return items;
+}
+
+function taskSessionKeysFromDetail(detail: TaskDetail): string[] {
+  const seen = new Set<string>();
+  const keys: string[] = [];
+  for (const run of detail.stage_runs) {
+    const key = String(run.session_key || "").trim();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    keys.push(key);
+  }
+  const mainKey = String(detail.task.main_session_key || "").trim();
+  if (mainKey && !seen.has(mainKey)) {
+    keys.push(mainKey);
+  }
+  return keys;
 }
 
 function normalizeFastService(
@@ -148,6 +277,7 @@ export type SessionItem = {
   model?: string;
   shell?: string;
   source?: string;
+  task_id?: string;
   mode?: string;
   effort?: string;
   fast_service?: "" | "on" | "off";
@@ -217,6 +347,26 @@ type SlashCommandResult = {
   };
 };
 
+type TaskInlineAttachment = {
+  id: string;
+  file: File;
+  previewUrl?: string;
+  isImage: boolean;
+};
+
+type TaskInlineEditState = {
+  taskId?: string;
+  templateId: string;
+  templateName: string;
+  text: string;
+  previousInputs: Array<{ id: string; label: string; input: string }>;
+  createWorktree: boolean;
+  worktreeBranchMode: "new" | "existing";
+  worktreeBranch: string;
+  canToggleWorktree: boolean;
+  attachments: TaskInlineAttachment[];
+};
+
 function latestExchangeText(
   exchanges: unknown,
   field: "agent" | "mode" | "effort" | "fast_service",
@@ -261,6 +411,7 @@ function toSessionItem(
         ? session.parent_tool_call_id
         : undefined,
     source: typeof session?.source === "string" ? session.source : undefined,
+    task_id: typeof session?.task_id === "string" ? session.task_id : undefined,
     agent:
       typeof session?.agent === "string" && session.agent.trim()
         ? session.agent
@@ -437,6 +588,9 @@ const FILE_SCROLL_STORAGE_KEY = "mindfs-file-scroll-positions";
 const LAST_ROOT_STORAGE_KEY = "mindfs-last-root-id";
 const GIT_STATUS_EXPANDED_STORAGE_KEY = "mindfs-git-status-expanded";
 const GIT_HISTORY_EXPANDED_STORAGE_KEY = "mindfs-git-history-expanded";
+const TASK_TEMPLATE_SELECTION_STORAGE_KEY = "mindfs-task-template-selection";
+const TASK_TEMPLATE_ALL_FILTER = "__all__";
+const CANDIDATE_FETCH_DEBOUNCE_MS = 512;
 const READ_FILE_TOKEN_PATTERN = /\[read file:\s*[^\]]+\]/i;
 
 function normalizeUpdateState(
@@ -1087,6 +1241,30 @@ type AppProps = {
 const MOBILE_ENTER_KEY_SEND_STORAGE_KEY = "mindfs-mobile-enter-key-sends";
 const SIDEBARS_SWAPPED_STORAGE_KEY = "mindfs-sidebars-swapped";
 const GIT_DIFF_SIDE_BY_SIDE_STORAGE_KEY = "mindfs-git-diff-side-by-side";
+const TASK_CREATE_WORKTREE_PREF_STORAGE_KEY = "mindfs-task-create-worktree-pref";
+const MAIN_CONTENT_VIEW_STORAGE_KEY = "mindfs-main-content-view";
+
+type TaskCreateWorktreePreference = {
+  createWorktree: boolean;
+  worktreeBranchMode: "new" | "existing";
+  worktreeBranch: string;
+};
+
+function isMainContentViewMode(value: unknown): value is MainContentViewMode {
+  return value === "task-kanban" || value === "file-browser";
+}
+
+function loadMainContentViewByRoot(): Record<string, MainContentViewMode> {
+  if (typeof window === "undefined") return {};
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(MAIN_CONTENT_VIEW_STORAGE_KEY) || "{}") as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.entries(parsed).filter(([, value]) => isMainContentViewMode(value)),
+    ) as Record<string, MainContentViewMode>;
+  } catch {
+    return {};
+  }
+}
 
 function loadMobileEnterKeySends(): boolean {
   if (typeof window === "undefined") {
@@ -1121,6 +1299,36 @@ function loadGitDiffSideBySide(): boolean {
   }
 }
 
+function loadTaskCreateWorktreePreference(rootId: string): TaskCreateWorktreePreference {
+  if (typeof window === "undefined" || !rootId) {
+    return { createWorktree: false, worktreeBranchMode: "new", worktreeBranch: "" };
+  }
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(TASK_CREATE_WORKTREE_PREF_STORAGE_KEY) || "{}") as Record<string, unknown>;
+    const value = parsed[rootId] as Record<string, unknown> | undefined;
+    return {
+      createWorktree: value?.createWorktree === true,
+      worktreeBranchMode: value?.worktreeBranchMode === "existing" ? "existing" : "new",
+      worktreeBranch: typeof value?.worktreeBranch === "string" ? value.worktreeBranch : "",
+    };
+  } catch {
+    return { createWorktree: false, worktreeBranchMode: "new", worktreeBranch: "" };
+  }
+}
+
+function saveTaskCreateWorktreePreference(rootId: string, pref: TaskCreateWorktreePreference): void {
+  if (typeof window === "undefined" || !rootId) return;
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(TASK_CREATE_WORKTREE_PREF_STORAGE_KEY) || "{}") as Record<string, unknown>;
+    window.localStorage.setItem(TASK_CREATE_WORKTREE_PREF_STORAGE_KEY, JSON.stringify({
+      ...parsed,
+      [rootId]: pref,
+    }));
+  } catch {
+    // Ignore storage failures; the current dialog state can still be used.
+  }
+}
+
 export function App({ onGoHome }: AppProps) {
   const pluginManagerRef = useRef<PluginManager>(new PluginManager());
   const completionAudioContextRef = useRef<AudioContext | null>(null);
@@ -1143,7 +1351,7 @@ export function App({ onGoHome }: AppProps) {
   const cancelRequestedBySessionRef = useRef<Record<string, boolean>>({});
   const sessionCacheRef = useRef<Record<string, Session>>({});
   const loadedSessionRef = useRef<Record<string, boolean>>({});
-  const loadingSessionRef = useRef<Record<string, Promise<SyncSessionResult>>>({});
+  const loadingSessionRef = useRef<Partial<Record<string, Promise<SyncSessionResult>>>>({});
   const staleSessionKeysRef = useRef<Set<string>>(new Set());
   const invalidTreeCacheKeysRef = useRef<Set<string>>(new Set());
   const boundSessionByRootRef = useRef<Record<string, string | null>>({});
@@ -1224,8 +1432,39 @@ export function App({ onGoHome }: AppProps) {
   const projectAddPopoverRef = useRef<HTMLDivElement | null>(null);
   const worktreeCreatePopoverRef = useRef<HTMLDivElement | null>(null);
   const worktreeSwitchPopoverRef = useRef<HTMLDivElement | null>(null);
+  const taskTemplateActionMenuRef = useRef<HTMLDivElement | null>(null);
+  const taskCreateTemplateMenuRef = useRef<HTMLDivElement | null>(null);
   const [availableAgents, setAvailableAgents] = useState<AgentStatus[]>([]);
   const [scheduledAgentDialogOpen, setScheduledAgentDialogOpen] = useState(false);
+  const [taskTemplates, setTaskTemplates] = useState<TaskTemplate[]>([]);
+  const [taskTemplateDialogOpen, setTaskTemplateDialogOpen] = useState(false);
+  const [taskTemplateDialogTemplate, setTaskTemplateDialogTemplate] = useState<TaskTemplate | null>(null);
+	  const [kanbanTasks, setKanbanTasks] = useState<KanbanTask[]>([]);
+	  const [kanbanTaskCountItems, setKanbanTaskCountItems] = useState<KanbanTask[]>([]);
+	  const [taskDetailsById, setTaskDetailsById] = useState<Record<string, TaskDetail>>({});
+	  const [taskFirstInputById, setTaskFirstInputById] = useState<Record<string, string>>({});
+	  const [taskSessionKeysById, setTaskSessionKeysById] = useState<Record<string, string[]>>({});
+	  const [taskRelatedFilesById, setTaskRelatedFilesById] = useState<Record<string, RelatedFile[]>>({});
+	  const [selectedKanbanTaskId, setSelectedKanbanTaskId] = useState("");
+	  const [expandedTaskInputIds, setExpandedTaskInputIds] = useState<Set<string>>(() => new Set());
+  const [collapsedTaskCompletionGroups, setCollapsedTaskCompletionGroups] = useState<Set<string>>(() => new Set(["已完成", "失败", "已取消"]));
+  const [taskInlineEdit, setTaskInlineEdit] = useState<TaskInlineEditState | null>(null);
+  const [taskSessionErrorDialog, setTaskSessionErrorDialog] = useState<{ title: string; message: string; details: string[] } | null>(null);
+  const [taskInlineActiveToken, setTaskInlineActiveToken] = useState<{ type: "file" | "slash" | "prompt" | "command"; query: string } | null>(null);
+  const [taskInlineCandidates, setTaskInlineCandidates] = useState<CandidateItem[]>([]);
+  const [taskInlineCandidateIndex, setTaskInlineCandidateIndex] = useState(0);
+  const [taskInlineSaving, setTaskInlineSaving] = useState(false);
+  const [taskWorktreeBranches, setTaskWorktreeBranches] = useState<GitBranchesPayload>({ branches: [] });
+  const [taskWorktreeBranchesLoading, setTaskWorktreeBranchesLoading] = useState(false);
+  const [taskWorktreeBranchError, setTaskWorktreeBranchError] = useState("");
+  const [kanbanTasksLoading, setKanbanTasksLoading] = useState(false);
+  const [taskTemplateFilter, setTaskTemplateFilter] = useState("");
+  const [taskTemplateActionMenuOpen, setTaskTemplateActionMenuOpen] = useState(false);
+  const [taskTemplateConcurrencyOpen, setTaskTemplateConcurrencyOpen] = useState(false);
+  const [taskCreateTemplateMenuOpen, setTaskCreateTemplateMenuOpen] = useState(false);
+  const taskInlineEditorRef = useRef<TokenEditorHandle | null>(null);
+  const taskInlineAttachmentInputRef = useRef<HTMLInputElement | null>(null);
+  const knownTaskWorktreePathsRef = useRef<Set<string>>(new Set());
   const [selectedSession, setSelectedSession] = useState<SessionItem | null>(
     null,
   );
@@ -1259,6 +1498,551 @@ export function App({ onGoHome }: AppProps) {
   );
   const [currentRootId, setCurrentRootId] = useState<string | null>(null);
   const currentRootIdRef = useRef<string | null>(null);
+
+  const loadTaskTemplates = useCallback(async () => {
+    if (!protectedAPIReady()) {
+      return;
+    }
+    try {
+      setTaskTemplates(await fetchTaskTemplates());
+    } catch (err) {
+      reportError("file.write_failed", String((err as Error)?.message || "任务模板加载失败"));
+    }
+  }, []);
+
+  const openTaskTemplateEditor = useCallback((template: TaskTemplate | null) => {
+    setTaskTemplateDialogTemplate(template);
+    setTaskTemplateDialogOpen(true);
+  }, []);
+
+  const handleTaskTemplateSaved = useCallback((template: TaskTemplate) => {
+    setTaskTemplates((prev) => {
+      const id = template.id || "";
+      if (!id) return prev;
+      const index = prev.findIndex((item) => item.id === id);
+      if (index < 0) return [template, ...prev];
+      const next = [...prev];
+      next[index] = template;
+      return next;
+    });
+    setTaskTemplateDialogTemplate(template);
+  }, []);
+
+  const handleDeleteTaskTemplate = useCallback(async (template: TaskTemplate) => {
+    const id = template.id || "";
+    if (!id) return;
+    if (!window.confirm(`删除任务模板「${template.name || id}」？`)) return;
+    try {
+      await deleteTaskTemplate(id);
+      setTaskTemplates((prev) => prev.filter((item) => item.id !== id));
+      setTaskTemplateDialogTemplate((prev) => prev?.id === id ? null : prev);
+      setTaskTemplateFilter((prev) => prev === id ? "" : prev);
+    } catch (err) {
+      reportError("file.write_failed", String((err as Error)?.message || "任务模板删除失败"));
+    }
+  }, []);
+
+  const handleTaskTemplateConcurrencyChange = useCallback(async (templateId: string, value: number) => {
+    const template = taskTemplates.find((item) => item.id === templateId);
+    if (!template) return;
+    const nextValue = Math.max(1, Math.min(10, value || 1));
+    const optimistic = { ...template, max_concurrency: nextValue };
+    setTaskTemplates((prev) => prev.map((item) => item.id === templateId ? optimistic : item));
+    try {
+      const saved = await saveTaskTemplate(optimistic);
+      setTaskTemplates((prev) => prev.map((item) => item.id === templateId ? saved : item));
+      setTaskTemplateDialogTemplate((prev) => prev?.id === templateId ? saved : prev);
+    } catch (err) {
+      setTaskTemplates((prev) => prev.map((item) => item.id === templateId ? template : item));
+      reportError("file.write_failed", String((err as Error)?.message || "最大并发保存失败"));
+    }
+  }, [taskTemplates]);
+
+  useEffect(() => {
+    void loadTaskTemplates();
+  }, [loadTaskTemplates]);
+
+  useEffect(() => {
+    if (!currentRootId) {
+      if (taskTemplateFilter) setTaskTemplateFilter("");
+      return;
+    }
+    if (taskTemplateFilter === TASK_TEMPLATE_ALL_FILTER || (taskTemplateFilter && taskTemplates.some((template) => template.id === taskTemplateFilter))) {
+      return;
+    }
+    let remembered = "";
+    try {
+      const parsed = JSON.parse(window.localStorage.getItem(TASK_TEMPLATE_SELECTION_STORAGE_KEY) || "{}") as Record<string, unknown>;
+      const value = parsed[currentRootId];
+      remembered = typeof value === "string" ? value : "";
+    } catch {
+      remembered = "";
+    }
+    const rememberedValid = remembered === TASK_TEMPLATE_ALL_FILTER || taskTemplates.some((template) => template.id === remembered);
+    const next = rememberedValid ? remembered : TASK_TEMPLATE_ALL_FILTER;
+    if (next && next !== taskTemplateFilter) {
+      setTaskTemplateFilter(next);
+    }
+  }, [currentRootId, taskTemplateFilter, taskTemplates]);
+
+  useEffect(() => {
+    if (!currentRootId || !taskTemplateFilter) return;
+    try {
+      const parsed = JSON.parse(window.localStorage.getItem(TASK_TEMPLATE_SELECTION_STORAGE_KEY) || "{}") as Record<string, unknown>;
+      window.localStorage.setItem(TASK_TEMPLATE_SELECTION_STORAGE_KEY, JSON.stringify({
+        ...parsed,
+        [currentRootId]: taskTemplateFilter,
+      }));
+    } catch {
+    }
+  }, [currentRootId, taskTemplateFilter]);
+
+  useEffect(() => {
+    if (!taskTemplateActionMenuOpen) return;
+    const onPointerDown = (event: MouseEvent) => {
+      if (taskTemplateActionMenuRef.current?.contains(event.target as Node)) {
+        return;
+      }
+      setTaskTemplateActionMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    return () => document.removeEventListener("mousedown", onPointerDown);
+  }, [taskTemplateActionMenuOpen]);
+
+  useEffect(() => {
+    if (!taskCreateTemplateMenuOpen) return;
+    const onPointerDown = (event: MouseEvent) => {
+      if (taskCreateTemplateMenuRef.current?.contains(event.target as Node)) {
+        return;
+      }
+      setTaskCreateTemplateMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    return () => document.removeEventListener("mousedown", onPointerDown);
+  }, [taskCreateTemplateMenuOpen]);
+
+  useEffect(() => {
+    if (!taskTemplateActionMenuOpen) {
+      setTaskTemplateConcurrencyOpen(false);
+    } else {
+      setTaskCreateTemplateMenuOpen(false);
+    }
+  }, [taskTemplateActionMenuOpen]);
+
+  useEffect(() => {
+    if (!taskInlineEdit) return;
+    window.setTimeout(() => {
+      taskInlineEditorRef.current?.setText(taskInlineEdit.text || "");
+    }, 0);
+  }, [taskInlineEdit?.taskId, taskInlineEdit?.templateId]);
+
+  useEffect(() => {
+    if (!taskInlineActiveToken || !currentRootId) {
+      setTaskInlineCandidates([]);
+      setTaskInlineCandidateIndex(0);
+      return;
+    }
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      const selectedTemplate = taskTemplates.find((template) => template.id === taskTemplateFilter) || null;
+      const agent = firstAgentStage(selectedTemplate)?.agent || "";
+      fetchCandidates({
+        rootId: currentRootId,
+        type: taskInlineActiveToken.type === "file"
+          ? "file"
+          : taskInlineActiveToken.type === "prompt"
+            ? "prompt"
+            : taskInlineActiveToken.type === "command"
+              ? "command"
+              : "skill",
+        query: taskInlineActiveToken.query,
+        agent: taskInlineActiveToken.type === "slash" ? agent : undefined,
+        signal: controller.signal,
+      })
+        .then((items) => {
+          setTaskInlineCandidates(items);
+          setTaskInlineCandidateIndex(0);
+        })
+        .catch((err) => {
+          if (controller.signal.aborted) return;
+          console.error("Failed to fetch task candidates:", err);
+          setTaskInlineCandidates([]);
+          setTaskInlineCandidateIndex(0);
+        });
+    }, CANDIDATE_FETCH_DEBOUNCE_MS);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [currentRootId, taskInlineActiveToken, taskTemplateFilter, taskTemplates]);
+
+  const applyTaskDetails = useCallback((rootId: string, details: TaskDetail[], persist = true) => {
+    const valid = details.filter((detail) => detail?.task?.id);
+    if (valid.length === 0) return;
+    setTaskDetailsById((prev) => {
+      const next = { ...prev };
+      valid.forEach((detail) => {
+        next[detail.task.id] = detail;
+      });
+      return next;
+    });
+    setTaskFirstInputById((prev) => {
+      const next = { ...prev };
+      valid.forEach((detail) => {
+        next[detail.task.id] = firstTaskInputFromDetail(detail);
+      });
+      return next;
+    });
+    setTaskSessionKeysById((prev) => {
+      const next = { ...prev };
+      valid.forEach((detail) => {
+        next[detail.task.id] = taskSessionKeysFromDetail(detail);
+      });
+      return next;
+    });
+    setKanbanTaskCountItems((prev) => {
+      const byId = new Map(prev.map((task) => [task.id, task]));
+      valid.forEach((detail) => byId.set(detail.task.id, detail.task));
+      return Array.from(byId.values()).sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")));
+    });
+    if (persist) {
+      void upsertCachedTaskDetails(rootId, valid);
+    }
+  }, []);
+
+  const loadKanbanTasks = useCallback(async (rootId?: string | null, force = false) => {
+    if (!protectedAPIReady()) {
+      return;
+    }
+    const targetRoot = rootId || currentRootIdRef.current;
+    if (!targetRoot) {
+      setKanbanTasks([]);
+      setKanbanTaskCountItems([]);
+      setTaskDetailsById({});
+      setTaskFirstInputById({});
+      setTaskSessionKeysById({});
+      return;
+    }
+    setKanbanTasksLoading(true);
+    try {
+      const cached = await getCachedTaskDetails(targetRoot);
+      if (cached.length > 0) {
+        applyTaskDetails(targetRoot, cached, false);
+      }
+      const meta = await getCachedTaskMeta(targetRoot);
+      const details = await fetchTaskDetails(targetRoot, force ? undefined : { after: meta?.newestUpdatedAt || "" });
+      applyTaskDetails(targetRoot, details);
+    } catch (err) {
+      reportError("file.write_failed", String((err as Error)?.message || "任务加载失败"));
+    } finally {
+      setKanbanTasksLoading(false);
+    }
+  }, [applyTaskDetails]);
+
+	  useEffect(() => {
+	    void loadKanbanTasks(currentRootId);
+	  }, [currentRootId, loadKanbanTasks]);
+
+	  useEffect(() => {
+	    const allTasks = Object.values(taskDetailsById)
+	      .map((detail) => detail.task)
+	      .filter((task) => !currentRootId || task.root_id === currentRootId)
+	      .sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")));
+	    const selectedTemplateId = taskTemplateFilter || "";
+	    const allTemplatesSelected = selectedTemplateId === TASK_TEMPLATE_ALL_FILTER;
+	    const filtered = selectedTemplateId && !allTemplatesSelected
+	      ? allTasks.filter((task) => task.task_template_id === selectedTemplateId)
+	      : allTasks;
+	    setKanbanTaskCountItems(allTasks);
+	    setKanbanTasks(allTemplatesSelected ? filtered : filtered.filter(isUnfinishedKanbanTask));
+	  }, [currentRootId, taskDetailsById, taskTemplateFilter]);
+
+	  useEffect(() => {
+	    if (!selectedKanbanTaskId) return;
+	    if (kanbanTasks.some((task) => task.id === selectedKanbanTaskId)) return;
+	    setSelectedKanbanTaskId("");
+	  }, [kanbanTasks, selectedKanbanTaskId]);
+
+	  const handleMoveKanbanTask = useCallback(async (task: KanbanTask, action: "next" | "prev" | "pause" | "resume" | "complete" | "cancel") => {
+    const rootId = task.root_id || currentRootIdRef.current;
+    if (!rootId) return;
+    let reason = "";
+    if (action === "prev" || action === "pause") {
+      const label = action === "prev" ? "退回上一阶段" : "暂停任务";
+      const input = window.prompt(`${label}原因（可留空）`, "");
+      if (input === null) {
+        return;
+      }
+      reason = input.trim();
+    }
+    try {
+      const detail = await moveTask(rootId, task.id, action, reason);
+      applyTaskDetails(rootId, [detail]);
+      if (detail.task.worktree_path) {
+        void refreshTaskWorktree(rootId, detail.task.worktree_path);
+      }
+    } catch (err) {
+      reportError("file.write_failed", String((err as Error)?.message || "任务操作失败"));
+    }
+  }, [applyTaskDetails]);
+
+  const openTaskEditDialog = useCallback(async (task: KanbanTask, openAttachmentPicker = false) => {
+    const rootId = task.root_id || currentRootIdRef.current;
+    if (!rootId) return;
+    try {
+      const detail = taskDetailsById[task.id];
+      if (!detail) {
+        reportError("file.write_failed", "任务详情尚未同步，请刷新后重试");
+        return;
+      }
+      const firstInput = firstTaskInputFromDetail(detail);
+      const currentInput = currentTaskInputFromDetail(detail);
+	      setTaskInlineEdit({
+	        taskId: task.id,
+	        templateId: task.task_template_id,
+	        templateName: task.task_template_name || "任务",
+	        text: currentInput,
+	        previousInputs: previousTaskInputsFromDetail(detail),
+	        createWorktree: detail.task.create_worktree === true,
+	        worktreeBranchMode: detail.task.worktree_branch_mode === "existing" ? "existing" : "new",
+	        worktreeBranch: detail.task.worktree_branch || "",
+	        canToggleWorktree: detail.task.current_stage_index === 0 && !detail.task.worktree_path,
+	        attachments: [],
+	      });
+      setTaskInlineActiveToken(null);
+      setTaskInlineCandidates([]);
+      setTaskInlineCandidateIndex(0);
+      setTaskFirstInputById((prev) => ({ ...prev, [task.id]: firstInput }));
+      window.setTimeout(() => {
+        if (openAttachmentPicker) {
+          taskInlineAttachmentInputRef.current?.click();
+        }
+      }, 0);
+    } catch (err) {
+      reportError("file.write_failed", String((err as Error)?.message || "任务编辑失败"));
+    }
+  }, [taskDetailsById]);
+
+  const loadTaskWorktreeBranches = useCallback(async (rootId: string) => {
+    if (!rootId) return;
+    setTaskWorktreeBranchesLoading(true);
+    setTaskWorktreeBranchError("");
+    try {
+      setTaskWorktreeBranches(await fetchGitBranches(rootId));
+    } catch (error) {
+      setTaskWorktreeBranches({ branches: [] });
+      setTaskWorktreeBranchError(error instanceof Error ? error.message : "加载分支失败");
+    } finally {
+      setTaskWorktreeBranchesLoading(false);
+    }
+  }, []);
+
+	  useEffect(() => {
+	    if (
+	      !taskInlineEdit?.createWorktree ||
+	      !taskInlineEdit.canToggleWorktree ||
+      !currentRootId ||
+      managedRootByIdRef.current[currentRootId]?.is_git_repo !== true
+    ) {
+      setTaskWorktreeBranchError("");
+      return;
+    }
+	    void loadTaskWorktreeBranches(currentRootId);
+	  }, [currentRootId, loadTaskWorktreeBranches, taskInlineEdit?.canToggleWorktree, taskInlineEdit?.createWorktree]);
+
+	  useEffect(() => {
+	    if (!taskInlineEdit || taskInlineEdit.taskId || !taskInlineEdit.canToggleWorktree) return;
+	    const rootId = currentRootIdRef.current || "";
+	    if (!rootId) return;
+	    saveTaskCreateWorktreePreference(rootId, {
+	      createWorktree: taskInlineEdit.createWorktree,
+	      worktreeBranchMode: taskInlineEdit.worktreeBranchMode,
+	      worktreeBranch: taskInlineEdit.worktreeBranch,
+	    });
+	  }, [
+	    taskInlineEdit?.canToggleWorktree,
+	    taskInlineEdit?.createWorktree,
+	    taskInlineEdit?.taskId,
+	    taskInlineEdit?.worktreeBranch,
+	    taskInlineEdit?.worktreeBranchMode,
+	  ]);
+
+	  const openTaskCreateDialog = useCallback((template: TaskTemplate | null) => {
+	    const templateId = template?.id || "";
+	    if (!templateId) return;
+	    const initialText = firstUserInputTemplate(template);
+	    const rootId = currentRootIdRef.current || "";
+	    const taskCanCreateWorktree = managedRootByIdRef.current[rootId]?.is_git_repo === true;
+	    const worktreePref = loadTaskCreateWorktreePreference(rootId);
+	    setTaskInlineEdit({
+	      templateId,
+	      templateName: template?.name || "任务",
+	      text: initialText,
+	      previousInputs: [],
+	      createWorktree: taskCanCreateWorktree && worktreePref.createWorktree,
+	      worktreeBranchMode: worktreePref.worktreeBranchMode,
+	      worktreeBranch: worktreePref.worktreeBranch,
+	      canToggleWorktree: true,
+	      attachments: [],
+	    });
+    setTaskInlineActiveToken(null);
+    setTaskInlineCandidates([]);
+    setTaskInlineCandidateIndex(0);
+  }, []);
+
+  const closeTaskEditDialog = useCallback(() => {
+    setTaskInlineEdit((prev) => {
+      prev?.attachments.forEach((attachment) => {
+        if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+      });
+      return null;
+    });
+    setTaskInlineActiveToken(null);
+    setTaskInlineCandidates([]);
+    setTaskInlineCandidateIndex(0);
+    setTaskInlineSaving(false);
+  }, []);
+
+  const applyTaskInlineCandidate = useCallback((candidate: CandidateItem) => {
+    setTaskInlineCandidates([]);
+    setTaskInlineCandidateIndex(0);
+    taskInlineEditorRef.current?.insertCandidate(candidate.type, candidate.name);
+    taskInlineEditorRef.current?.focus();
+  }, []);
+
+  const appendTaskInlineAttachments = useCallback((files: File[]) => {
+    if (files.length === 0) return;
+    setTaskInlineEdit((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        attachments: [
+          ...prev.attachments,
+          ...files.map((file) => ({
+            id: `${file.name}-${file.size}-${file.lastModified}-${Math.random().toString(36).slice(2, 8)}`,
+            file,
+            isImage: file.type.startsWith("image/"),
+            previewUrl: file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined,
+          })),
+        ],
+      };
+    });
+  }, []);
+
+  const handleTaskInlineAttachmentChange = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files || []);
+    if (files.length > 0) {
+      appendTaskInlineAttachments(files);
+    }
+    event.currentTarget.value = "";
+  }, [appendTaskInlineAttachments]);
+
+  const handleTaskInlinePaste = useCallback((event: React.ClipboardEvent<HTMLDivElement>) => {
+    if (taskInlineSaving || !currentRootIdRef.current) return;
+    const clipboardItems = Array.from(event.clipboardData?.items || []);
+    const imageFiles = clipboardItems
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => !!file);
+    if (imageFiles.length === 0) return;
+    event.preventDefault();
+    appendTaskInlineAttachments(imageFiles);
+  }, [appendTaskInlineAttachments, taskInlineSaving]);
+
+  const removeTaskInlineAttachment = useCallback((id: string) => {
+    setTaskInlineEdit((prev) => prev
+      ? {
+          ...prev,
+          attachments: prev.attachments.filter((attachment) => {
+            const keep = attachment.id !== id;
+            if (!keep && attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+            return keep;
+          }),
+        }
+      : prev);
+  }, []);
+
+  async function refreshTaskWorktree(rootId: string, worktreePath: string, force = true) {
+    const normalizedRootId = String(rootId || "").trim();
+    const normalizedWorktreePath = String(worktreePath || "").trim();
+    if (!normalizedRootId || !normalizedWorktreePath) {
+      return;
+    }
+    if (!force && knownTaskWorktreePathsRef.current.has(normalizedWorktreePath)) {
+      return;
+    }
+    knownTaskWorktreePathsRef.current.add(normalizedWorktreePath);
+    setExpandedWorktreeByRoot((prev) => ({ ...prev, [normalizedRootId]: normalizedWorktreePath }));
+    setWorktreeLoadingByRoot((prev) => ({ ...prev, [normalizedRootId]: true }));
+    setWorktreeErrorByRoot((prev) => ({ ...prev, [normalizedRootId]: "" }));
+    try {
+      const payload = await fetchGitWorktrees(normalizedRootId);
+      (payload.items || []).forEach((item) => {
+        if (item.path) {
+          knownTaskWorktreePathsRef.current.add(item.path);
+        }
+      });
+      setWorktreeItemsByRoot((prev) => ({
+        ...prev,
+        [normalizedRootId]: (payload.items || []).filter((item) => !!item.branch),
+      }));
+    } catch (error) {
+      knownTaskWorktreePathsRef.current.delete(normalizedWorktreePath);
+      setWorktreeErrorByRoot((prev) => ({
+        ...prev,
+        [normalizedRootId]: error instanceof Error ? error.message : "加载 worktree 失败",
+      }));
+    } finally {
+      setWorktreeLoadingByRoot((prev) => ({ ...prev, [normalizedRootId]: false }));
+    }
+    setWorktreeStatusLoadingByPath((prev) => ({ ...prev, [normalizedWorktreePath]: true }));
+    try {
+      const status = await fetchGitStatusByPath(normalizedWorktreePath);
+      setWorktreeStatusByPath((prev) => ({ ...prev, [normalizedWorktreePath]: status }));
+    } catch {
+      setWorktreeStatusByPath((prev) => ({ ...prev, [normalizedWorktreePath]: null }));
+    } finally {
+      setWorktreeStatusLoadingByPath((prev) => ({ ...prev, [normalizedWorktreePath]: false }));
+    }
+  }
+
+  const saveTaskInlineEdit = useCallback(async () => {
+    const edit = taskInlineEdit;
+    const rootId = currentRootIdRef.current;
+    if (!edit || !rootId) return;
+    setTaskInlineSaving(true);
+    try {
+      let attachmentTokens = "";
+      if (edit.attachments.length > 0) {
+        const uploaded = await uploadFiles({
+          rootId,
+          files: edit.attachments.map((attachment) => attachment.file),
+        });
+        attachmentTokens = uploaded.map((file) => `[read file: ${file.path}]`).join("\n");
+      }
+      const payload = [edit.text.trim(), attachmentTokens].filter(Boolean).join("\n");
+      const taskCanCreateWorktree = managedRootByIdRef.current[rootId]?.is_git_repo === true;
+      const createWorktree = taskCanCreateWorktree && edit.createWorktree;
+      const detail = edit.taskId
+        ? await updateTaskInput(
+            rootId,
+            edit.taskId,
+            payload,
+            edit.canToggleWorktree ? createWorktree : undefined,
+            edit.canToggleWorktree && createWorktree ? edit.worktreeBranchMode : undefined,
+            edit.canToggleWorktree && createWorktree ? edit.worktreeBranch : undefined,
+          )
+        : await createTask(rootId, edit.templateId, payload, createWorktree, edit.worktreeBranchMode, edit.worktreeBranch);
+      applyTaskDetails(rootId, [detail]);
+      if (detail.task.worktree_path) {
+        void refreshTaskWorktree(rootId, detail.task.worktree_path);
+      }
+      closeTaskEditDialog();
+    } catch (err) {
+      reportError("file.write_failed", String((err as Error)?.message || "任务保存失败"));
+      setTaskInlineSaving(false);
+    }
+  }, [applyTaskDetails, closeTaskEditDialog, taskInlineEdit]);
 
   useEffect(() => {
     try {
@@ -1413,6 +2197,9 @@ export function App({ onGoHome }: AppProps) {
       return {};
     }
   });
+  const [mainContentViewByRoot, setMainContentViewByRoot] = useState<Record<string, MainContentViewMode>>(
+    () => loadMainContentViewByRoot(),
+  );
   const [status, setStatus] = useState<WSStatus>("disconnected");
   const [file, setFile] = useState<FilePayload | null>(null);
   const [viewerSelection, setViewerSelection] =
@@ -1727,6 +2514,15 @@ export function App({ onGoHome }: AppProps) {
     );
   }, [directorySortOverrides]);
   useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem(
+      MAIN_CONTENT_VIEW_STORAGE_KEY,
+      JSON.stringify(mainContentViewByRoot),
+    );
+  }, [mainContentViewByRoot]);
+  useEffect(() => {
     const rootID = currentRootId;
     if (!rootID) return;
     setActiveBoundSessionKey(boundSessionByRootRef.current[rootID] || null);
@@ -1797,6 +2593,16 @@ export function App({ onGoHome }: AppProps) {
   const currentDirectorySortOverride = currentDirectorySortKey
     ? directorySortOverrides[currentDirectorySortKey]
     : undefined;
+  const currentMainContentView: MainContentViewMode =
+    (currentRootId && mainContentViewByRoot[currentRootId]) || "task-kanban";
+  const handleMainContentViewChange = useCallback((mode: MainContentViewMode) => {
+    const rootID = currentRootIdRef.current;
+    if (!rootID) return;
+    setMainContentViewByRoot((prev) => {
+      if (prev[rootID] === mode) return prev;
+      return { ...prev, [rootID]: mode };
+    });
+  }, []);
   const currentDirectorySortMode = currentDirectorySortOverride || treeSortMode;
 
   const replaceURLState = useCallback((next: URLState) => {
@@ -1956,6 +2762,12 @@ export function App({ onGoHome }: AppProps) {
       return next;
     });
     setGitHistoryExpandedByRoot((prev) => {
+      if (!(root in prev)) return prev;
+      const next = { ...prev };
+      delete next[root];
+      return next;
+    });
+    setMainContentViewByRoot((prev) => {
       if (!(root in prev)) return prev;
       const next = { ...prev };
       delete next[root];
@@ -2481,9 +3293,11 @@ export function App({ onGoHome }: AppProps) {
       agentMode?: string,
       effort?: string,
       fastService?: "" | "on" | "off",
+      planMode?: boolean,
       shell?: string,
     ) => {
       if (!rootID || !sessionKey || !agent) return;
+      const hasPlanMode = typeof planMode === "boolean";
       const cacheKey = rootSessionKey(rootID, sessionKey);
       const cached = sessionCacheRef.current[cacheKey];
       if (cached) {
@@ -2494,6 +3308,7 @@ export function App({ onGoHome }: AppProps) {
           mode: agentMode || "",
           effort: effort || "",
           fast_service: fastService || "",
+          ...(hasPlanMode ? { plan_mode: planMode } : {}),
           updated_at: new Date().toISOString(),
         } as Session;
       }
@@ -2509,6 +3324,7 @@ export function App({ onGoHome }: AppProps) {
           mode: agentMode || "",
           effort: effort || "",
           fast_service: fastService || "",
+          ...(hasPlanMode ? { plan_mode: planMode } : {}),
         } as SessionItem;
       });
       const current = drawerSessionByRootRef.current[rootID];
@@ -2519,7 +3335,8 @@ export function App({ onGoHome }: AppProps) {
           (current as any).model !== (model || "") ||
           (current as any).mode !== (agentMode || "") ||
           (current as any).effort !== (effort || "") ||
-          ((current as any).fast_service || "") !== (fastService || ""))
+          ((current as any).fast_service || "") !== (fastService || "") ||
+          (hasPlanMode && !!(current as any).plan_mode !== planMode))
       ) {
         setDrawerSessionForRoot(rootID, {
           ...(current as any),
@@ -2528,6 +3345,7 @@ export function App({ onGoHome }: AppProps) {
           mode: agentMode || "",
           effort: effort || "",
           fast_service: fastService || "",
+          ...(hasPlanMode ? { plan_mode: planMode } : {}),
         } as Session);
       }
       bumpCacheVersion();
@@ -2773,17 +3591,6 @@ export function App({ onGoHome }: AppProps) {
 	      },
     ) => {
       const cacheKey = rootSessionKey(rootID, sessionKey);
-      const candidates = [
-        fallback,
-        sessionCacheRef.current[cacheKey] as any,
-        currentSessionRef.current?.key === sessionKey
-          ? (currentSessionRef.current as any)
-          : null,
-        (selectedSessionRef.current?.key ||
-          selectedSessionRef.current?.session_key) === sessionKey
-          ? (selectedSessionRef.current as any)
-          : null,
-      ];
       const cachedSession = sessionCacheRef.current[cacheKey] as any;
       const exchanges = Array.isArray(cachedSession?.exchanges)
         ? ((cachedSession.exchanges || []) as Exchange[])
@@ -2798,7 +3605,18 @@ export function App({ onGoHome }: AppProps) {
 	            item?.effort ||
 	            item?.fast_service,
         );
-      candidates.push(latestMatchingExchange as any);
+      const candidates = [
+        fallback,
+        latestMatchingExchange as any,
+        sessionCacheRef.current[cacheKey] as any,
+        currentSessionRef.current?.key === sessionKey
+          ? (currentSessionRef.current as any)
+          : null,
+        (selectedSessionRef.current?.key ||
+          selectedSessionRef.current?.session_key) === sessionKey
+          ? (selectedSessionRef.current as any)
+          : null,
+      ];
 
       const pickText = (field: "agent" | "model" | "mode" | "effort") => {
         for (const item of candidates) {
@@ -2852,11 +3670,11 @@ export function App({ onGoHome }: AppProps) {
         if (last && (last.role === "agent" || last.role === "assistant")) {
           list[list.length - 1] = {
             ...last,
-            agent: last.agent || runtimeMeta.agent,
-            model: last.model || runtimeMeta.model,
-	            mode: last.mode || runtimeMeta.mode,
-	            effort: last.effort || runtimeMeta.effort,
-	            fast_service: last.fast_service || runtimeMeta.fast_service,
+            agent: runtimeMeta.agent || last.agent,
+            model: runtimeMeta.model || last.model,
+	            mode: runtimeMeta.mode || last.mode,
+	            effort: runtimeMeta.effort || last.effort,
+	            fast_service: runtimeMeta.fast_service || last.fast_service,
 	            content: `${last.content || ""}${content}`,
             timestamp: now,
           };
@@ -2895,11 +3713,11 @@ export function App({ onGoHome }: AppProps) {
       );
       sessionCacheRef.current[cacheKey] = {
         ...(base as any),
-        agent: (base as any).agent || runtimeMeta.agent,
-        model: (base as any).model || runtimeMeta.model,
-	        mode: (base as any).mode || runtimeMeta.mode,
-	        effort: (base as any).effort || runtimeMeta.effort,
-	        fast_service: (base as any).fast_service || runtimeMeta.fast_service,
+        agent: runtimeMeta.agent || (base as any).agent,
+        model: runtimeMeta.model || (base as any).model,
+	        mode: runtimeMeta.mode || (base as any).mode,
+	        effort: runtimeMeta.effort || (base as any).effort,
+	        fast_service: runtimeMeta.fast_service || (base as any).fast_service,
 	        exchanges: nextList,
         updated_at: new Date().toISOString(),
       } as Session;
@@ -3622,7 +4440,7 @@ export function App({ onGoHome }: AppProps) {
   );
 
   const loadMultiProjectSessionGroups = useCallback(async () => {
-    if (!multiProjectSessionsEnabled) {
+    if (!multiProjectSessionsEnabled || !protectedAPIReady()) {
       return;
     }
     setMultiProjectSessionsLoading(true);
@@ -3775,7 +4593,7 @@ export function App({ onGoHome }: AppProps) {
   }, [currentRootId, multiProjectSessionsEnabled, sessionListMode, sessionSearchAppliedQuery, sessionSearchOpen]);
 
   const openGitDiff = useCallback(
-    async (rootID: string, item: GitStatusItem, options?: { preserveRelatedSelection?: boolean }) => {
+    async (rootID: string, item: GitStatusItem, options?: { preserveRelatedSelection?: boolean; repoPath?: string }) => {
       if (!rootID || !item?.path) {
         return;
       }
@@ -3798,6 +4616,7 @@ export function App({ onGoHome }: AppProps) {
       try {
         const next = await fetchGitDiff(rootID, item.path, {
           cacheSignature: buildGitDiffCacheSignature(item),
+          repoPath: options?.repoPath,
         });
         setGitDiff(next);
         if (currentRootIdRef.current !== rootID) {
@@ -6290,6 +7109,7 @@ export function App({ onGoHome }: AppProps) {
       };
       setGitStatusExpandedByRoot((prev) => moveStateRecord(prev));
       setGitHistoryExpandedByRoot((prev) => moveStateRecord(prev));
+      setMainContentViewByRoot((prev) => moveStateRecord(prev));
 
       const moveCacheRecord = <T,>(record: Record<string, T>) => {
         if (oldID === nextID) {
@@ -6453,6 +7273,11 @@ export function App({ onGoHome }: AppProps) {
     setWorktreeErrorByRoot((prev) => ({ ...prev, [rootID]: "" }));
     try {
       const payload = await fetchGitWorktrees(rootID);
+      (payload.items || []).forEach((item) => {
+        if (item.path) {
+          knownTaskWorktreePathsRef.current.add(item.path);
+        }
+      });
       setWorktreeItemsByRoot((prev) => ({
         ...prev,
         [rootID]: (payload.items || []).filter((item) => !!item.branch),
@@ -7250,7 +8075,98 @@ export function App({ onGoHome }: AppProps) {
     [file, sessions, handleSelectSession],
   );
 
-  useEffect(() => {
+	  const handleTaskSessionDrawerOpen = useCallback(
+    (sessionKey: string, rootOverride?: string | null, taskId?: string) => {
+      const key = String(sessionKey || "").trim();
+      if (!key) return;
+      const root = rootOverride || currentRootIdRef.current;
+      if (!root) return;
+      const matched = sessions.find((item) => (item.key || item.session_key) === key);
+      const cacheKey = rootSessionKey(root, key);
+      const cached = sessionCacheRef.current[cacheKey];
+      const initial = cached || matched || {
+        key,
+        session_key: key,
+        root_id: root,
+        task_id: taskId || "",
+      };
+      setDrawerSessionForRoot(root, {
+        ...(initial as any),
+        key,
+        session_key: key,
+        root_id: root,
+        task_id: (initial as any)?.task_id || taskId || "",
+      } as SessionItem);
+      setBoundSessionForRoot(root, key);
+      interactionModeRef.current = "drawer";
+      setInteractionMode("drawer");
+      setDrawerOpenForRoot(root, true);
+      void restoreActiveSession(root, key).then((restored) => {
+        if (!restored) return;
+        setDrawerSessionForRoot(root, {
+          ...(restored as any),
+          key,
+          session_key: key,
+          root_id: root,
+          task_id: (restored as any)?.task_id || taskId || "",
+        } as Session);
+        loadedSessionRef.current[cacheKey] = true;
+        clearSessionStale(root, key);
+      });
+    },
+    [
+      clearSessionStale,
+      restoreActiveSession,
+      rootSessionKey,
+      sessions,
+      setBoundSessionForRoot,
+      setDrawerOpenForRoot,
+      setDrawerSessionForRoot,
+	    ],
+	  );
+
+	  const handleSelectKanbanTask = useCallback((task: KanbanTask) => {
+	    const taskId = String(task.id || "");
+	    if (!taskId) return;
+	    setSelectedKanbanTaskId((prev) => prev === taskId ? "" : taskId);
+	    const root = task.root_id || currentRootIdRef.current || "";
+	    const sessionKeys = Array.from(new Set(
+	      [...(taskSessionKeysById[taskId] || []), task.main_session_key]
+	        .map((key) => String(key || "").trim())
+	        .filter(Boolean),
+	    ));
+	    if (!root || sessionKeys.length === 0) return;
+	    void Promise.all(
+	      sessionKeys.map(async (sessionKey) => {
+	        const relatedFiles = await sessionService.getSessionRelatedFiles(root, sessionKey);
+	        await setCachedSessionRelatedFiles(root, sessionKey, relatedFiles);
+	        updateSessionRelatedFilesForKey(root, sessionKey, relatedFiles);
+	        return relatedFiles;
+	      }),
+	    )
+	      .then((relatedFileGroups) => {
+	        const seen = new Set<string>();
+	        const merged: RelatedFile[] = [];
+	        relatedFileGroups.flat().forEach((file) => {
+	          const key = [
+	            file.root_id || "",
+	            file.repo_kind || "",
+	            file.repo_path || "",
+	            file.head || "",
+	            file.path || "",
+	          ].join("\0");
+	          if (!file.path || seen.has(key)) return;
+	          seen.add(key);
+	          merged.push(file);
+	        });
+	        setTaskRelatedFilesById((prev) => ({ ...prev, [taskId]: merged }));
+	      })
+	      .catch((error) => {
+	        console.error("[task.related_files] failed", { root, taskId, sessionKeys, error });
+	      });
+	  }, [taskSessionKeysById, updateSessionRelatedFilesForKey]);
+
+	  useEffect(() => {
     function openReplySession(detail: any) {
       const rootId = typeof detail?.rootId === "string" ? detail.rootId.trim() : "";
       const sessionKey = typeof detail?.sessionKey === "string" ? detail.sessionKey.trim() : "";
@@ -8426,13 +9342,27 @@ export function App({ onGoHome }: AppProps) {
             typeof payload?.session_key === "string" &&
             typeof payload?.root_id === "string"
           ) {
-            console.info("[session/ws] user_message", { rootId: payload.root_id, sessionKey: payload.session_key });
             const rootID = payload.root_id;
             const sessionKey = payload.session_key;
             setMultiProjectSessionPending(rootID, sessionKey, true);
             const exchange = payload.exchange;
             const sessionMeta = payload.session;
             const cacheKey = rootSessionKey(rootID, sessionKey);
+            console.info("[session/ws] user_message", {
+              rootID,
+              sessionKey,
+              sessionAgent: sessionMeta?.agent || "",
+              exchangeAgent: exchange?.agent || "",
+              cachedAgent: (sessionCacheRef.current[cacheKey] as any)?.agent || "",
+              currentAgent:
+                currentSessionRef.current?.key === sessionKey
+                  ? ((currentSessionRef.current as any)?.agent || "")
+                  : "",
+              selectedAgent:
+                (selectedSessionRef.current?.key || selectedSessionRef.current?.session_key) === sessionKey
+                  ? ((selectedSessionRef.current as any)?.agent || "")
+                  : "",
+            });
             const cached =
               sessionCacheRef.current[cacheKey] ||
               ({
@@ -8523,6 +9453,22 @@ export function App({ onGoHome }: AppProps) {
                 exchange?.timestamp ||
                 new Date().toISOString(),
             } as Session;
+            const runtimeAgent = sessionMeta?.agent || exchange?.agent || "";
+            if (runtimeAgent) {
+              updateSessionAgentForKey(
+                rootID,
+                sessionKey,
+                runtimeAgent,
+                sessionMeta?.model || exchange?.model || "",
+                sessionMeta?.mode || exchange?.mode || "",
+                sessionMeta?.effort || exchange?.effort || "",
+                normalizeFastService(sessionMeta?.fast_service) ||
+                  normalizeFastService(exchange?.fast_service),
+                typeof sessionMeta?.plan_mode === "boolean"
+                  ? sessionMeta.plan_mode
+                  : undefined,
+              );
+            }
             bumpCacheVersion();
             const newest = sessionsRef.current[0]?.updated_at || "";
             void loadSessionsForRoot(
@@ -8531,6 +9477,31 @@ export function App({ onGoHome }: AppProps) {
             );
             if (multiProjectSessionsEnabled) {
               void loadMultiProjectSessionGroups();
+            }
+          }
+          break;
+        case "task.updated":
+          if (
+            typeof payload?.root_id === "string" &&
+            payload.root_id === currentRootIdRef.current &&
+            typeof payload?.task?.id === "string"
+          ) {
+            const nextTask = payload.task as KanbanTask;
+            const detail = payload.detail as TaskDetail | undefined;
+            if (detail?.task?.id) {
+              applyTaskDetails(payload.root_id, [detail]);
+            } else {
+              setTaskDetailsById((prev) => ({
+                ...prev,
+                [nextTask.id]: {
+                  task: nextTask,
+                  stage_runs: prev[nextTask.id]?.stage_runs || [],
+                  events: prev[nextTask.id]?.events || [],
+                },
+              }));
+            }
+            if (nextTask.worktree_path) {
+              void refreshTaskWorktree(payload.root_id, nextTask.worktree_path, false);
             }
           }
           break;
@@ -8550,6 +9521,10 @@ export function App({ onGoHome }: AppProps) {
                   typeof payload.session.name === "string"
                     ? payload.session.name
                     : cached.name,
+                agent:
+                  typeof payload.session.agent === "string"
+                    ? payload.session.agent
+                    : (cached as any).agent,
                 model:
                   typeof payload.session.model === "string"
                     ? payload.session.model
@@ -8581,6 +9556,10 @@ export function App({ onGoHome }: AppProps) {
                   typeof payload.session.source === "string"
                     ? payload.session.source
                     : (cached as any).source,
+                task_id:
+                  typeof payload.session.task_id === "string"
+                    ? payload.session.task_id
+                    : (cached as any).task_id,
                 related_worktree:
                   payload.session.related_worktree !== undefined
                     ? payload.session.related_worktree
@@ -8601,6 +9580,10 @@ export function App({ onGoHome }: AppProps) {
                         typeof payload.session.name === "string"
                           ? payload.session.name
                           : prev.name,
+                      agent:
+                        typeof payload.session.agent === "string"
+                          ? payload.session.agent
+                          : (prev as any).agent,
                       model:
                         typeof payload.session.model === "string"
                           ? payload.session.model
@@ -8632,6 +9615,10 @@ export function App({ onGoHome }: AppProps) {
                         typeof payload.session.source === "string"
                           ? payload.session.source
                           : (prev as any).source,
+                      task_id:
+                        typeof payload.session.task_id === "string"
+                          ? payload.session.task_id
+                          : (prev as any).task_id,
                       related_worktree:
                         payload.session.related_worktree !== undefined
                           ? payload.session.related_worktree
@@ -8771,6 +9758,7 @@ export function App({ onGoHome }: AppProps) {
     refreshManagedRoots,
     updateSessionRelatedWorktreeForKey,
     updateSessionRelatedFilesForKey,
+    updateSessionAgentForKey,
     treeCacheKey,
   ]);
 
@@ -8944,7 +9932,18 @@ export function App({ onGoHome }: AppProps) {
       return;
     }
     setAgentsVersion((v) => v + 1);
-  }, [bootstrapState.phase]);
+    void loadTaskTemplates();
+    void loadKanbanTasks(currentRootIdRef.current);
+    if (multiProjectSessionsEnabled) {
+      void loadMultiProjectSessionGroups();
+    }
+  }, [
+    bootstrapState.phase,
+    loadKanbanTasks,
+    loadMultiProjectSessionGroups,
+    loadTaskTemplates,
+    multiProjectSessionsEnabled,
+  ]);
 
   const describeE2EEPromptError = useCallback((err: unknown) => {
     const code = err instanceof Error ? String(err.message || "").trim() : "";
@@ -9238,20 +10237,46 @@ export function App({ onGoHome }: AppProps) {
     } as React.CSSProperties;
   }, [pluginRender]);
 
-  const selectedSessionSnapshot = useMemo(
-    () => {
-      if (!selectedSession) {
-        return null;
+	  const selectedSessionSnapshot = useMemo(
+	    () => {
+	      if (!selectedSession) {
+	        return null;
       }
       return getSessionSnapshot(
         selectedSession.root_id || currentRootId,
         selectedSession,
       );
-    },
-    [selectedSession, selectedSessionLoading, currentRootId, getSessionSnapshot],
-  );
+	    },
+	    [selectedSession, selectedSessionLoading, currentRootId, getSessionSnapshot],
+	  );
+	  const sessionByKey = useMemo(() => sessions.reduce<Record<string, SessionItem>>((acc, session) => {
+	    const key = session.key || session.session_key || "";
+	    if (key) acc[key] = session;
+	    return acc;
+	  }, {}), [sessions]);
 
-  useEffect(() => {
+	  const selectedKanbanTask = useMemo(
+	    () => kanbanTasks.find((task) => task.id === selectedKanbanTaskId) || null,
+	    [kanbanTasks, selectedKanbanTaskId],
+	  );
+	  const selectedKanbanTaskSessionKey = useMemo(() => {
+	    if (!selectedKanbanTask) return "";
+	    const keys = taskSessionKeysById[selectedKanbanTask.id] || [];
+	    return keys[0] || selectedKanbanTask.main_session_key || "";
+	  }, [selectedKanbanTask, taskSessionKeysById]);
+	  const selectedKanbanTaskSessionSnapshot = useMemo(() => {
+	    if (!selectedKanbanTask || !selectedKanbanTaskSessionKey) return null;
+	    const root = selectedKanbanTask.root_id || currentRootId || "";
+	    const session = sessionByKey[selectedKanbanTaskSessionKey] || {
+	      key: selectedKanbanTaskSessionKey,
+	      session_key: selectedKanbanTaskSessionKey,
+	      root_id: root,
+	      task_id: selectedKanbanTask.id,
+	    };
+	    return getSessionSnapshot(root, session as any);
+	  }, [currentRootId, getSessionSnapshot, selectedKanbanTask, selectedKanbanTaskSessionKey, sessionByKey]);
+
+	  useEffect(() => {
     if (selectedSessionSnapshot) {
       lastMainSessionSnapshotRef.current = selectedSessionSnapshot as Session;
     }
@@ -9418,8 +10443,20 @@ export function App({ onGoHome }: AppProps) {
       );
       await setCachedSessionRelatedFiles(resolvedRoot, resolvedKey, relatedFiles);
       updateSessionRelatedFilesForKey(resolvedRoot, resolvedKey, relatedFiles);
+      if (selectedKanbanTaskId) {
+        const removedKey = [repoKind || "", repoPath || "", head || "", path || ""].join("\0");
+        setTaskRelatedFilesById((prev) => {
+          const current = prev[selectedKanbanTaskId] || [];
+          return {
+            ...prev,
+            [selectedKanbanTaskId]: current.filter((file) =>
+              [file.repo_kind || "", file.repo_path || "", file.head || "", file.path || ""].join("\0") !== removedKey,
+            ),
+          };
+        });
+      }
     },
-    [updateSessionRelatedFilesForKey],
+    [selectedKanbanTaskId, updateSessionRelatedFilesForKey],
   );
 
   const handleAskUserAnswer = useCallback(
@@ -9898,14 +10935,20 @@ export function App({ onGoHome }: AppProps) {
     gitStatusLoading || gitStatusAvailable;
   const shouldRenderGitHistoryPanel =
     gitHistoryLoading || (gitHistoryAvailable && (gitHistory?.items.length || 0) > 0);
-  const relatedSessionSnapshot = selectedSessionSnapshot || lastMainSessionSnapshotRef.current;
-  const relatedSessionRootId =
-    (relatedSessionSnapshot?.root_id as string | undefined) ||
-    (selectedSession?.root_id as string | undefined) ||
-    currentRootId;
-  const relatedSessionKey = relatedSessionSnapshot?.key || relatedSessionSnapshot?.session_key;
-  const relatedSelectedPath = gitDiff?.path || file?.path || "";
-  const relatedWorktree = relatedSessionSnapshot?.related_worktree || null;
+	  const relatedSessionSnapshot = selectedKanbanTaskSessionSnapshot || selectedSessionSnapshot || lastMainSessionSnapshotRef.current;
+	  const relatedSessionRootId =
+	    (relatedSessionSnapshot?.root_id as string | undefined) ||
+	    selectedKanbanTask?.root_id ||
+	    (selectedSession?.root_id as string | undefined) ||
+	    currentRootId;
+	  const relatedSessionKey = relatedSessionSnapshot?.key || relatedSessionSnapshot?.session_key;
+	  const relatedSelectedPath = gitDiff?.path || file?.path || "";
+	  const relatedWorktree = selectedKanbanTask?.worktree_path
+	    ? {
+	        root_id: selectedKanbanTask.root_id,
+	        path: selectedKanbanTask.worktree_path,
+	      }
+	    : relatedSessionSnapshot?.related_worktree || null;
 
   useEffect(() => {
     const rootID = String(relatedWorktree?.root_id || "");
@@ -9913,11 +10956,11 @@ export function App({ onGoHome }: AppProps) {
     if (projectTreeTab !== "worktrees" || !rootID || !worktreePath) {
       return;
     }
-    setExpandedWorktreeByRoot((prev) => {
-      if (prev[rootID]) {
-        return prev;
-      }
-      return { ...prev, [rootID]: worktreePath };
+	    setExpandedWorktreeByRoot((prev) => {
+	      if (prev[rootID] === worktreePath) {
+	        return prev;
+	      }
+	      return { ...prev, [rootID]: worktreePath };
     });
     void loadProjectTreeWorktreeStatus(worktreePath);
   }, [
@@ -10064,11 +11107,11 @@ export function App({ onGoHome }: AppProps) {
                       showExpandedToggle={false}
                       enableBranchMenu={false}
                       onSelectItem={(statusItem) => {
-                        const nextRoot = targetRootId;
+                        const nextRoot = targetRootId || root;
                         if (!nextRoot) {
                           return;
                         }
-                        void openGitDiff(nextRoot, statusItem);
+                        void openGitDiff(nextRoot, statusItem, targetRootId ? undefined : { repoPath: item.path });
                       }}
                       onOpenItem={(statusItem) => {
                         const nextRoot = targetRootId;
@@ -10092,7 +11135,9 @@ export function App({ onGoHome }: AppProps) {
     );
   };
   const selectedSessionRelatedFiles = useMemo(() => {
-    const rawRelated = relatedSessionSnapshot?.related_files || (relatedSessionSnapshot as any)?.outputs || [];
+    const rawRelated = selectedKanbanTask
+      ? taskRelatedFilesById[selectedKanbanTask.id] || []
+      : relatedSessionSnapshot?.related_files || (relatedSessionSnapshot as any)?.outputs || [];
     return (Array.isArray(rawRelated) ? rawRelated : [])
       .map((file: RelatedFile | string | { path?: unknown; name?: unknown; head?: unknown; repo_path?: unknown; repo_name?: unknown; repo_kind?: unknown; root_id?: unknown }) => {
         const path = typeof file === "string"
@@ -10123,7 +11168,7 @@ export function App({ onGoHome }: AppProps) {
         return { path, name, head, repo_path: repoPath, repo_name: repoName, repo_kind: repoKind, root_id: rootID };
       })
       .filter((file) => file.path);
-  }, [relatedSessionSnapshot]);
+  }, [relatedSessionSnapshot, selectedKanbanTask, taskRelatedFilesById]);
   const selectedSessionRelatedFileGroups = useMemo(
     () => {
       const currentRootPath = normalizePath(
@@ -10191,7 +11236,7 @@ export function App({ onGoHome }: AppProps) {
     if (!root || root !== currentRootId || root !== relatedSessionRootId) {
       return null;
     }
-    if (!relatedSessionSnapshot) {
+    if (!relatedSessionSnapshot && !selectedKanbanTask) {
       return (
         <div style={{ padding: "8px 4px", fontSize: "12px", color: "var(--text-secondary)" }}>
           主视图未选择 session
@@ -10461,6 +11506,843 @@ export function App({ onGoHome }: AppProps) {
       </div>
     );
   };
+  const isAllTaskTemplateFilter = taskTemplateFilter === TASK_TEMPLATE_ALL_FILTER;
+  const selectedTaskTemplateForFilter = isAllTaskTemplateFilter ? null : taskTemplates.find((template) => template.id === taskTemplateFilter) || null;
+  const taskTemplateById = taskTemplates.reduce<Record<string, TaskTemplate>>((acc, template) => {
+    if (template.id) acc[template.id] = template;
+    return acc;
+  }, {});
+	  const unfinishedKanbanTasks = kanbanTaskCountItems.filter(isUnfinishedKanbanTask);
+  const unfinishedKanbanTaskCountByTemplate = unfinishedKanbanTasks.reduce<Record<string, number>>((acc, task) => {
+    const key = task.task_template_id || "";
+    if (key) acc[key] = (acc[key] || 0) + 1;
+    return acc;
+  }, {});
+  const selectedTaskTemplateUnfinishedCount = selectedTaskTemplateForFilter?.id ? unfinishedKanbanTaskCountByTemplate[selectedTaskTemplateForFilter.id] || 0 : 0;
+  const isTaskAtLastKnownStage = (task: KanbanTask) => {
+    const template = taskTemplateById[task.task_template_id || ""];
+    if (!template || template.stages.length === 0) return false;
+    return task.current_stage_index >= template.stages.length - 1;
+  };
+  const kanbanStageColumns = isAllTaskTemplateFilter
+    ? [{
+        index: 0,
+        name: "待开始",
+        role: "user" as const,
+        tasks: kanbanTasks.filter((task) => task.current_stage_index === 0 && !isTerminalKanbanTask(task)),
+      }, {
+        index: 1,
+        name: "处理中",
+        role: "agent" as const,
+        tasks: kanbanTasks.filter((task) => task.current_stage_index !== 0 && !isTerminalKanbanTask(task)),
+      }, {
+        index: 2,
+        name: "完成",
+        role: "user" as const,
+        tasks: kanbanTasks.filter(isTerminalKanbanTask),
+        groups: [{
+          name: "已完成",
+          tone: "success" as const,
+          tasks: kanbanTasks.filter((task) => task.status === "success"),
+        }, {
+          name: "失败",
+          tone: "danger" as const,
+          tasks: kanbanTasks.filter((task) => task.status === "fail"),
+        }, {
+          name: "已取消",
+          tone: "muted" as const,
+          tasks: kanbanTasks.filter((task) => task.status === "cancelled"),
+        }].filter((group) => group.tasks.length > 0),
+      }]
+    : selectedTaskTemplateForFilter
+      ? selectedTaskTemplateForFilter.stages.map((stage, index) => ({
+        index,
+        name: stage.snapshot.name || (stage.snapshot.role === "agent" ? "Agent 执行" : "用户输入"),
+        role: stage.snapshot.role,
+        tasks: kanbanTasks.filter((task) => task.current_stage_index === index),
+      }))
+    : [];
+  if (!isAllTaskTemplateFilter) {
+    kanbanTasks.forEach((task) => {
+      if (task.current_stage_index < 0 || task.current_stage_index >= kanbanStageColumns.length) {
+        const existing = kanbanStageColumns.find((column) => column.index === task.current_stage_index);
+        if (existing) {
+          existing.tasks.push(task);
+        } else {
+          kanbanStageColumns.push({
+            index: task.current_stage_index,
+            name: task.current_stage_name || `阶段 ${task.current_stage_index + 1}`,
+            role: "user",
+            tasks: [task],
+          });
+        }
+      }
+    });
+  }
+  kanbanStageColumns.sort((a, b) => a.index - b.index);
+	  const kanbanTaskPanel = currentRootId ? (
+	    <div
+	      style={{
+	        maxHeight: "calc(100dvh - 92px)",
+	        overflow: "visible",
+	        display: "flex",
+	        flexDirection: "column",
+	        minWidth: 0,
+	      }}
+	    >
+	      <div
+	        style={{
+	          display: "flex",
+          alignItems: "center",
+	          justifyContent: "space-between",
+	          gap: "10px",
+	          padding: "0 0 8px",
+	          flexShrink: 0,
+	        }}
+	      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "6px",
+            minWidth: 0,
+            flex: 1,
+          }}
+        >
+          <div
+            role="tablist"
+            aria-label="任务模板"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "2px",
+              overflowX: "auto",
+              padding: "3px",
+              borderRadius: "10px",
+              border: "1px solid rgba(100, 116, 139, 0.36)",
+              background: "rgba(148, 163, 184, 0.10)",
+              minWidth: 0,
+              scrollbarWidth: "none",
+            }}
+          >
+            {(() => {
+              const active = isAllTaskTemplateFilter;
+              return (
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  onClick={() => {
+                    setTaskTemplateFilter(TASK_TEMPLATE_ALL_FILTER);
+                    setTaskTemplateActionMenuOpen(false);
+                  }}
+                  style={{
+                    border: "none",
+                    borderRadius: "6px",
+                    background: active ? "var(--accent-color)" : "transparent",
+                    color: active ? "#fff" : "var(--text-secondary)",
+                    padding: "3px 7px",
+                    fontSize: "11px",
+                    fontWeight: 700,
+                    lineHeight: "14px",
+                    cursor: "pointer",
+                    whiteSpace: "nowrap",
+                    boxShadow: active ? "0 1px 3px rgba(37, 99, 235, 0.28)" : "none",
+                  }}
+                >
+                  全部
+                </button>
+              );
+            })()}
+            {taskTemplates.length > 0 ? (
+              <span
+                aria-hidden="true"
+                style={{
+                  width: "1px",
+                  height: "16px",
+                  background: "rgba(100, 116, 139, 0.32)",
+                  margin: "0 1px",
+                  flexShrink: 0,
+                }}
+              />
+            ) : null}
+            {taskTemplates.map((template, index) => {
+              const templateId = template.id || "";
+              const active = selectedTaskTemplateForFilter?.id === templateId;
+              return (
+                <React.Fragment key={templateId || template.name}>
+                  {index > 0 ? (
+                    <span
+                      aria-hidden="true"
+                      style={{
+                        width: "1px",
+                        height: "16px",
+                        background: "rgba(100, 116, 139, 0.32)",
+                        margin: "0 1px",
+                        flexShrink: 0,
+                      }}
+                    />
+                  ) : null}
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={active}
+                    onClick={() => {
+                      setTaskTemplateFilter(templateId);
+                      setTaskTemplateActionMenuOpen(false);
+                    }}
+                    style={{
+                      border: "none",
+                      borderRadius: "6px",
+                      background: active ? "var(--accent-color)" : "transparent",
+                      color: active ? "#fff" : "var(--text-secondary)",
+                      padding: "3px 7px",
+                      fontSize: "11px",
+                      fontWeight: 700,
+                      lineHeight: "14px",
+                      cursor: "pointer",
+                      whiteSpace: "nowrap",
+                      boxShadow: active ? "0 1px 3px rgba(37, 99, 235, 0.28)" : "none",
+                  }}
+                >
+                  <span>{template.name || "未命名模板"}</span>
+                </button>
+                </React.Fragment>
+              );
+            })}
+          </div>
+          <div ref={taskTemplateActionMenuRef} style={{ position: "relative", flexShrink: 0 }}>
+            <button
+              type="button"
+              aria-label="任务模板菜单"
+              title="任务模板菜单"
+              onClick={() => setTaskTemplateActionMenuOpen((open) => !open)}
+              style={{
+                width: "28px",
+                height: "28px",
+                borderRadius: "8px",
+                border: "none",
+                background: taskTemplateActionMenuOpen ? "rgba(0, 0, 0, 0.06)" : "transparent",
+                color: "var(--text-secondary)",
+                opacity: 1,
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                cursor: "pointer",
+                padding: 0,
+              }}
+            >
+              <HorizontalDotsIcon />
+            </button>
+            {taskTemplateActionMenuOpen ? (
+              <div
+                style={{
+                  position: "absolute",
+                  top: "calc(100% + 6px)",
+                  left: "50%",
+                  transform: "translateX(-50%)",
+                  minWidth: "160px",
+                  padding: "6px",
+                  borderRadius: "10px",
+                  border: "1px solid var(--border-color)",
+                  background: "var(--menu-bg)",
+                  boxShadow: "0 12px 30px rgba(15, 23, 42, 0.14)",
+                  zIndex: 40,
+                }}
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTaskTemplateActionMenuOpen(false);
+                    openTaskTemplateEditor(null);
+                  }}
+                  style={taskTemplateMenuItemStyle()}
+                >
+                  <PlusSmallIcon />
+                  <span>创建任务模板</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={!selectedTaskTemplateForFilter}
+                  onClick={() => {
+                    if (!selectedTaskTemplateForFilter) return;
+                    setTaskTemplateActionMenuOpen(false);
+                    openTaskTemplateEditor(selectedTaskTemplateForFilter);
+                  }}
+                  style={taskTemplateMenuItemStyle(!selectedTaskTemplateForFilter)}
+                >
+                  <EditPencilIcon />
+                  <span>编辑模板</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={!selectedTaskTemplateForFilter || selectedTaskTemplateUnfinishedCount > 0}
+                  title={!selectedTaskTemplateForFilter ? "请选择具体模板" : selectedTaskTemplateUnfinishedCount > 0 ? "模板下有未完成任务，不能删除" : "删除模板"}
+                  onClick={() => {
+                    if (!selectedTaskTemplateForFilter || selectedTaskTemplateUnfinishedCount > 0) return;
+                    setTaskTemplateActionMenuOpen(false);
+                    void handleDeleteTaskTemplate(selectedTaskTemplateForFilter);
+                  }}
+                  style={taskTemplateMenuItemStyle(!selectedTaskTemplateForFilter || selectedTaskTemplateUnfinishedCount > 0)}
+                >
+                  <DeleteIcon />
+                  <span>删除模板</span>
+                </button>
+                <div style={{ height: "1px", background: "var(--border-color)", margin: "6px 2px" }} />
+                <button
+                  type="button"
+                  disabled={!selectedTaskTemplateForFilter}
+                  onClick={() => setTaskTemplateConcurrencyOpen((open) => !open)}
+                  style={taskTemplateMenuItemStyle(!selectedTaskTemplateForFilter)}
+                >
+                  <span style={{ flex: 1 }}>任务并发数</span>
+                  <span style={{ fontSize: "12px", fontWeight: 800, color: "var(--text-primary)" }}>
+                    {selectedTaskTemplateForFilter?.max_concurrency || 1}
+                  </span>
+                  <ChevronDownSmallIcon />
+                </button>
+                {taskTemplateConcurrencyOpen && selectedTaskTemplateForFilter ? (
+                  <div style={{ borderTop: "1px solid var(--border-color)", borderBottom: "1px solid var(--border-color)", margin: "2px 2px 6px", padding: "4px 0" }}>
+                    {Array.from({ length: 10 }, (_, index) => index + 1).map((value) => {
+                      const active = (selectedTaskTemplateForFilter.max_concurrency || 1) === value;
+                      return (
+                        <button
+                          key={value}
+                          type="button"
+                          onClick={() => {
+                            void handleTaskTemplateConcurrencyChange(selectedTaskTemplateForFilter.id || "", value);
+                          }}
+                          style={{
+                            width: "100%",
+                            minHeight: "28px",
+                            border: "none",
+                            borderRadius: "6px",
+                            background: active ? "rgba(37, 99, 235, 0.10)" : "transparent",
+                            color: active ? "var(--accent-color)" : "var(--text-primary)",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            padding: "5px 8px 5px 24px",
+                            fontSize: "12px",
+                            fontWeight: active ? 800 : 600,
+                            cursor: "pointer",
+                          }}
+                        >
+                          <span>{value}</span>
+                          {active ? <CheckIconSmall /> : null}
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+        </div>
+        <button
+          type="button"
+          title="刷新任务"
+          aria-label="刷新任务"
+          onClick={() => void loadKanbanTasks(currentRootId)}
+          style={{
+            width: "28px",
+            height: "28px",
+            borderRadius: "8px",
+            border: "none",
+            background: "transparent",
+            color: "var(--text-color)",
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            cursor: "pointer",
+            flexShrink: 0,
+            padding: 0,
+          }}
+        >
+          <SyncIcon />
+        </button>
+        <div ref={taskCreateTemplateMenuRef} style={{ position: "relative", flexShrink: 0 }}>
+          <button
+            type="button"
+            title="创建任务"
+            aria-label="创建任务"
+            disabled={!isAllTaskTemplateFilter && !selectedTaskTemplateForFilter}
+            onClick={() => {
+              if (isAllTaskTemplateFilter) {
+                setTaskTemplateActionMenuOpen(false);
+                setTaskCreateTemplateMenuOpen((open) => !open);
+                return;
+              }
+              openTaskCreateDialog(selectedTaskTemplateForFilter);
+            }}
+            style={{
+              width: "28px",
+              height: "28px",
+              borderRadius: "8px",
+              border: "none",
+              background: taskCreateTemplateMenuOpen ? "rgba(0, 0, 0, 0.06)" : "transparent",
+              color: isAllTaskTemplateFilter || selectedTaskTemplateForFilter ? "var(--text-color)" : "var(--muted-text)",
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              cursor: isAllTaskTemplateFilter || selectedTaskTemplateForFilter ? "pointer" : "not-allowed",
+              flexShrink: 0,
+              padding: 0,
+              opacity: isAllTaskTemplateFilter || selectedTaskTemplateForFilter ? 1 : 0.55,
+            }}
+          >
+            <PlusSmallIcon />
+          </button>
+          {taskCreateTemplateMenuOpen ? (
+            <div
+              style={{
+                position: "absolute",
+                top: "calc(100% + 6px)",
+                right: 0,
+                minWidth: "136px",
+                maxWidth: "220px",
+                maxHeight: "260px",
+                overflowY: "auto",
+                padding: "5px",
+                borderRadius: "10px",
+                border: "1px solid var(--border-color)",
+                background: "var(--menu-bg)",
+                boxShadow: "0 12px 30px rgba(15, 23, 42, 0.14)",
+                zIndex: 40,
+              }}
+            >
+              {taskTemplates.length === 0 ? (
+                <div style={{ padding: "8px", fontSize: "12px", color: "var(--text-secondary)", whiteSpace: "nowrap" }}>暂无模板</div>
+              ) : taskTemplates.map((template) => (
+                <button
+                  key={template.id || template.name}
+                  type="button"
+                  onClick={() => {
+                    setTaskCreateTemplateMenuOpen(false);
+                    openTaskCreateDialog(template);
+                  }}
+                  style={{
+                    width: "100%",
+                    minHeight: "28px",
+                    border: "none",
+                    borderRadius: "7px",
+                    background: "transparent",
+                    color: "var(--text-primary)",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "flex-start",
+                    padding: "5px 8px",
+                    fontSize: "12px",
+                    fontWeight: 700,
+                    cursor: "pointer",
+                    textAlign: "left",
+                  }}
+                >
+                  <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{template.name || "未命名模板"}</span>
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      </div>
+      {kanbanTasksLoading ? (
+        <div style={{ padding: "12px", fontSize: "12px", color: "var(--text-secondary)" }}>任务加载中</div>
+      ) : !isAllTaskTemplateFilter && !selectedTaskTemplateForFilter ? (
+        <div style={{ padding: "12px", fontSize: "12px", color: "var(--text-secondary)" }}>请先创建任务模板</div>
+      ) : (
+	        <div style={{ overflowX: "auto", overflowY: "hidden", padding: "0 0 12px 1px", minHeight: 0 }}>
+	          <div
+	            style={{
+	              display: "grid",
+	              gridAutoFlow: "column",
+	              gridAutoColumns: isMobile ? "calc((100% - 6px) / 2)" : "minmax(220px, 1fr)",
+	              gap: "6px",
+	              minWidth: isMobile ? undefined : `${Math.max(kanbanStageColumns.length, 1) * 220}px`,
+	              alignItems: "start",
+	            }}
+	          >
+	            {kanbanStageColumns.map((column) => {
+	              const taskSections = "groups" in column && Array.isArray(column.groups) && column.groups.length > 0
+	                ? column.groups
+	                : [{ name: "", tone: "default" as const, tasks: column.tasks }];
+	              return (
+	              <section
+	                key={column.index}
+                style={{
+		                  border: "1px solid var(--border-color)",
+	                  borderRadius: "8px",
+	                  background: "rgba(148, 163, 184, 0.06)",
+	                  overflow: "hidden",
+	                  display: "flex",
+	                  flexDirection: "column",
+	                  minHeight: 0,
+	                  maxHeight: "calc(100dvh - 148px)",
+	                }}
+	              >
+                <div
+                  style={{
+                    minHeight: "34px",
+                    borderBottom: "1px solid var(--border-color)",
+                    padding: "7px 9px",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+	                    gap: "8px",
+	                    flexShrink: 0,
+	                  }}
+	                >
+                  <div style={{ minWidth: 0, display: "flex", alignItems: "center", gap: "6px" }}>
+                    <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: "12px", fontWeight: 800, color: "var(--text-color)" }}>
+                      {column.name}
+                    </span>
+                  </div>
+                  <span style={{ fontSize: "11px", fontWeight: 800, color: "var(--text-secondary)" }}>{column.tasks.length}</span>
+                </div>
+	                <div style={{ padding: "8px", display: "flex", flexDirection: "column", gap: "8px", overflowY: "auto", minHeight: 0 }}>
+	                  {column.tasks.length === 0 ? (
+	                    <div style={{ padding: "10px 4px", fontSize: "12px", color: "var(--text-secondary)", textAlign: "center" }}>暂无任务</div>
+	                      ) : taskSections.map((section) => {
+                      const sectionCollapsed = Boolean(section.name && collapsedTaskCompletionGroups.has(section.name));
+                      const sectionColor = section.tone === "danger" ? "#dc2626" : section.tone === "success" ? "#16a34a" : "var(--text-secondary)";
+                      return (
+	                    <React.Fragment key={section.name || "tasks"}>
+	                      {section.name ? (
+	                        <button
+                            type="button"
+                            onClick={() => {
+                              setCollapsedTaskCompletionGroups((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(section.name)) {
+                                  next.delete(section.name);
+                                } else {
+                                  next.add(section.name);
+                                }
+                                return next;
+                              });
+                            }}
+	                          style={{
+	                            marginTop: "2px",
+	                            padding: "2px 2px 0",
+	                            display: "flex",
+	                            alignItems: "center",
+	                            justifyContent: "space-between",
+	                            gap: "8px",
+                              width: "100%",
+                              border: "none",
+                              background: "transparent",
+	                            color: sectionColor,
+	                            fontSize: "11px",
+	                            fontWeight: 800,
+                              cursor: "pointer",
+	                          }}
+	                        >
+                            <span style={{ display: "inline-flex", alignItems: "center", gap: "4px", minWidth: 0 }}>
+                              <TaskGroupChevronIcon collapsed={sectionCollapsed} />
+	                            <span>{section.name}</span>
+                            </span>
+	                          <span>{section.tasks.length}</span>
+	                        </button>
+	                      ) : null}
+	                      {!sectionCollapsed ? section.tasks.map((task) => {
+                    const firstInput = taskFirstInputById[task.id] || "";
+                    const taskSessionKeys = taskSessionKeysById[task.id]?.length
+                      ? taskSessionKeysById[task.id]
+                      : task.main_session_key
+                        ? [task.main_session_key]
+                        : [];
+                    const taskSessionPending = taskSessionKeys.some((key) => !!sessionByKey[key]?.pending);
+                    const taskQueued = task.status === "queued";
+                    const auxFlags = task.aux_flags || {};
+                    const taskSessionError = parseTaskSessionErrorMessage(auxFlags.session_error);
+                    const taskSessionErrorDetails = parseTaskSessionErrorDetails(auxFlags.session_error);
+                    const taskAuxBadges = [
+                      auxFlags.ask_user_waiting ? { key: "ask_user", label: "等待用户回答", icon: renderToolIcon("ask_user"), attention: true } : null,
+                      auxFlags.has_plan ? { key: "plan", label: "包含 Plan", icon: <TaskPlanAuxIcon />, attention: false } : null,
+                      auxFlags.has_todos ? { key: "todos", label: "包含 Todos", icon: renderToolIcon("todo"), attention: false } : null,
+                      auxFlags.has_task ? { key: "task", label: "包含 Task", icon: renderToolIcon("task"), attention: false } : null,
+                    ].filter((item): item is { key: string; label: string; icon: React.ReactNode; attention: boolean } => Boolean(item));
+                    const inputExpanded = expandedTaskInputIds.has(task.id);
+                    const inputNeedsToggle = firstInput.length > 120 || firstInput.split(/\r?\n/).length > 3;
+                    const taskTerminal = isTerminalKanbanTask(task);
+                    const taskStageRunning = task.current_stage_status === "running";
+                    const taskCanComplete = !taskTerminal && task.status === "waiting_user" && isTaskAtLastKnownStage(task);
+                    const showTaskAdvanceButton = !taskTerminal && !taskStageRunning;
+                    const taskStatusText = taskStatusLabel(task.status || "");
+	                    const taskNumberLabel = task.task_number ? `#${task.task_number}` : "";
+	                    const taskStageName = task.current_stage_name || (task.current_stage_index >= 0 ? `阶段 ${task.current_stage_index + 1}` : "");
+	                    const showStageName = isAllTaskTemplateFilter ? column.name === "处理中" : Boolean(taskStageName);
+	                    const showTaskStatus = isAllTaskTemplateFilter && column.name === "完成";
+	                    const taskSelected = selectedKanbanTaskId === task.id;
+	                    return (
+	                      <article
+	                        key={task.id}
+	                        onClick={() => handleSelectKanbanTask(task)}
+	                        style={{
+	                          position: "relative",
+	                          border: taskSelected ? "1px solid rgba(14, 165, 233, 0.95)" : "1px solid rgba(96, 165, 250, 0.42)",
+	                          borderRadius: "8px",
+	                          background: "var(--menu-bg)",
+	                          padding: "8px",
+	                          boxShadow: taskSelected ? "0 0 0 2px rgba(14, 165, 233, 0.16)" : "0 1px 2px rgba(15, 23, 42, 0.06)",
+	                          cursor: "pointer",
+	                        }}
+	                      >
+                        {taskSessionPending ? (
+                          <span
+                            aria-label="任务会话正在回复"
+                            title="任务会话正在回复"
+                            style={taskReplyPulseStyle()}
+                          />
+                        ) : null}
+                        {isAllTaskTemplateFilter ? (
+                          <div
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: "5px",
+                              minWidth: 0,
+                              color: "var(--text-secondary)",
+                              fontSize: "10px",
+                              fontWeight: 700,
+                              lineHeight: "14px",
+                            }}
+                          >
+                            {taskNumberLabel ? (
+                              <span style={{ flex: "0 0 auto", color: "#0ea5e9", fontWeight: 800 }}>{taskNumberLabel}</span>
+                            ) : null}
+                            <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {task.task_template_name || selectedTaskTemplateForFilter?.name || "未命名模板"}
+                            </span>
+                            {showStageName ? (
+                              <>
+                                <span style={{ flex: "0 0 auto", opacity: 0.55 }}>·</span>
+                                <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                  {taskStageName}
+                                </span>
+                              </>
+                            ) : null}
+	                            {showTaskStatus ? (
+	                              <>
+	                                <span style={{ flex: "0 0 auto", opacity: 0.55 }}>·</span>
+	                                <span style={{ flex: "0 0 auto" }}>{taskStatusText}</span>
+	                                {task.status === "fail" && taskSessionError ? (
+	                                  <button
+	                                    type="button"
+	                                    title="查看错误信息"
+	                                    aria-label="查看任务错误信息"
+		                                    onClick={(event) => {
+		                                      event.stopPropagation();
+		                                      setTaskSessionErrorDialog({
+		                                        title: task.task_template_name || selectedTaskTemplateForFilter?.name || "任务",
+		                                        message: taskSessionError,
+		                                        details: taskSessionErrorDetails,
+		                                      });
+		                                    }}
+	                                    style={{ ...taskCardIconButtonStyle("warning"), width: "16px", height: "16px" }}
+	                                  >
+	                                    <TaskSessionErrorIcon />
+	                                  </button>
+	                                ) : null}
+	                              </>
+	                            ) : null}
+                          </div>
+                        ) : null}
+                        <div
+                          style={{
+                            marginTop: isAllTaskTemplateFilter ? "5px" : 0,
+                            color: firstInput ? "var(--text-color)" : "var(--text-secondary)",
+                            fontSize: "12px",
+                            lineHeight: "18px",
+                            fontWeight: firstInput ? 700 : 500,
+                          }}
+                        >
+                          <div
+                            style={{
+                              whiteSpace: "pre-wrap",
+                              wordBreak: "break-word",
+                              ...(!inputExpanded
+                                ? {
+                                    display: "-webkit-box",
+                                    WebkitLineClamp: 3,
+                                    WebkitBoxOrient: "vertical",
+                                    overflow: "hidden",
+                                  }
+                                : {}),
+                            }}
+                          >
+                            {!isAllTaskTemplateFilter && taskNumberLabel ? (
+                              <span style={{ color: "#0ea5e9", fontWeight: 800, marginRight: "6px" }}>{taskNumberLabel}</span>
+                            ) : null}
+                            <span>{firstInput || "无输入"}</span>
+                          </div>
+                        </div>
+                        <div style={{ marginTop: "8px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "4px" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+                            {taskSessionKeys.length > 0 ? (
+                              taskSessionKeys.map((sessionKey, sessionIndex) => {
+                                const taskSession = sessionByKey[sessionKey] || null;
+                                return (
+                                  <button
+                                    key={`${task.id}-${sessionKey}`}
+                                    type="button"
+                                    title={taskSession?.name || `打开任务会话 ${sessionIndex + 1}`}
+                                    aria-label={`打开任务会话 ${sessionIndex + 1}`}
+	                                    onClick={(event) => {
+	                                      event.stopPropagation();
+	                                      handleTaskSessionDrawerOpen(sessionKey, task.root_id || currentRootIdRef.current, task.id);
+	                                    }}
+                                    style={taskCardIconButtonStyle()}
+                                  >
+                                    <span
+                                      style={{
+                                        position: "relative",
+                                        width: "18px",
+                                        height: "18px",
+                                        display: "inline-flex",
+                                        alignItems: "center",
+                                        justifyContent: "center",
+                                      }}
+                                    >
+                                      <ModeIcon type="task" size={16} />
+                                      <span
+                                        style={{
+                                          position: "absolute",
+                                          right: "-2px",
+                                          bottom: "-2px",
+                                          width: "10px",
+                                          height: "10px",
+                                          borderRadius: "999px",
+                                          background: "var(--content-bg, #fff)",
+                                          border: "1px solid rgba(255,255,255,0.9)",
+                                          display: "flex",
+                                          alignItems: "center",
+                                          justifyContent: "center",
+                                          overflow: "hidden",
+                                        }}
+                                      >
+                                        <AgentIcon
+                                          agentName={taskSession?.agent || ""}
+                                          style={{ width: "10px", height: "10px", display: "block" }}
+                                        />
+                                      </span>
+                                    </span>
+                                  </button>
+                                );
+                              })
+                            ) : taskQueued ? (
+                              <span
+                                title="等待调度"
+                                aria-label="等待调度"
+                                style={{
+                                  ...taskCardIconButtonStyle(),
+                                  cursor: "default",
+                                  color: "var(--accent-color)",
+                                }}
+                              >
+                                <TaskQueuedSpinnerIcon />
+                              </span>
+                            ) : null}
+	                            {taskSessionError && !(showTaskStatus && task.status === "fail") ? (
+                              <button
+                                type="button"
+                                title="查看错误信息"
+                                aria-label="查看任务会话错误信息"
+	                                onClick={(event) => {
+	                                  event.stopPropagation();
+	                                  setTaskSessionErrorDialog({
+	                                    title: task.task_template_name || selectedTaskTemplateForFilter?.name || "任务会话",
+	                                    message: taskSessionError,
+	                                    details: taskSessionErrorDetails,
+	                                  });
+	                                }}
+                                style={taskCardIconButtonStyle("warning")}
+                              >
+                                <TaskSessionErrorIcon />
+                              </button>
+                            ) : null}
+                            {taskAuxBadges.length > 0 ? (
+                              <div style={{ display: "inline-flex", alignItems: "center", gap: "2px" }}>
+                                {taskAuxBadges.map((badge) => (
+                                  <span
+                                    key={badge.key}
+                                    title={badge.label}
+                                    aria-label={badge.label}
+                                    style={taskAuxBadgeStyle(badge.attention)}
+                                  >
+                                    {badge.icon}
+                                  </span>
+                                ))}
+                              </div>
+                            ) : null}
+                            {inputNeedsToggle ? (
+                              <button
+                                type="button"
+                                title={inputExpanded ? "收起" : "展开"}
+                                aria-label={inputExpanded ? "收起任务内容" : "展开任务内容"}
+	                                onClick={(event) => {
+	                                  event.stopPropagation();
+	                                  setExpandedTaskInputIds((prev) => {
+                                    const next = new Set(prev);
+                                    if (next.has(task.id)) {
+                                      next.delete(task.id);
+                                    } else {
+                                      next.add(task.id);
+                                    }
+                                    return next;
+                                  });
+                                }}
+                                style={taskCardIconButtonStyle()}
+                              >
+                                <TaskExpandIcon collapsed={!inputExpanded} />
+                              </button>
+                            ) : null}
+                          </div>
+                          {!taskTerminal ? (
+                            <div style={{ display: "flex", justifyContent: "flex-end", gap: 0 }}>
+                              {showTaskAdvanceButton ? (
+                                <button
+                                  type="button"
+                                  title={taskCanComplete ? "完成" : "下一阶段"}
+                                  aria-label={taskCanComplete ? "完成任务" : "下一阶段"}
+	                                  onClick={(event) => {
+	                                    event.stopPropagation();
+	                                    void handleMoveKanbanTask(task, taskCanComplete ? "complete" : "next");
+	                                  }}
+                                  style={taskCardIconButtonStyle(taskCanComplete ? "success" : "accent")}
+                                >
+                                  {taskCanComplete ? <TaskCompleteIcon /> : <RunNowIcon />}
+                                </button>
+                              ) : null}
+	                              <button type="button" title="编辑" aria-label="编辑任务" onClick={(event) => {
+	                                event.stopPropagation();
+	                                void openTaskEditDialog(task);
+	                              }} style={taskCardIconButtonStyle()}>
+                                {renderToolIcon("edit")}
+                              </button>
+	                              <button type="button" title="删除" aria-label="删除任务" onClick={(event) => {
+	                                event.stopPropagation();
+	                                void handleMoveKanbanTask(task, "cancel");
+	                              }} style={taskCardIconButtonStyle("danger")}>
+                                <DeleteIcon />
+                              </button>
+                            </div>
+                          ) : null}
+                        </div>
+	                      </article>
+	                    );
+	                  }) : null}
+	                    </React.Fragment>
+                      );
+	                  })}
+	                </div>
+	              </section>
+	              );
+	            })}
+          </div>
+        </div>
+      )}
+    </div>
+  ) : null;
   if (gitDiff) {
     workspaceView = (
       <GitDiffViewer
@@ -10648,12 +12530,14 @@ export function App({ onGoHome }: AppProps) {
       <DefaultListView
         root={currentRootId || undefined}
         path={selectedDir || ""}
-        entries={visibleMainEntries}
-        errorMessage={mainDirectoryError}
-        topContent={null}
+        entries={currentMainContentView === "file-browser" ? visibleMainEntries : []}
+        errorMessage={currentMainContentView === "file-browser" ? mainDirectoryError : ""}
+        topContent={currentMainContentView === "task-kanban" ? kanbanTaskPanel : null}
         showHiddenFiles={showHiddenFiles}
         sortMode={currentDirectorySortMode}
         sortControlValue={currentDirectorySortOverride || "inherit"}
+        currentViewMode={currentMainContentView}
+        onViewModeChange={handleMainContentViewChange}
         onSortModeChange={(nextMode) => {
           const rootID = currentRootIdRef.current;
           const nextKey = getDirectorySortKey(rootID, selectedDirRef.current);
@@ -11255,10 +13139,10 @@ export function App({ onGoHome }: AppProps) {
               sessionDrawerOpen={isDrawerOpen}
               detachedBoundSession={detachedBoundSession}
               editDraftRequest={editDraftRequest}
-	              queuedMessages={actionBarQueuedMessages}
-	              onSendMessage={handleSendMessage}
-	              onSetPlanMode={handleSetPlanMode}
-	              onCancelCurrentTurn={handleCancelCurrentTurn}
+              queuedMessages={actionBarQueuedMessages}
+              onSendMessage={handleSendMessage}
+              onSetPlanMode={handleSetPlanMode}
+              onCancelCurrentTurn={handleCancelCurrentTurn}
               onRemoveQueuedMessage={handleRemoveQueuedMessage}
               onUpdateQueuedMessage={handleUpdateQueuedMessage}
               onSendQueuedMessageNow={handleSendQueuedMessageNow}
@@ -11459,11 +13343,502 @@ export function App({ onGoHome }: AppProps) {
           </div>
         </div>
       ) : null}
+      {taskInlineEdit ? (
+	        (() => {
+	          const taskInlineCanCreateWorktree = managedRootByIdRef.current[currentRootId || ""]?.is_git_repo === true;
+	          const showTaskWorktreeControls = taskInlineCanCreateWorktree && (taskInlineEdit.canToggleWorktree || taskInlineEdit.taskId);
+	          const taskWorktreeControlsEditable = taskInlineEdit.canToggleWorktree;
+	          return (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 95,
+            background: "rgba(15, 23, 42, 0.36)",
+            display: "flex",
+            alignItems: isMobile ? "flex-start" : "center",
+            justifyContent: "center",
+            padding: isMobile ? "38px 12px 12px" : "24px",
+          }}
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !taskInlineSaving) {
+              closeTaskEditDialog();
+            }
+          }}
+        >
+          <section
+            style={{
+              width: isMobile ? "100%" : "min(640px, 100%)",
+              maxHeight: isMobile ? "70dvh" : "82vh",
+              borderRadius: "10px",
+              border: "1px solid var(--border-color)",
+              background: "var(--menu-bg)",
+              boxShadow: "0 24px 60px rgba(15, 23, 42, 0.24)",
+              display: "flex",
+              flexDirection: "column",
+              overflow: "visible",
+            }}
+          >
+            <div
+              style={{
+                minHeight: "42px",
+                padding: "8px 12px",
+                borderBottom: "1px solid var(--border-color)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: "10px",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: "8px", minWidth: 0 }}>
+                <div style={{ fontSize: "13px", fontWeight: 800, color: "var(--text-color)", whiteSpace: "nowrap" }}>
+                  {taskInlineEdit.taskId ? `编辑${taskInlineEdit.templateName || "任务"}任务` : `创建${taskInlineEdit.templateName || "任务"}任务`}
+                </div>
+	                {showTaskWorktreeControls ? (
+	                  <>
+	                    <button
+	                      type="button"
+	                      onClick={() => {
+	                        if (!taskWorktreeControlsEditable) return;
+	                        setTaskInlineEdit((prev) => prev ? { ...prev, createWorktree: !prev.createWorktree } : prev);
+	                      }}
+	                      disabled={taskInlineSaving || !taskWorktreeControlsEditable}
+                      style={{
+                        height: "26px",
+                        borderRadius: "6px",
+                        border: taskInlineEdit.createWorktree ? "1px solid var(--accent-color)" : "1px solid var(--border-color)",
+                        background: taskInlineEdit.createWorktree ? "rgba(37, 99, 235, 0.10)" : "rgba(100, 116, 139, 0.10)",
+                        color: taskInlineEdit.createWorktree ? "var(--accent-color)" : "var(--text-secondary)",
+                        padding: "0 8px",
+                        fontSize: "12px",
+                        fontWeight: 800,
+	                        cursor: taskInlineSaving || !taskWorktreeControlsEditable ? "not-allowed" : "pointer",
+	                        whiteSpace: "nowrap",
+	                        opacity: taskInlineSaving || !taskWorktreeControlsEditable ? 0.72 : 1,
+                      }}
+                    >
+                      {taskInlineEdit.createWorktree ? "新开 worktree" : "不开启 worktree"}
+                    </button>
+                    {taskInlineEdit.createWorktree ? (
+                      <div style={{ display: "flex", alignItems: "center", gap: "6px", minWidth: 0 }}>
+	                        <select
+	                          value={taskInlineEdit.worktreeBranchMode === "new" ? "__new__" : taskInlineEdit.worktreeBranch}
+	                          disabled={taskInlineSaving || !taskWorktreeControlsEditable}
+                          onChange={(event) => {
+                            const value = event.target.value;
+                            setTaskInlineEdit((prev) => {
+                              if (!prev) return prev;
+                              if (value === "__new__") {
+                                return { ...prev, worktreeBranchMode: "new", worktreeBranch: "" };
+                              }
+                              return { ...prev, worktreeBranchMode: "existing", worktreeBranch: value };
+                            });
+                          }}
+                          style={{
+                            height: "26px",
+                            width: "auto",
+                            minWidth: "92px",
+                            maxWidth: isMobile ? "160px" : "240px",
+                            borderRadius: "6px",
+                            border: "1px solid var(--border-color)",
+                            background: "var(--menu-bg)",
+                            color: "var(--text-primary)",
+                            fontSize: "12px",
+                            fontWeight: 700,
+                            padding: "0 7px",
+                            outline: "none",
+	                          }}
+	                        >
+	                          <option value="__new__">创建新分支</option>
+	                          {!taskWorktreeControlsEditable && taskInlineEdit.worktreeBranchMode === "existing" && taskInlineEdit.worktreeBranch ? (
+	                            <option value={taskInlineEdit.worktreeBranch}>{taskInlineEdit.worktreeBranch}</option>
+	                          ) : null}
+	                          {taskWorktreeBranches.branches.map((branch) => (
+	                            <option key={branch.name} value={branch.name}>
+                              {branch.current ? `${branch.name} 当前` : branch.name}
+                            </option>
+                          ))}
+                        </select>
+                        {taskWorktreeBranchesLoading ? (
+                          <span style={{ fontSize: "11px", color: "var(--text-secondary)", whiteSpace: "nowrap" }}>加载中</span>
+                        ) : taskWorktreeBranchError ? (
+                          <span title={taskWorktreeBranchError} style={{ fontSize: "11px", color: "#b45309", whiteSpace: "nowrap" }}>加载失败</span>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </>
+                ) : null}
+              </div>
+            </div>
+            <div style={{ padding: "12px", overflow: "visible", position: "relative", minHeight: 0, display: "flex", flexDirection: "column" }}>
+              {taskInlineActiveToken && taskInlineCandidates.length > 0 ? (
+                <div
+                  style={{
+                    position: "absolute",
+                    left: "12px",
+                    right: "12px",
+                    bottom: "calc(100% + 6px)",
+                    maxHeight: isMobile ? "min(42vh, 260px)" : "260px",
+                    overflowY: "auto",
+                    border: "1px solid var(--menu-border)",
+                    borderRadius: "8px",
+                    background: "var(--menu-bg)",
+                    boxShadow: "0 12px 28px rgba(15, 23, 42, 0.14)",
+                    zIndex: 2,
+                  }}
+                >
+                  {taskInlineCandidates.map((candidate, index) => (
+                    <button
+                      key={`${candidate.type}:${candidate.name}`}
+                      type="button"
+                      onMouseDown={(event) => {
+                        event.preventDefault();
+                        applyTaskInlineCandidate(candidate);
+                      }}
+                      style={{
+                        width: "100%",
+                        border: "none",
+                        borderTop: index === 0 ? "none" : "1px solid var(--menu-divider)",
+                        background: index === taskInlineCandidateIndex ? "var(--menu-active-bg)" : "transparent",
+                        color: "var(--text-primary)",
+                        display: "flex",
+                        flexDirection: "column",
+                        alignItems: "flex-start",
+                        gap: "2px",
+                        padding: "9px 10px",
+                        textAlign: "left",
+                        cursor: "pointer",
+                      }}
+                      onMouseEnter={() => setTaskInlineCandidateIndex(index)}
+                    >
+                      <span style={{ fontSize: "13px", fontWeight: 700 }}>
+                        {candidate.type === "file" ? `@${candidate.name}` : candidate.type === "prompt" ? `#${candidate.name}` : candidate.type === "slash_command" ? `/${candidate.name}` : candidate.name}
+                      </span>
+                      {candidate.description ? (
+                        <span style={{ fontSize: "11px", color: "var(--text-secondary)" }}>{candidate.description}</span>
+                      ) : null}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              {taskInlineEdit.previousInputs.length > 0 ? (
+                <div
+                  style={{
+                    marginBottom: "10px",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "8px",
+                    maxHeight: isMobile ? "18dvh" : "180px",
+                    overflowY: "auto",
+                  }}
+                >
+                  {taskInlineEdit.previousInputs.map((item) => (
+                    <div
+                      key={item.id}
+                      style={{
+                        border: "1px solid var(--border-color)",
+                        borderRadius: "8px",
+                        background: "rgba(100, 116, 139, 0.08)",
+                        padding: "8px 9px",
+                      }}
+                    >
+                      <div
+                        style={{
+                          marginBottom: "5px",
+                          fontSize: "11px",
+                          fontWeight: 800,
+                          color: "var(--text-secondary)",
+                        }}
+                      >
+                        {item.label}
+                      </div>
+                      <div
+                        style={{
+                          whiteSpace: "pre-wrap",
+                          wordBreak: "break-word",
+                          fontSize: "12px",
+                          lineHeight: 1.45,
+                          color: "var(--text-color)",
+                        }}
+                      >
+                        {item.input}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+              <div style={{ position: "relative" }}>
+                <div
+                  style={{
+                    position: "relative",
+                    height: "112px",
+                    border: "1px solid var(--border-color)",
+                    borderRadius: "8px",
+                    background: "var(--input-bg)",
+                    overflow: "auto",
+                  }}
+                >
+                  <TokenEditor
+                    ref={taskInlineEditorRef}
+                    placeholder="编辑任务输入，可输入 @ 文件或 / 命令"
+                    disabled={taskInlineSaving}
+                    isDark={false}
+                    rightInset={42}
+                    topInset={0}
+                    bottomInset={12}
+                    fillHeight
+                    onChange={(payload) => {
+                      setTaskInlineEdit((prev) => prev ? { ...prev, text: payload.serializedText } : prev);
+                      setTaskInlineActiveToken(payload.activeToken);
+                    }}
+                    onFocusChange={(focused) => {
+                      if (!focused) {
+                        setTaskInlineActiveToken(null);
+                        setTaskInlineCandidates([]);
+                        setTaskInlineCandidateIndex(0);
+                      }
+                    }}
+                    onPaste={handleTaskInlinePaste}
+                    onEnter={(event) => {
+                      if (event && (event as KeyboardEvent).shiftKey) return false;
+                      void saveTaskInlineEdit();
+                      return true;
+                    }}
+                  />
+                </div>
+                <button
+                  type="button"
+                  title="添加附件"
+                  aria-label="添加附件"
+	                  disabled={taskInlineSaving}
+	                  onClick={() => {
+	                    taskInlineAttachmentInputRef.current?.click();
+	                  }}
+                  style={{
+                    position: "absolute",
+                    right: "6px",
+                    bottom: "6px",
+                    zIndex: 3,
+                    width: "28px",
+                    height: "28px",
+                    border: "none",
+                    borderRadius: "8px",
+                    background: "var(--button-bg)",
+                    color: "var(--text-secondary)",
+                    cursor: taskInlineSaving ? "not-allowed" : "pointer",
+                    opacity: taskInlineSaving ? 0.55 : 1,
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    padding: 0,
+                  }}
+                >
+                  <PlusSmallIcon />
+                </button>
+              </div>
+              {taskInlineEdit.attachments.length > 0 ? (
+                <div style={{ marginTop: "10px", display: "flex", flexWrap: "wrap", gap: "8px" }}>
+                  {taskInlineEdit.attachments.map((attachment) => attachment.isImage && attachment.previewUrl ? (
+                    <div
+                      key={attachment.id}
+                      style={{
+                        width: "54px",
+                        height: "54px",
+                        borderRadius: "8px",
+                        border: "1px solid var(--border-color)",
+                        background: "rgba(100, 116, 139, 0.10)",
+                        position: "relative",
+                        overflow: "hidden",
+                      }}
+                    >
+                      <img src={attachment.previewUrl} alt={attachment.file.name} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+                      <button
+                        type="button"
+                        onClick={() => removeTaskInlineAttachment(attachment.id)}
+                        disabled={taskInlineSaving}
+                        aria-label={`移除附件 ${attachment.file.name}`}
+                        style={{
+                          position: "absolute",
+                          top: "2px",
+                          right: "2px",
+                          width: "18px",
+                          height: "18px",
+                          border: "none",
+                          borderRadius: "999px",
+                          background: "rgba(15, 23, 42, 0.72)",
+                          color: "#fff",
+                          cursor: taskInlineSaving ? "not-allowed" : "pointer",
+                          padding: 0,
+                          lineHeight: "18px",
+                        }}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ) : (
+                    <span
+                      key={attachment.id}
+                      style={{
+                        maxWidth: "100%",
+                        border: "1px solid var(--border-color)",
+                        borderRadius: "999px",
+                        background: "rgba(100, 116, 139, 0.10)",
+                        color: "var(--text-color)",
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: "6px",
+                        padding: "4px 7px",
+                        fontSize: "12px",
+                      }}
+                    >
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{attachment.file.name}</span>
+                      <button
+                        type="button"
+                        onClick={() => removeTaskInlineAttachment(attachment.id)}
+                        disabled={taskInlineSaving}
+                        style={{
+                          border: "none",
+                          background: "transparent",
+                          color: "var(--text-secondary)",
+                          cursor: taskInlineSaving ? "not-allowed" : "pointer",
+                          padding: 0,
+                        }}
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+              <input
+                ref={taskInlineAttachmentInputRef}
+                type="file"
+                multiple
+                style={{ display: "none" }}
+                onChange={handleTaskInlineAttachmentChange}
+              />
+            </div>
+            <div
+              style={{
+                padding: "10px 12px",
+                borderTop: "1px solid var(--border-color)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: "8px",
+              }}
+            >
+              <span />
+              <div style={{ display: "flex", gap: "8px" }}>
+                <button
+                  type="button"
+                  onClick={closeTaskEditDialog}
+                  disabled={taskInlineSaving}
+                  style={{ height: "30px", borderRadius: "6px", border: "1px solid var(--border-color)", background: "transparent", color: "var(--text-color)", padding: "0 12px", cursor: taskInlineSaving ? "not-allowed" : "pointer" }}
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void saveTaskInlineEdit()}
+                  disabled={taskInlineSaving}
+                  style={{ height: "30px", borderRadius: "6px", border: "1px solid var(--accent-color)", background: "var(--accent-color)", color: "#fff", padding: "0 14px", fontWeight: 800, cursor: taskInlineSaving ? "not-allowed" : "pointer", opacity: taskInlineSaving ? 0.7 : 1 }}
+                >
+                  {taskInlineSaving ? "保存中" : "保存"}
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
+          );
+        })()
+      ) : null}
+      {taskSessionErrorDialog ? (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 96,
+            background: "rgba(15, 23, 42, 0.28)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: "24px",
+          }}
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setTaskSessionErrorDialog(null);
+            }
+          }}
+        >
+          <section
+            style={{
+              width: "min(460px, 100%)",
+              borderRadius: "10px",
+              border: "1px solid rgba(217, 119, 6, 0.22)",
+              background: "var(--menu-bg)",
+              boxShadow: "0 24px 60px rgba(15, 23, 42, 0.24)",
+              overflow: "hidden",
+            }}
+          >
+            <div style={{ padding: "12px 14px", borderBottom: "1px solid var(--border-color)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px" }}>
+              <div style={{ minWidth: 0, fontSize: "13px", fontWeight: 800, color: "var(--text-color)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {taskSessionErrorDialog.title}
+              </div>
+              <button type="button" aria-label="关闭错误信息" onClick={() => setTaskSessionErrorDialog(null)} style={taskCardIconButtonStyle()}>
+                ×
+              </button>
+            </div>
+            <div style={{ padding: "14px", display: "flex", flexDirection: "column", gap: "10px" }}>
+              <div
+                style={{
+                  padding: "10px 12px",
+                  borderRadius: "8px",
+                  background: "rgba(217, 119, 6, 0.08)",
+                  border: "1px solid rgba(217, 119, 6, 0.18)",
+                  color: "var(--text-color)",
+                  fontSize: "12px",
+                  lineHeight: 1.5,
+                  whiteSpace: "pre-wrap",
+                  overflowWrap: "anywhere",
+                }}
+              >
+                {taskSessionErrorDialog.message}
+              </div>
+              {taskSessionErrorDialog.details.map((detail) => (
+                <div
+                  key={detail}
+                  style={{
+                    padding: "10px 12px",
+                    borderRadius: "8px",
+                    background: "rgba(100, 116, 139, 0.08)",
+                    border: "1px solid var(--border-color)",
+                    color: "var(--text-secondary)",
+                    fontSize: "12px",
+                    lineHeight: 1.5,
+                    whiteSpace: "pre-wrap",
+                    overflowWrap: "anywhere",
+                  }}
+                >
+                  {detail}
+                </div>
+              ))}
+            </div>
+          </section>
+        </div>
+      ) : null}
       <ScheduledAgentTaskDialog
         open={scheduledAgentDialogOpen}
         rootId={currentRootId}
         agents={availableAgents}
         onClose={() => setScheduledAgentDialogOpen(false)}
+      />
+      <TaskTemplateDialog
+        open={taskTemplateDialogOpen}
+        agents={availableAgents}
+        template={taskTemplateDialogTemplate}
+        onClose={() => setTaskTemplateDialogOpen(false)}
+        onSaved={handleTaskTemplateSaved}
       />
       <ToastContainer />
     </>
@@ -11480,6 +13855,283 @@ function ImportIcon() {
       aria-hidden="true"
     >
       <path d="m14 12l-4-4v3H2v2h8v3m10 2V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v3h2V6h12v12H6v-3H4v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2" />
+    </svg>
+  );
+}
+
+function EditPencilIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M4 20h4.2L18.7 9.5a2.1 2.1 0 0 0 0-3L17.5 5.3a2.1 2.1 0 0 0-3 0L4 15.8V20Z"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="m13.5 6.3 4.2 4.2"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function HorizontalDotsIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <circle cx="5" cy="12" r="1.8" />
+      <circle cx="12" cy="12" r="1.8" />
+      <circle cx="19" cy="12" r="1.8" />
+    </svg>
+  );
+}
+
+function PlusSmallIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden="true">
+      <path d="M12 5v14" />
+      <path d="M5 12h14" />
+    </svg>
+  );
+}
+
+function CheckIconSmall() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="m5 12 4 4L19 6" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function TaskCompleteIcon() {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M0 0h16v16H0z" fill="none" />
+      <path fill="currentColor" fillRule="evenodd" d="M3 13.5a.5.5 0 0 1-.5-.5V3a.5.5 0 0 1 .5-.5h9.25a.75.75 0 0 0 0-1.5H3a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9.75a.75.75 0 0 0-1.5 0V13a.5.5 0 0 1-.5.5zm12.78-8.82a.75.75 0 0 0-1.06-1.06L9.162 9.177 7.289 7.241a.75.75 0 1 0-1.078 1.043l2.403 2.484a.75.75 0 0 0 1.07.01z" clipRule="evenodd" />
+    </svg>
+  );
+}
+
+function TaskQueuedSpinnerIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.5"
+      strokeLinecap="round"
+      aria-hidden="true"
+      style={{ animation: "mindfs-update-spin 0.9s linear infinite" }}
+    >
+      <path d="M21 12a9 9 0 1 1-6.2-8.56" />
+    </svg>
+  );
+}
+
+function TaskSessionErrorIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7v6" />
+      <path d="M12 17h.01" />
+    </svg>
+  );
+}
+
+function DeleteIcon() {
+  return (
+    <svg
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <polyline points="3 6 5 6 21 6" />
+      <path d="M19 6l-1 14H6L5 6" />
+      <path d="M10 11v6" />
+      <path d="M14 11v6" />
+      <path d="M9 6V4h6v2" />
+    </svg>
+  );
+}
+
+function taskTemplateMenuItemStyle(disabled = false): React.CSSProperties {
+  return {
+    width: "100%",
+    minHeight: "30px",
+    border: "none",
+    borderRadius: "8px",
+    background: "transparent",
+    color: "var(--text-primary)",
+    display: "flex",
+    alignItems: "center",
+    gap: "8px",
+    padding: "6px 8px",
+    textAlign: "left",
+    fontSize: "12px",
+    cursor: disabled ? "not-allowed" : "pointer",
+    opacity: disabled ? 0.45 : 1,
+    boxSizing: "border-box",
+  };
+}
+
+function taskCardIconButtonStyle(tone: "default" | "accent" | "success" | "danger" | "warning" = "default"): React.CSSProperties {
+  return {
+    width: "22px",
+    height: "22px",
+    border: "none",
+    borderRadius: "6px",
+    background: "transparent",
+    color: tone === "accent" ? "var(--accent-color)" : tone === "success" ? "#16a34a" : tone === "danger" ? "#dc2626" : tone === "warning" ? "#d97706" : "var(--text-secondary)",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    cursor: "pointer",
+    padding: 0,
+  };
+}
+
+function taskAuxBadgeStyle(attention = false): React.CSSProperties {
+  return {
+    width: "18px",
+    height: "18px",
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: "5px",
+    background: attention ? "rgba(239, 68, 68, 0.10)" : "transparent",
+    color: "var(--text-secondary)",
+    animation: attention ? "mindfs-task-ask-user-pulse 2.2s ease-in-out infinite" : "none",
+  };
+}
+
+function taskReplyPulseStyle(): React.CSSProperties {
+  return {
+    position: "absolute",
+    top: "6px",
+    right: "6px",
+    width: "8px",
+    height: "8px",
+    borderRadius: "999px",
+    boxSizing: "border-box",
+    border: "1.5px solid #2563eb",
+    background: "#2563eb",
+    animation: "mindfs-bound-pulse 2.2s ease-in-out infinite",
+    boxShadow: "0 0 0 1.5px rgba(37,99,235,0.14)",
+    pointerEvents: "none",
+  };
+}
+
+function TaskPlanAuxIcon() {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M7 6h10M7 12h10M7 18h6" stroke="#2563eb" strokeWidth="2" strokeLinecap="round" />
+      <path d="M4 6h.01M4 12h.01M4 18h.01" stroke="#2563eb" strokeWidth="3" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function TaskExpandIcon({ collapsed }: { collapsed: boolean }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="13"
+      height="13"
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+      style={{
+        display: "block",
+        transform: collapsed ? "none" : "rotate(180deg)",
+      }}
+    >
+      <path d="M0 0h16v16H0z" fill="none" />
+      <path fill="currentColor" d="M12.146 7.146a.5.5 0 0 1 .708.708l-4.5 4.5a.5.5 0 0 1-.708 0l-4.5-4.5a.5.5 0 1 1 .708-.708L8 11.293zm0-4a.5.5 0 0 1 .708.708l-4.5 4.5a.5.5 0 0 1-.708 0l-4.5-4.5a.5.5 0 1 1 .708-.708L8 7.293z" />
+    </svg>
+  );
+}
+
+function TaskGroupChevronIcon({ collapsed }: { collapsed: boolean }) {
+  return (
+    <span
+      aria-hidden="true"
+      style={{
+        flexShrink: 0,
+        transform: collapsed ? "rotate(0deg)" : "rotate(90deg)",
+        transition: "transform 0.2s",
+        color: "currentColor",
+        display: "inline-flex",
+        alignItems: "center",
+      }}
+    >
+      <svg
+        width="12"
+        height="12"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2.25"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <polyline points="9 18 15 12 9 6" />
+      </svg>
+    </span>
+  );
+}
+
+function RunNowIcon() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+    >
+      <path d="M0 0h24v24H0z" fill="none" />
+      <path
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        d="M20.409 9.353a2.998 2.998 0 0 1 0 5.294L7.597 21.614C5.534 22.737 3 21.277 3 18.968V5.033c0-2.31 2.534-3.769 4.597-2.648z"
+      />
+    </svg>
+  );
+}
+
+function SyncIcon() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      width="13"
+      height="13"
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+    >
+      <path
+        fill="currentColor"
+        d="M19.91 15.51h-4.53a1 1 0 0 0 0 2h2.4A8 8 0 0 1 4 12a1 1 0 0 0-2 0a10 10 0 0 0 16.88 7.23V21a1 1 0 0 0 2 0v-4.5a1 1 0 0 0-.97-.99M12 2a10 10 0 0 0-6.88 2.77V3a1 1 0 0 0-2 0v4.5a1 1 0 0 0 1 1h4.5a1 1 0 0 0 0-2h-2.4A8 8 0 0 1 20 12a1 1 0 0 0 2 0A10 10 0 0 0 12 2"
+      />
     </svg>
   );
 }

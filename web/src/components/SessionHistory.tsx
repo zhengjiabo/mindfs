@@ -6,6 +6,7 @@ type SessionInfo = {
   key: string;
   name: string;
   type: "chat" | "plugin" | "command";
+  task_id?: string;
   agent: string;
   model?: string;
   mode?: string;
@@ -32,6 +33,7 @@ const typeLabels: Record<string, string> = {
   chat: "对话",
   plugin: "视图插件",
   command: "命令执行",
+  task: "任务",
   skill: "对话",
 };
 
@@ -120,13 +122,13 @@ export function SessionHistory({
           background: "rgba(0,0,0,0.02)",
         }}
       >
-        <ModeIcon type={session.type || "chat"} size={20} />
+        <ModeIcon type={session.task_id ? "task" : session.type || "chat"} size={20} />
         <div style={{ flex: 1 }}>
           <div style={{ fontSize: "16px", fontWeight: 600 }}>
             {session.name || `Session ${session.key.slice(0, 8)}`}
           </div>
           <div style={{ fontSize: "12px", color: "var(--text-secondary)" }}>
-            {typeLabels[session.type]} · {session.agent || "-"} · 已关闭
+            {typeLabels[session.task_id ? "task" : session.type]} · {session.agent || "-"} · 已关闭
           </div>
         </div>
         <button

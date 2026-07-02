@@ -67,6 +67,137 @@ func TestSaveUploadedFilesDefaultsToAttachmentDirAndRenamesConflicts(t *testing.
 	assertFileContent(t, filepath.Join(rootDir, filepath.FromSlash(wantSecond)), "second file")
 }
 
+func TestGetGitRelatedFileDiffResolvesTaskWorktreePath(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found")
+	}
+	rootDir := t.TempDir()
+	runUsecaseGit(t, rootDir, "init")
+	runUsecaseGit(t, rootDir, "config", "user.email", "test@example.com")
+	runUsecaseGit(t, rootDir, "config", "user.name", "Test User")
+	mustWriteFile(t, filepath.Join(rootDir, "note.txt"), "base\n")
+	runUsecaseGit(t, rootDir, "add", "note.txt")
+	runUsecaseGit(t, rootDir, "commit", "-m", "initial")
+	runUsecaseGit(t, rootDir, "checkout", "-b", "task-1")
+	base := strings.TrimSpace(runUsecaseGit(t, rootDir, "rev-parse", "HEAD"))
+	runUsecaseGit(t, rootDir, "checkout", "-")
+
+	worktreeRoot := filepath.Join(rootDir, ".worktree", "task-1")
+	runUsecaseGit(t, rootDir, "worktree", "add", worktreeRoot, "task-1")
+	mustWriteFile(t, filepath.Join(rootDir, "note.txt"), "main-only\n")
+	mustWriteFile(t, filepath.Join(worktreeRoot, "note.txt"), "worktree-only\n")
+
+	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
+	service := Service{Registry: uploadTestRegistry{root: root}}
+	out, err := service.GetGitRelatedFileDiff(context.Background(), GitRelatedFileDiffInput{
+		RootID:   root.ID,
+		RepoPath: rootDir,
+		RepoKind: "git",
+		Head:     base,
+		Path:     ".worktree/task-1/note.txt",
+	})
+	if err != nil {
+		t.Fatalf("GetGitRelatedFileDiff returned error: %v", err)
+	}
+	if !strings.Contains(out.Diff.Content, "+worktree-only") {
+		t.Fatalf("diff content does not contain worktree change:\n%s", out.Diff.Content)
+	}
+	if strings.Contains(out.Diff.Content, "main-only") {
+		t.Fatalf("diff content used main worktree instead of task worktree:\n%s", out.Diff.Content)
+	}
+
+	out, err = service.GetGitRelatedFileDiff(context.Background(), GitRelatedFileDiffInput{
+		RootID:   root.ID,
+		RepoKind: "git",
+		Head:     base,
+		Path:     ".worktree/task-1/note.txt",
+	})
+	if err != nil {
+		t.Fatalf("GetGitRelatedFileDiff without repo path returned error: %v", err)
+	}
+	if !strings.Contains(out.Diff.Content, "+worktree-only") {
+		t.Fatalf("diff without repo path does not contain worktree change:\n%s", out.Diff.Content)
+	}
+	if strings.Contains(out.Diff.Content, "main-only") {
+		t.Fatalf("diff without repo path used main worktree instead of task worktree:\n%s", out.Diff.Content)
+	}
+}
+
+func TestNormalizeSessionRelatedFilesResolvesLegacyTaskWorktreePath(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found")
+	}
+	rootDir := t.TempDir()
+	runUsecaseGit(t, rootDir, "init")
+	runUsecaseGit(t, rootDir, "config", "user.email", "test@example.com")
+	runUsecaseGit(t, rootDir, "config", "user.name", "Test User")
+	mustWriteFile(t, filepath.Join(rootDir, "note.txt"), "base\n")
+	runUsecaseGit(t, rootDir, "add", "note.txt")
+	runUsecaseGit(t, rootDir, "commit", "-m", "initial")
+	runUsecaseGit(t, rootDir, "checkout", "-b", "task-1")
+	runUsecaseGit(t, rootDir, "checkout", "-")
+
+	worktreeRoot := filepath.Join(rootDir, ".worktree", "task-1")
+	runUsecaseGit(t, rootDir, "worktree", "add", worktreeRoot, "task-1")
+	mustWriteFile(t, filepath.Join(worktreeRoot, "note.txt"), "worktree-only\n")
+
+	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
+	files := normalizeSessionRelatedFiles(context.Background(), root, []session.RelatedFile{{
+		RootID:   root.ID,
+		RepoPath: rootDir,
+		RepoName: root.Name,
+		RepoKind: "git",
+		Path:     ".worktree/task-1/note.txt",
+		Head:     strings.TrimSpace(runUsecaseGit(t, worktreeRoot, "rev-parse", "HEAD")),
+	}})
+	if len(files) != 1 {
+		t.Fatalf("files len = %d, want 1", len(files))
+	}
+	if !sameUsecaseTestPath(files[0].RepoPath, worktreeRoot) {
+		t.Fatalf("RepoPath = %q, want %q", files[0].RepoPath, worktreeRoot)
+	}
+	if files[0].Path != "note.txt" {
+		t.Fatalf("Path = %q, want note.txt", files[0].Path)
+	}
+}
+
+func TestGetGitDiffUsesRepoPath(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found")
+	}
+	rootDir := t.TempDir()
+	runUsecaseGit(t, rootDir, "init")
+	runUsecaseGit(t, rootDir, "config", "user.email", "test@example.com")
+	runUsecaseGit(t, rootDir, "config", "user.name", "Test User")
+	mustWriteFile(t, filepath.Join(rootDir, "note.txt"), "base\n")
+	runUsecaseGit(t, rootDir, "add", "note.txt")
+	runUsecaseGit(t, rootDir, "commit", "-m", "initial")
+	runUsecaseGit(t, rootDir, "checkout", "-b", "task-1")
+	runUsecaseGit(t, rootDir, "checkout", "-")
+
+	worktreeRoot := filepath.Join(rootDir, ".worktree", "task-1")
+	runUsecaseGit(t, rootDir, "worktree", "add", worktreeRoot, "task-1")
+	mustWriteFile(t, filepath.Join(rootDir, "note.txt"), "main-only\n")
+	mustWriteFile(t, filepath.Join(worktreeRoot, "note.txt"), "worktree-only\n")
+
+	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
+	service := Service{Registry: uploadTestRegistry{root: root}}
+	out, err := service.GetGitDiff(context.Background(), GitDiffInput{
+		RootID:   root.ID,
+		RepoPath: worktreeRoot,
+		Path:     "note.txt",
+	})
+	if err != nil {
+		t.Fatalf("GetGitDiff returned error: %v", err)
+	}
+	if !strings.Contains(out.Diff.Content, "+worktree-only") {
+		t.Fatalf("diff content does not contain worktree change:\n%s", out.Diff.Content)
+	}
+	if strings.Contains(out.Diff.Content, "main-only") {
+		t.Fatalf("diff content used main worktree instead of task worktree:\n%s", out.Diff.Content)
+	}
+}
+
 func TestSendCommandMessagePersistsFinalToolCallAndSuggestion(t *testing.T) {
 	rootDir := t.TempDir()
 	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
@@ -1279,6 +1410,47 @@ func TestPromptCandidateProviderSearchReturnsNewestFirst(t *testing.T) {
 	}
 }
 
+func TestSwitchReadHintPathUsesRuntimeRoot(t *testing.T) {
+	rootDir := t.TempDir()
+	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
+	manager := session.NewManager(root)
+	created, err := manager.Create(context.Background(), session.CreateInput{
+		Type: session.TypeChat,
+		Name: "Task",
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+
+	basePath := switchReadHintPath(manager, created.Key, rootDir)
+	if !strings.HasPrefix(basePath, ".mindfs/") {
+		t.Fatalf("base path = %q, want .mindfs relative path", basePath)
+	}
+
+	worktreeRoot := filepath.Join(rootDir, ".worktree", "task-1")
+	worktreePath := switchReadHintPath(manager, created.Key, worktreeRoot)
+	if !strings.HasPrefix(worktreePath, "../../.mindfs/") {
+		t.Fatalf("worktree path = %q, want path relative to worktree cwd", worktreePath)
+	}
+}
+
+func TestRelatedFileRecordPathUsesRuntimeRoot(t *testing.T) {
+	rootDir := filepath.Clean("/project/mindfs")
+	worktreeRoot := filepath.Join(rootDir, ".worktree", "task-55")
+
+	got := relatedFileRecordPath(rootDir, worktreeRoot, "test.json")
+	want := filepath.Join(worktreeRoot, "test.json")
+	if got != want {
+		t.Fatalf("relatedFileRecordPath relative = %q, want %q", got, want)
+	}
+
+	got = relatedFileRecordPath(rootDir, worktreeRoot, ".worktree/task-55/test.json")
+	want = filepath.Join(rootDir, ".worktree", "task-55", "test.json")
+	if got != want {
+		t.Fatalf("relatedFileRecordPath worktree rel = %q, want %q", got, want)
+	}
+}
+
 func TestBuildUserPromptSelectionOnly(t *testing.T) {
 	got := buildUserPrompt("hello", ClientContext{})
 	if strings.Contains(got, "[USER_SELECTION]") {
@@ -1555,6 +1727,29 @@ func mustWriteFile(t *testing.T, path string, content string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("WriteFile(%q): %v", path, err)
 	}
+}
+
+func runUsecaseGit(t *testing.T, root string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s returned error: %v\n%s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	return string(out)
+}
+
+func sameUsecaseTestPath(left, right string) bool {
+	left = filepath.Clean(left)
+	right = filepath.Clean(right)
+	if resolved, err := filepath.EvalSymlinks(left); err == nil {
+		left = filepath.Clean(resolved)
+	}
+	if resolved, err := filepath.EvalSymlinks(right); err == nil {
+		right = filepath.Clean(resolved)
+	}
+	return left == right
 }
 
 func selectRunnableAgent(cfg agent.Config) (string, bool) {
