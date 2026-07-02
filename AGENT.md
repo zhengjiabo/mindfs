@@ -48,15 +48,28 @@ Installed paths:
 Useful checks:
 
 ```bash
-/root/.local/bin/mindfs --status
+/root/.local/bin/mindfs -status -addr 0.0.0.0:7331 /root/mindfs
 ss -ltnp '( sport = :7331 )'
 readlink -f /proc/$(pgrep -x mindfs | head -n1)/exe
 ```
 
+Current production runtime on this server was verified on `2026-07-02` as:
+
+```bash
+/root/.local/bin/mindfs -addr 0.0.0.0:7331 /root/mindfs
+```
+
+Do not switch production to `./mindfs`, `go run`, Docker, PM2, or systemd unless the deployment model is intentionally changed.
+
 
 ## E2EE / Pairing
 
-Production currently runs with E2EE enabled.
+Do not assume E2EE is enabled. Verify `~/.config/mindfs/e2ee.json` first.
+
+Observed state on `2026-07-02`:
+
+- `~/.config/mindfs/e2ee.json` existed
+- `"enabled": false`
 
 Important points:
 
@@ -65,14 +78,54 @@ Important points:
 - do not commit the pairing secret into the repository
 - if you need the current pairing secret, read it from `~/.config/mindfs/e2ee.json`
 
-When restarting production, keep E2EE enabled:
+If E2EE is enabled and production must keep it enabled, restart with `-e2ee`.
+If `enabled` is `false`, do not add `-e2ee` just because old notes mentioned it.
+
+Verification command:
 
 ```bash
-MINDFS_UPDATE_REPO=zhengjiabo/mindfs /root/.local/bin/mindfs -addr 0.0.0.0:7331 -e2ee
+sed -n '1,120p' /root/.config/mindfs/e2ee.json
 ```
 
 Do not restart production on `127.0.0.1:7331` if public nginx access is expected.
 It must listen on `0.0.0.0:7331`.
+
+
+## Codex Runtime Notes
+
+Current server-side Codex integration uses the Go SDK app-server transport in:
+
+- `server/internal/agent/codex/session.go`
+
+Important production constraint verified on `2026-07-02`:
+
+- this deployment reads Codex CLI config from `~/.codex/config.toml`
+- current provider config on this server points to `https://muyuan.do/v1`
+- that channel rejected the SDK default identity `codex_sdk_go/...` with HTTP `403 Forbidden`
+- the working default identity for this environment is `codex-tui`, not `codex-cli`
+
+The runtime fix in this repo is therefore:
+
+- default `CODEX_INTERNAL_ORIGINATOR_OVERRIDE=codex-tui`
+- default SDK `ClientInfo.Name=codex-tui`
+- default SDK `ClientInfo.Version` should follow `codex --version`
+
+Optional override env keys supported by MindFS:
+
+- `MINDFS_CODEX_CLIENT_NAME`
+- `MINDFS_CODEX_CLIENT_VERSION`
+
+Do not revert those defaults back to `codex-go-sdk` identity unless the target provider is known to allow it.
+If Codex suddenly starts failing with a channel/client `403`, inspect the detected client string in:
+
+```bash
+tail -n 100 /root/.local/share/mindfs/logs/mindfs.log
+```
+
+Quick live verification used in this environment:
+
+- `~/.codex/config.toml` currently sets `base_url = "https://muyuan.do/v1"`
+- after the client-identity fix and restart, a fresh MindFS Codex request succeeded again against that config
 
 
 ## Git Model
@@ -205,6 +258,12 @@ make install \
   MINDFS_RELEASE_PUBLIC_KEY="$MINDFS_RELEASE_PUBLIC_KEY"
 ```
 
+If a fresh repo update adds frontend dependencies and Vite fails to resolve a package, sync `web/node_modules` before rebuilding:
+
+```bash
+cd /root/mindfs/web && npm install
+```
+
 Install from custom GitHub release:
 
 ```bash
@@ -217,14 +276,17 @@ scripts/install-custom.sh --version vX.Y.Z-custom.N --prefix /root/.local
 When restarting production, use this sequence:
 
 ```bash
-/root/.local/bin/mindfs --stop
-MINDFS_UPDATE_REPO=zhengjiabo/mindfs /root/.local/bin/mindfs -addr 0.0.0.0:7331 -e2ee
+/root/.local/bin/mindfs -restart -addr 0.0.0.0:7331 /root/mindfs
 ```
+
+This was the exact successful restart command used on `2026-07-02` after upgrading production to `v0.3.8-10-g8b5c6e3`.
+
+If E2EE is later re-enabled in `~/.config/mindfs/e2ee.json`, verify whether the restart command also needs `-e2ee` for that rollout.
 
 Expected healthy state after restart:
 
 ```bash
-/root/.local/bin/mindfs --status
+/root/.local/bin/mindfs -status -addr 0.0.0.0:7331 /root/mindfs
 curl -fsS http://127.0.0.1:7331/health
 curl -kfsS https://bc.fireflymoon.cc.cd/health
 ```

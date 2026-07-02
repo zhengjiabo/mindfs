@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,6 +17,16 @@ import (
 	codexsdk "github.com/fanwenlin/codex-go-sdk/codex"
 	codextypes "github.com/fanwenlin/codex-go-sdk/types"
 )
+
+const (
+	codexOriginatorEnvKey    = "CODEX_INTERNAL_ORIGINATOR_OVERRIDE"
+	codexClientNameEnvKey    = "MINDFS_CODEX_CLIENT_NAME"
+	codexClientVersionEnvKey = "MINDFS_CODEX_CLIENT_VERSION"
+	defaultCodexOriginator   = "codex-tui"
+	defaultCodexClientName   = "codex-tui"
+)
+
+var codexVersionPattern = regexp.MustCompile(`v?([0-9]+(?:\.[0-9]+){1,3}(?:[-+._A-Za-z0-9]*)?)`)
 
 type OpenOptions struct {
 	AgentName        string
@@ -171,16 +183,72 @@ func (r *Runtime) getOrCreateClient(opts OpenOptions) *codexsdk.Codex {
 }
 
 func newClient(opts OpenOptions) *codexsdk.Codex {
+	env := buildCodexClientEnv(opts.Env)
 	codexOptions := codexsdk.CodexOptions{
 		Transport:             codexsdk.TransportAppServer,
 		AppServerPathOverride: opts.Command,
-		Env:                   opts.Env,
+		ClientInfo:            buildCodexClientInfo(opts.Command, env),
+		Env:                   env,
 		Verbose:               true,
 	}
 	if len(opts.Args) > 0 {
 		codexOptions.AppServerArgs = append([]string{}, opts.Args...)
 	}
 	return codexsdk.NewCodex(codexOptions)
+}
+
+func buildCodexClientEnv(base map[string]string) map[string]string {
+	env := cloneStringMap(base)
+	if strings.TrimSpace(env[codexOriginatorEnvKey]) == "" {
+		env[codexOriginatorEnvKey] = defaultCodexOriginator
+	}
+	return env
+}
+
+func buildCodexClientInfo(command string, env map[string]string) codexsdk.ClientInfo {
+	name := strings.TrimSpace(env[codexClientNameEnvKey])
+	if name == "" {
+		name = defaultCodexClientName
+	}
+	version := strings.TrimSpace(env[codexClientVersionEnvKey])
+	if version == "" {
+		version = detectCodexBinaryVersion(command)
+	}
+	return codexsdk.ClientInfo{
+		Name:    name,
+		Version: version,
+	}
+}
+
+func detectCodexBinaryVersion(command string) string {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		command = "codex"
+	}
+	output, err := exec.Command(command, "--version").Output()
+	if err != nil {
+		return ""
+	}
+	return parseCodexVersionOutput(string(output))
+}
+
+func parseCodexVersionOutput(output string) string {
+	match := codexVersionPattern.FindStringSubmatch(strings.TrimSpace(output))
+	if len(match) < 2 {
+		return ""
+	}
+	return strings.TrimSpace(match[1])
+}
+
+func cloneStringMap(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return map[string]string{}
+	}
+	dst := make(map[string]string, len(src))
+	for key, value := range src {
+		dst[key] = value
+	}
+	return dst
 }
 
 type session struct {

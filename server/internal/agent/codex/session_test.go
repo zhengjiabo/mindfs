@@ -168,3 +168,34 @@ func TestHandleUnknownPlanAndContextCompactionItems(t *testing.T) {
 		t.Fatalf("compact notice = %#v", updates[1].Data)
 	}
 }
+
+func TestBuildCodexClientEnvDefaultsToCodexTUI(t *testing.T) {
+	env := buildCodexClientEnv(nil)
+	if got := env[codexOriginatorEnvKey]; got != defaultCodexOriginator {
+		t.Fatalf("originator = %q, want %q", got, defaultCodexOriginator)
+	}
+}
+
+func TestBuildCodexClientEnvPreservesExplicitOriginator(t *testing.T) {
+	env := buildCodexClientEnv(map[string]string{codexOriginatorEnvKey: "custom-client"})
+	if got := env[codexOriginatorEnvKey]; got != "custom-client" {
+		t.Fatalf("originator = %q, want custom-client", got)
+	}
+}
+
+func TestBuildCodexClientInfoUsesOverrides(t *testing.T) {
+	info := buildCodexClientInfo("codex", map[string]string{
+		codexClientNameEnvKey:    "codex-custom",
+		codexClientVersionEnvKey: "9.9.9",
+	})
+	if info.Name != "codex-custom" || info.Version != "9.9.9" {
+		t.Fatalf("client info = %#v", info)
+	}
+}
+
+func TestParseCodexVersionOutput(t *testing.T) {
+	got := parseCodexVersionOutput("OpenAI Codex v0.142.5\n")
+	if got != "0.142.5" {
+		t.Fatalf("version = %q, want 0.142.5", got)
+	}
+}
