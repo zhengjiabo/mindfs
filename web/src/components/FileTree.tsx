@@ -18,8 +18,10 @@ import {
   type AppearanceMode,
 } from "../services/appearance";
 import { AgentMenuList } from "./AgentMenuList";
+import { AgentIcon } from "./AgentIcon";
 import { SymlinkBadge } from "./SymlinkBadge";
-import { fetchAgents, type AgentStatus } from "../services/agents";
+import { RelayLocalServicesDialog } from "./RelayLocalServicesDialog";
+import { fetchAgentCatalog, fetchAgents, type AgentStatus } from "../services/agents";
 import {
   createAgentConfigBackup,
   deleteAgentConfigBackup,
@@ -28,6 +30,14 @@ import {
   switchAgentConfig,
   type AgentConfigBackup,
 } from "../services/agentConfig";
+import {
+  getWebPushStatus,
+  sendWebPushTest,
+  subscribeWebPush,
+  unsubscribeWebPush,
+  webPushReasonLabel,
+  type WebPushStatus,
+} from "../services/webPush";
 
 type BeforeInstallPromptEvent = Event & {
   prompt: () => Promise<void>;
@@ -96,6 +106,9 @@ type FileTreeProps = {
   relayActionDisabled?: boolean;
   relayActionHelp?: string | null;
   onRelayAction?: () => void;
+  relayNodeId?: string;
+  relayBaseURL?: string;
+  relayNoRelayer?: boolean;
   updateActionLabel?: string | null;
   updateActionDisabled?: boolean;
   updateActionHelp?: string | null;
@@ -105,6 +118,11 @@ type FileTreeProps = {
   showEnterKeySendOption?: boolean;
   enterKeySends?: boolean;
   onEnterKeySendsChange?: (enabled: boolean) => void;
+  sidebarsSwapped?: boolean;
+  onSidebarsSwappedChange?: (enabled: boolean) => void;
+  multiProjectSessionsEnabled?: boolean;
+  onMultiProjectSessionsChange?: (enabled: boolean) => void;
+  onRunAgentLifecycleCommand?: (agentName: string, action: "install" | "update", commands: string[]) => void | Promise<void>;
   onGoHome?: () => void;
 };
 
@@ -135,6 +153,165 @@ const fileTreeMenuButtonStyle: React.CSSProperties = {
   cursor: "pointer",
   fontSize: "12px",
 };
+
+function NotificationIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 7h18s-3 0-3-7" />
+      <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+    </svg>
+  );
+}
+
+function InfoIcon() {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 48 48" aria-hidden="true">
+      <path d="M0 0h48v48H0z" fill="none" />
+      <g fill="none">
+        <path stroke="currentColor" strokeLinejoin="round" strokeWidth="4" d="M24 44a19.94 19.94 0 0 0 14.142-5.858A19.94 19.94 0 0 0 44 24a19.94 19.94 0 0 0-5.858-14.142A19.94 19.94 0 0 0 24 4A19.94 19.94 0 0 0 9.858 9.858A19.94 19.94 0 0 0 4 24a19.94 19.94 0 0 0 5.858 14.142A19.94 19.94 0 0 0 24 44Z" />
+        <path fill="currentColor" fillRule="evenodd" d="M24 11a2.5 2.5 0 1 1 0 5a2.5 2.5 0 0 1 0-5" clipRule="evenodd" />
+        <path stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="4" d="M24.5 34V20h-2M21 34h7" />
+      </g>
+    </svg>
+  );
+}
+
+function WebPushMenuItem() {
+  const [status, setStatus] = React.useState<WebPushStatus | null>(null);
+  const [busy, setBusy] = React.useState(false);
+  const [message, setMessage] = React.useState("");
+  const [expanded, setExpanded] = React.useState(false);
+
+  const refresh = React.useCallback(async () => {
+    try {
+      setStatus(await getWebPushStatus());
+    } catch (error) {
+      setStatus(null);
+      setMessage(error instanceof Error ? error.message : "通知状态读取失败");
+    }
+  }, []);
+
+  React.useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const run = async (action: "subscribe" | "unsubscribe" | "test") => {
+    if (busy) return;
+    setBusy(true);
+    setMessage("");
+    try {
+      if (action === "subscribe") {
+        setStatus(await subscribeWebPush());
+      } else if (action === "unsubscribe") {
+        setStatus(await unsubscribeWebPush());
+      } else {
+        await sendWebPushTest();
+        setMessage("测试通知已发送");
+        await refresh();
+      }
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "通知操作失败");
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const disabledReason = webPushReasonLabel(status?.reason);
+  const enabled = Boolean(status?.enabled && status.supported);
+  const subscribed = Boolean(status?.subscribed);
+  const label = subscribed ? "通知已开启" : "开启通知";
+  const subscriptionCount = status?.subscription_count || 0;
+  const currentDeviceDetail = subscribed && subscriptionCount > 0
+    ? `已有 ${subscriptionCount} 个设备订阅`
+    : subscribed
+      ? "回复、需要输入和定时任务会通知"
+      : "iOS 需从主屏幕打开";
+  const detail = message || disabledReason || currentDeviceDetail;
+
+  return (
+    <div>
+      <div
+        style={{
+          ...fileTreeMenuButtonStyle,
+          color: subscribed ? "var(--accent-color)" : "var(--text-primary)",
+          opacity: busy || !enabled ? 0.55 : 1,
+          cursor: "default",
+          minWidth: 0,
+          whiteSpace: "nowrap",
+        }}
+      >
+        <button
+          type="button"
+          disabled={busy || !enabled}
+          onClick={() => void run(subscribed ? "unsubscribe" : "subscribe")}
+          style={{
+            minWidth: 0,
+            border: "none",
+            background: "transparent",
+            color: "inherit",
+            padding: 0,
+            display: "inline-flex",
+            alignItems: "center",
+            gap: "8px",
+            flex: "0 1 auto",
+            cursor: busy || !enabled ? "not-allowed" : "pointer",
+            font: "inherit",
+            textAlign: "left",
+            whiteSpace: "nowrap",
+          }}
+        >
+          <NotificationIcon />
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{busy ? "通知处理中" : label}</span>
+        </button>
+        <button
+          type="button"
+          aria-label="通知说明"
+          title="通知说明"
+          onClick={() => setExpanded((value) => !value)}
+          style={{
+            border: "none",
+            background: "transparent",
+            color: expanded ? "var(--accent-color)" : "var(--text-secondary)",
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            cursor: "pointer",
+            flexShrink: 0,
+            padding: 0,
+            marginLeft: "-4px",
+          }}
+        >
+          <InfoIcon />
+        </button>
+        <span style={{ marginLeft: "auto", fontSize: "11px", opacity: subscribed ? 1 : 0, flexShrink: 0 }}>✓</span>
+      </div>
+      {expanded ? (
+        <>
+          <div style={{ padding: "0 10px 6px 32px", color: "var(--text-secondary)", fontSize: "11px", lineHeight: 1.35 }}>
+            {detail}
+          </div>
+          {subscribed ? (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void run("test")}
+              style={{
+                ...fileTreeMenuButtonStyle,
+                paddingLeft: "32px",
+                color: "var(--text-secondary)",
+                opacity: busy ? 0.55 : 1,
+                cursor: busy ? "not-allowed" : "pointer",
+              }}
+            >
+              <span>发送测试通知</span>
+            </button>
+          ) : null}
+        </>
+      ) : null}
+    </div>
+  );
+}
 
 const ChevronRight = ({ isOpen }: { isOpen: boolean }) => (
   <svg
@@ -171,7 +348,7 @@ function DirectoryIconSlot({ entry, isOpen }: { entry: FileEntry; isOpen: boolea
 
 const getFileIcon = (filename: string) => {
   const ext = filename.split('.').pop()?.toLowerCase();
-  
+
   // 核心文件类型使用极简 SVG
   if (['js', 'ts', 'jsx', 'tsx', 'go', 'py', 'java', 'c', 'cpp'].includes(ext!)) {
     return (
@@ -195,7 +372,7 @@ const getFileIcon = (filename: string) => {
       </svg>
     );
   }
-  
+
   return (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.5 }}>
       <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/>
@@ -219,6 +396,17 @@ function ConfigSwitchIcon() {
       <path d="m15 4 3 3-3 3" />
       <path d="M17 17H6" />
       <path d="m9 14-3 3 3 3" />
+    </svg>
+  );
+}
+
+function AgentInstallIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 48 48" fill="none" aria-hidden="true">
+      <path d="M0 0h48v48H0z" fill="none" />
+      <path fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" d="M24 26v16.5m0-37V15m14.932 5.35L42.5 25.5l-14.932 5.65L24 26zm0 0L33 18" />
+      <path fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" d="M38.932 26.85v8a2.895 2.895 0 0 1-1.87 2.708L23.998 42.5l-13.062-4.942a2.895 2.895 0 0 1-1.87-2.708v-8m20.184-10.1l5.5-5.5" />
+      <path fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" d="M9.068 20.35L5.5 25.5l14.932 5.65L24 26Zm0 0L15 18m3.75-1.25l-5.5-5.5" />
     </svg>
   );
 }
@@ -525,6 +713,167 @@ function AgentConfigPopover({
   );
 }
 
+function AgentLifecyclePopover({
+  agents,
+  busy,
+  runningAgent,
+  error,
+  onRun,
+}: {
+  agents: AgentStatus[];
+  busy: boolean;
+  runningAgent: string;
+  error: string;
+  onRun: (agent: AgentStatus, action: "install" | "update") => void;
+}) {
+  const [expandedDescriptions, setExpandedDescriptions] = React.useState<Set<string>>(() => new Set());
+
+  return (
+    <div
+      style={{
+        width: "100%",
+        padding: "10px",
+        borderRadius: "12px",
+        border: "1px solid var(--border-color)",
+        background: "var(--menu-bg)",
+        boxShadow: "0 12px 30px rgba(15, 23, 42, 0.14)",
+        display: "flex",
+        flexDirection: "column",
+        gap: "10px",
+      }}
+    >
+      <div style={{ fontSize: "12px", fontWeight: 700, color: "var(--text-primary)" }}>
+        Agent 安装和更新
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: "6px", maxHeight: "320px", overflow: "auto" }}>
+        {busy && agents.length === 0 ? (
+          <div style={agentConfigHintStyle}>加载中...</div>
+        ) : agents.length === 0 ? (
+          <div style={agentConfigHintStyle}>暂无 Agent 配置</div>
+        ) : (
+          agents.map((item) => {
+            const action = item.installed ? "update" : "install";
+            const commands = action === "install" ? item.install_commands || [] : item.update_commands || [];
+            const disabled = busy || commands.length === 0;
+            const actionLabel = item.installed ? "更新" : "安装";
+            const description = item.brief || "未配置简介";
+            const descriptionExpanded = expandedDescriptions.has(item.name);
+            return (
+              <div
+                key={item.name}
+                style={{
+                  border: "1px solid var(--border-color)",
+                  background: "transparent",
+                  color: "var(--text-primary)",
+                  borderRadius: "8px",
+                  padding: "8px 10px",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "4px",
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: "8px", minWidth: 0 }}>
+                  <AgentIcon
+                    agentName={item.name}
+                    style={{ width: "15px", height: "15px", display: "block", flexShrink: 0 }}
+                  />
+                  <div style={{ minWidth: 0, flex: 1, display: "flex", alignItems: "center", gap: "8px" }}>
+                    <span style={{ fontSize: "12px", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {item.name}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={disabled}
+                      title={commands.length > 0 ? actionLabel : "agents.json 未配置命令"}
+                      onClick={() => onRun(item, action)}
+                      style={{
+                        ...agentConfigPrimaryButtonStyle(disabled),
+                        marginLeft: "auto",
+                        padding: "2px 6px",
+                        minWidth: "36px",
+                        height: "18px",
+                        lineHeight: "12px",
+                        fontSize: "11px",
+                        borderRadius: "5px",
+                        flexShrink: 0,
+                      }}
+                    >
+                      {runningAgent === item.name ? "启动中" : actionLabel}
+                    </button>
+                  </div>
+                </div>
+                <div style={{ display: "flex", alignItems: descriptionExpanded ? "flex-start" : "center", gap: "4px", minWidth: 0 }}>
+                  <div
+                    title={description}
+                    style={{
+                      fontSize: "11px",
+                      color: "var(--text-secondary)",
+                      overflow: descriptionExpanded ? "visible" : "hidden",
+                      textOverflow: descriptionExpanded ? "clip" : "ellipsis",
+                      whiteSpace: descriptionExpanded ? "normal" : "nowrap",
+                      width: "100%",
+                      lineHeight: "16px",
+                      wordBreak: "break-word",
+                    }}
+                  >
+                    {description}
+                  </div>
+                  <button
+                    type="button"
+                    aria-label={descriptionExpanded ? "收起描述" : "展开描述"}
+                    title={descriptionExpanded ? "收起" : "展开"}
+                    onClick={() => {
+                      setExpandedDescriptions((current) => {
+                        const next = new Set(current);
+                        if (next.has(item.name)) {
+                          next.delete(item.name);
+                        } else {
+                          next.add(item.name);
+                        }
+                        return next;
+                      });
+                    }}
+                    style={{
+                      width: "16px",
+                      height: "16px",
+                      border: "none",
+                      background: "transparent",
+                      color: "var(--text-secondary)",
+                      padding: 0,
+                      display: "inline-flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      cursor: "pointer",
+                      flexShrink: 0,
+                      marginTop: descriptionExpanded ? "0" : undefined,
+                    }}
+                  >
+                    <svg
+                      width="12"
+                      height="12"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2.4"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden="true"
+                      style={{ transform: descriptionExpanded ? "rotate(180deg)" : "rotate(0deg)", transition: "transform 0.15s ease" }}
+                    >
+                      <path d="m6 9 6 6 6-6" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            );
+          })
+        )}
+      </div>
+      {error ? <div style={{ ...agentConfigHintStyle, color: "#dc2626" }}>{error}</div> : null}
+    </div>
+  );
+}
+
 const agentConfigFieldStyle: React.CSSProperties = {
   display: "flex",
   flexDirection: "column",
@@ -663,6 +1012,9 @@ export function FileTree({
   relayActionDisabled = false,
   relayActionHelp = null,
   onRelayAction,
+  relayNodeId = "",
+  relayBaseURL = "",
+  relayNoRelayer = false,
   updateActionLabel = null,
   updateActionDisabled = false,
   updateActionHelp = null,
@@ -672,6 +1024,11 @@ export function FileTree({
   showEnterKeySendOption = false,
   enterKeySends = false,
   onEnterKeySendsChange,
+  sidebarsSwapped = false,
+  onSidebarsSwappedChange,
+  multiProjectSessionsEnabled = false,
+  onMultiProjectSessionsChange,
+  onRunAgentLifecycleCommand,
   onGoHome,
 }: FileTreeProps) {
   const expandedSet = new Set(expanded);
@@ -700,6 +1057,13 @@ export function FileTree({
   const [agentConfigConfirmMessage, setAgentConfigConfirmMessage] = React.useState("");
   const [agentConfigBusy, setAgentConfigBusy] = React.useState(false);
   const [agentConfigError, setAgentConfigError] = React.useState("");
+  const [agentLifecycleOpen, setAgentLifecycleOpen] = React.useState(false);
+  const [relayServicesOpen, setRelayServicesOpen] = React.useState(false);
+  const [relayServicesEditing, setRelayServicesEditing] = React.useState(false);
+  const [agentLifecycleAgents, setAgentLifecycleAgents] = React.useState<AgentStatus[]>([]);
+  const [agentLifecycleBusy, setAgentLifecycleBusy] = React.useState(false);
+  const [agentLifecycleRunningAgent, setAgentLifecycleRunningAgent] = React.useState("");
+  const [agentLifecycleError, setAgentLifecycleError] = React.useState("");
   const [dismissedRelayTipIds, setDismissedRelayTipIds] = React.useState<string[]>(() => {
     if (typeof window === "undefined") {
       return [];
@@ -725,6 +1089,8 @@ export function FileTree({
   });
   const menuRef = React.useRef<HTMLDivElement | null>(null);
   const agentConfigPopoverRef = React.useRef<HTMLDivElement | null>(null);
+  const agentLifecyclePopoverRef = React.useRef<HTMLDivElement | null>(null);
+  const relayServicesPopoverRef = React.useRef<HTMLDivElement | null>(null);
   const updateNotesRef = React.useRef<HTMLDivElement | null>(null);
   const createInputRef = React.useRef<HTMLInputElement | null>(null);
   const previousCreatingRootNameRef = React.useRef<string | null>(null);
@@ -1104,6 +1470,7 @@ export function FileTree({
   }, [isMenuOpen]);
 
   const openAgentConfigFlow = React.useCallback((flow: AgentConfigFlow) => {
+    setAgentLifecycleOpen(false);
     setAgentConfigFlow(flow);
     setAgentConfigStep("agent");
     setAgentConfigAgent("");
@@ -1133,6 +1500,28 @@ export function FileTree({
     setAgentConfigConfirmMessage("");
   }, []);
 
+  const openAgentLifecycleFlow = React.useCallback(() => {
+    setAgentConfigFlow(null);
+    setAgentLifecycleOpen(true);
+    setIsMenuOpen(false);
+    setAgentLifecycleError("");
+    setAgentLifecycleBusy(true);
+    fetchAgentCatalog(true)
+      .then((items) => {
+        setAgentLifecycleAgents(items);
+      })
+      .catch((error) => {
+        setAgentLifecycleError(error instanceof Error ? error.message : "加载 Agent 失败");
+      })
+      .finally(() => setAgentLifecycleBusy(false));
+  }, []);
+
+  const closeAgentLifecycleFlow = React.useCallback(() => {
+    setAgentLifecycleOpen(false);
+    setAgentLifecycleError("");
+    setAgentLifecycleRunningAgent("");
+  }, []);
+
   React.useEffect(() => {
     if (!agentConfigFlow || agentConfigStep !== "agent") {
       return;
@@ -1145,6 +1534,60 @@ export function FileTree({
     document.addEventListener("mousedown", handlePointerDown);
     return () => document.removeEventListener("mousedown", handlePointerDown);
   }, [agentConfigFlow, agentConfigStep, closeAgentConfigFlow]);
+
+  React.useEffect(() => {
+    if (!agentLifecycleOpen) {
+      return;
+    }
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!agentLifecyclePopoverRef.current?.contains(event.target as Node)) {
+        closeAgentLifecycleFlow();
+      }
+    };
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => document.removeEventListener("mousedown", handlePointerDown);
+  }, [agentLifecycleOpen, closeAgentLifecycleFlow]);
+
+  React.useEffect(() => {
+    if (!relayServicesOpen) {
+      return;
+    }
+    const handlePointerDown = (event: MouseEvent) => {
+      if (relayServicesEditing) {
+        return;
+      }
+      if (!relayServicesPopoverRef.current?.contains(event.target as Node)) {
+        setRelayServicesOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => document.removeEventListener("mousedown", handlePointerDown);
+  }, [relayServicesEditing, relayServicesOpen]);
+
+  const closeRelayServices = React.useCallback(() => {
+    setRelayServicesOpen(false);
+    setRelayServicesEditing(false);
+  }, []);
+
+  const runAgentLifecycleCommand = React.useCallback(async (agent: AgentStatus, action: "install" | "update") => {
+    const commands = action === "install" ? agent.install_commands || [] : agent.update_commands || [];
+    if (commands.length === 0) {
+      setAgentLifecycleError("agents.json 未配置命令");
+      return;
+    }
+    setAgentLifecycleBusy(true);
+    setAgentLifecycleRunningAgent(agent.name);
+    setAgentLifecycleError("");
+    try {
+      await onRunAgentLifecycleCommand?.(agent.name, action, commands);
+      closeAgentLifecycleFlow();
+    } catch (error) {
+      setAgentLifecycleError(error instanceof Error ? error.message : "发起命令失败");
+    } finally {
+      setAgentLifecycleBusy(false);
+      setAgentLifecycleRunningAgent("");
+    }
+  }, [closeAgentLifecycleFlow, onRunAgentLifecycleCommand]);
 
   const chooseAgentForConfig = React.useCallback(async (agentName: string) => {
     setAgentConfigAgent(agentName);
@@ -1378,7 +1821,7 @@ export function FileTree({
 
         const cKey = childKeyFor(entry, entryRoot);
         const children = childrenByPath[cKey] ?? [];
-        
+
         const isCurrentRootNode = isManagedRootNode && entry.path === rootId;
         // 普通目录沿用 selectedDirKey；当前 managed root 永远跟随 current root 高亮。
         const isSelected =
@@ -1606,6 +2049,36 @@ export function FileTree({
                   <ConfigSwitchIcon />
                   <span>Agent 配置切换</span>
                 </button>
+                <button
+                  type="button"
+                  onClick={openAgentLifecycleFlow}
+                  style={fileTreeMenuButtonStyle}
+                >
+                  <AgentInstallIcon />
+                  <span>Agent 安装和更新</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRelayServicesOpen(true);
+                    setRelayServicesEditing(false);
+                    closeAgentConfigFlow();
+                    setAgentLifecycleOpen(false);
+                    setIsMenuOpen(false);
+                    setIsAppearanceMenuOpen(false);
+                    setIsSortMenuOpen(false);
+                  }}
+                  style={fileTreeMenuButtonStyle}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M4 17V7a2 2 0 0 1 2-2h6" />
+                    <path d="M8 21h8a2 2 0 0 0 2-2v-6" />
+                    <path d="M14 3h7v7" />
+                    <path d="m21 3-9 9" />
+                  </svg>
+                  <span>公网访问本地服务</span>
+                </button>
+                {!isNativeApp ? <WebPushMenuItem /> : null}
                 <div style={{ height: "1px", background: "var(--border-color)", margin: "6px 4px" }} />
                 <button
                   type="button"
@@ -1749,6 +2222,56 @@ export function FileTree({
                 <span>显示隐藏文件</span>
                 <span style={{ fontSize: "11px", opacity: showHiddenFiles ? 1 : 0 }}>✓</span>
               </button>
+              <button
+                type="button"
+                onClick={() => {
+                  onMultiProjectSessionsChange?.(!multiProjectSessionsEnabled);
+                  setIsAppearanceMenuOpen(false);
+                  setIsSortMenuOpen(false);
+                }}
+                style={{
+                  width: "100%",
+                  border: "none",
+                  background: multiProjectSessionsEnabled ? "var(--selection-bg)" : "transparent",
+                  color: multiProjectSessionsEnabled ? "var(--accent-color)" : "var(--text-primary)",
+                  borderRadius: "8px",
+                  padding: "8px 10px",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  textAlign: "left",
+                  cursor: "pointer",
+                  fontSize: "12px",
+                }}
+              >
+                <span>多项目会话列表</span>
+                <span style={{ fontSize: "11px", opacity: multiProjectSessionsEnabled ? 1 : 0 }}>✓</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  onSidebarsSwappedChange?.(!sidebarsSwapped);
+                  setIsAppearanceMenuOpen(false);
+                  setIsSortMenuOpen(false);
+                }}
+                style={{
+                  width: "100%",
+                  border: "none",
+                  background: sidebarsSwapped ? "var(--selection-bg)" : "transparent",
+                  color: sidebarsSwapped ? "var(--accent-color)" : "var(--text-primary)",
+                  borderRadius: "8px",
+                  padding: "8px 10px",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  textAlign: "left",
+                  cursor: "pointer",
+                  fontSize: "12px",
+                }}
+              >
+                <span>交换左右侧边栏</span>
+                <span style={{ fontSize: "11px", opacity: sidebarsSwapped ? 1 : 0 }}>✓</span>
+              </button>
               {showEnterKeySendOption ? (
                 <button
                   type="button"
@@ -1839,6 +2362,49 @@ export function FileTree({
                 void runAgentConfigSwitch(true);
               }}
               onCancel={closeAgentConfigFlow}
+            />
+          </div>
+        ) : null}
+        {relayServicesOpen ? (
+          <div
+            ref={relayServicesPopoverRef}
+            style={{
+              position: "absolute",
+              top: "calc(100% + 6px)",
+              left: "8px",
+              right: "3px",
+              zIndex: 35,
+            }}
+          >
+            <RelayLocalServicesDialog
+              open={relayServicesOpen}
+              nodeId={relayNodeId}
+              relayBaseURL={relayBaseURL}
+              noRelayer={relayNoRelayer}
+              onCancel={closeRelayServices}
+              onEditingChange={setRelayServicesEditing}
+            />
+          </div>
+        ) : null}
+        {agentLifecycleOpen ? (
+          <div
+            ref={agentLifecyclePopoverRef}
+            style={{
+              position: "absolute",
+              top: "calc(100% + 6px)",
+              left: "8px",
+              right: "3px",
+              zIndex: 35,
+            }}
+          >
+            <AgentLifecyclePopover
+              agents={agentLifecycleAgents}
+              busy={agentLifecycleBusy}
+              runningAgent={agentLifecycleRunningAgent}
+              error={agentLifecycleError}
+              onRun={(agent, action) => {
+                void runAgentLifecycleCommand(agent, action);
+              }}
             />
           </div>
         ) : null}

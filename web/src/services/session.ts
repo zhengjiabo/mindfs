@@ -70,6 +70,9 @@ export type ExchangeAux = {
   line: number;
   toolcall?: ToolCall | null;
   thought?: string | null;
+  thought_id?: string;
+  plan?: PlanUpdate | null;
+  compact?: CompactNotice | null;
 };
 
 export type Session = {
@@ -77,12 +80,14 @@ export type Session = {
   type: SessionType;
   parent_session_key?: string;
   parent_tool_call_id?: string;
+  source?: string;
   agent?: string;
   model?: string;
   shell?: string;
   mode?: string;
   effort?: string;
   fast_service?: string;
+  plan_mode?: boolean;
   name: string;
   created_at: string;
   updated_at: string;
@@ -98,6 +103,7 @@ export type Session = {
     role?: string;
     agent?: string;
     model?: string;
+    model_display_name?: string;
     mode?: string;
     effort?: string;
     fast_service?: string;
@@ -109,6 +115,8 @@ export type Session = {
     timestamp?: string;
     toolCall?: ToolCall;
     todoUpdate?: TodoUpdate;
+    planUpdate?: PlanUpdate;
+    compactNotice?: CompactNotice;
     pending_ack?: boolean;
   }>;
 };
@@ -118,6 +126,7 @@ export type SessionSearchHit = {
   type: SessionType;
   parent_session_key?: string;
   parent_tool_call_id?: string;
+  source?: string;
   agent?: string;
   model?: string;
   shell?: string;
@@ -172,12 +181,26 @@ export type TodoUpdate = {
   items: TodoItem[];
 };
 
+export type PlanUpdate = {
+  id?: string;
+  content: string;
+  delta?: boolean;
+};
+
+export type CompactNotice = {
+  id?: string;
+  status?: string;
+  summary?: string;
+};
+
 export type StreamEvent =
   | { type: "message_chunk"; data: { content: string } }
-  | { type: "thought_chunk"; data: { content: string } }
+  | { type: "thought_chunk"; data: { id?: string; content: string } }
   | { type: "tool_call"; data: ToolCall }
   | { type: "tool_call_update"; data: ToolCall }
   | { type: "todo_update"; data: TodoUpdate }
+  | { type: "plan_update"; data: PlanUpdate }
+  | { type: "compact_notice"; data: CompactNotice }
   | { type: "recovery"; data: { message: string } }
   | {
       type: "message_done";
@@ -210,6 +233,22 @@ type SessionServiceEvent = {
 type FetchSessionsOptions = {
   beforeTime?: string;
   afterTime?: string;
+  limit?: number;
+  topLevel?: boolean;
+  includeChildren?: boolean;
+};
+
+export type SessionListPayload = {
+  items: Session[];
+  totalCount: number;
+};
+
+export type MultiRootSessionGroup = {
+  rootId: string;
+  rootName: string;
+  latestSessionTime: string;
+  items: Session[];
+  totalCount: number;
 };
 
 export type FetchExternalSessionsOptions = {
@@ -228,6 +267,7 @@ class SessionService {
   private ws: WebSocket | null = null;
   private handlers = new Map<string, Set<SessionEventHandler>>();
   private pendingStreams = new Map<string, StreamEvent[]>();
+  private activeStreams = new Set<string>();
   private pendingMessages = new Map<string, PendingMessage>();
   private listeners = new Set<(event: SessionServiceEvent) => void>();
   private reconnectTimer: number | null = null;
@@ -607,6 +647,7 @@ class SessionService {
     this.emit({ type, sessionKey, payload: nextPayload });
 
     if (!sessionKey) return;
+    this.updateActiveStreamState(type, sessionKey, nextPayload);
 
     const handlers = this.handlers.get(sessionKey);
     if ((!handlers || handlers.size === 0) && type === "session.stream") {
@@ -678,6 +719,31 @@ class SessionService {
     }
   }
 
+  private updateActiveStreamState(
+    type: string,
+    sessionKey: string,
+    payload: Record<string, unknown>,
+  ) {
+    if (type === "session.done" || type === "session.error") {
+      this.activeStreams.delete(sessionKey);
+      return;
+    }
+    if (type !== "session.stream") return;
+    const event = payload.event as StreamEvent | undefined;
+    if (!event) return;
+    if (event.type === "error") {
+      this.activeStreams.delete(sessionKey);
+      return;
+    }
+    if (event.type !== "message_done") {
+      this.activeStreams.add(sessionKey);
+    }
+  }
+
+  isSessionStreaming(sessionKey: string) {
+    return this.activeStreams.has(sessionKey);
+  }
+
   subscribe(sessionKey: string, handler: SessionEventHandler) {
     let set = this.handlers.get(sessionKey);
     if (!set) {
@@ -747,6 +813,64 @@ class SessionService {
       },
     };
 
+    this.pendingMessages.set(requestId, { id: requestId, message: msg });
+    return this.sendWSMessage(msg);
+  }
+
+  async setPlanMode(
+    rootId: string,
+    sessionKey: string,
+    enabled: boolean,
+    requestId = this.createRequestId("plan"),
+  ): Promise<boolean> {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+    if (!rootId || !sessionKey) {
+      return false;
+    }
+    return this.sendWSMessage({
+      id: requestId,
+      type: "session.plan_mode.set",
+      payload: {
+        root_id: rootId,
+        session_key: sessionKey,
+        enabled,
+      },
+    });
+  }
+
+  async runSlashCommand(
+    rootId: string,
+    sessionKey: string,
+    command: string,
+    agent: string,
+    model?: string,
+    agentMode?: string,
+    effort?: string,
+    fastService?: string,
+    requestId = this.createRequestId("slash"),
+  ): Promise<boolean> {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      return false;
+    }
+    if (!rootId || !sessionKey || !command || !agent) {
+      return false;
+    }
+    const msg = {
+      id: requestId,
+      type: "session.slash_command.run",
+      payload: {
+        root_id: rootId,
+        session_key: sessionKey,
+        command,
+        agent,
+        model,
+        agent_mode: agentMode,
+        effort,
+        fast_service: fastService,
+      },
+    };
     this.pendingMessages.set(requestId, { id: requestId, message: msg });
     return this.sendWSMessage(msg);
   }
@@ -866,11 +990,12 @@ class SessionService {
     if (!rootId || !sessionKey) {
       return false;
     }
+    const now = Date.now();
     if (e2eeService.isRequired()) {
       await e2eeService.ensureSession();
     }
     return this.sendWSMessage({
-      id: `ready-${Date.now()}`,
+      id: `ready-${now}`,
       type: "session.ready",
       payload: {
         root_id: rootId,
@@ -882,7 +1007,7 @@ class SessionService {
   async fetchSessions(
     rootId: string,
     options?: FetchSessionsOptions,
-  ): Promise<Session[]> {
+  ): Promise<SessionListPayload> {
     try {
       const params = new URLSearchParams({ root: rootId });
       if (options?.beforeTime) {
@@ -891,10 +1016,69 @@ class SessionService {
       if (options?.afterTime) {
         params.set("after_time", options.afterTime);
       }
-      const data = await protectedJSON<any[]>(appURL("/api/sessions", params));
-      return Array.isArray(data) ? data : [];
+      if (typeof options?.limit === "number" && options.limit > 0) {
+        params.set("limit", String(options.limit));
+      }
+      if (options?.topLevel) {
+        params.set("top_level", "1");
+      }
+      if (options?.includeChildren) {
+        params.set("include_children", "1");
+      }
+      const data = await protectedJSON<any>(appURL("/api/sessions", params));
+      if (Array.isArray(data)) {
+        return { items: data, totalCount: data.length };
+      }
+      const items = Array.isArray(data?.items) ? data.items : [];
+      const totalCount = Number(data?.total_count ?? data?.totalCount ?? items.length) || 0;
+      return { items, totalCount };
     } catch (err) {
       console.error("[Session] Failed to fetch sessions:", err);
+      return { items: [], totalCount: 0 };
+    }
+  }
+
+  async fetchMultiRootSessions(limitPerRoot = 6): Promise<MultiRootSessionGroup[]> {
+    try {
+      const params = new URLSearchParams({ multi_root: "1" });
+      if (limitPerRoot > 0) {
+        params.set("limit_per_root", String(limitPerRoot));
+      }
+      const data = await protectedJSON<any>(appURL("/api/sessions", params));
+      const groups = Array.isArray(data?.groups) ? data.groups : [];
+      return groups.map((group: any) => ({
+        rootId: String(group?.root_id || group?.rootId || ""),
+        rootName: String(group?.root_name || group?.rootName || ""),
+        latestSessionTime: String(group?.latest_session_time || group?.latestSessionTime || ""),
+        items: Array.isArray(group?.items) ? group.items : [],
+        totalCount: Number(group?.total_count ?? group?.totalCount ?? 0) || 0,
+      })).filter((group: MultiRootSessionGroup) => !!group.rootId);
+    } catch (err) {
+      console.error("[Session] Failed to fetch multi-root sessions:", err);
+      return [];
+    }
+  }
+
+  async fetchChildSessions(
+    rootId: string,
+    parentSessionKey: string,
+    options?: { beforeTime?: string; limit?: number },
+  ): Promise<Session[]> {
+    try {
+      const params = new URLSearchParams({
+        root: rootId,
+        parent_session_key: parentSessionKey,
+      });
+      if (options?.beforeTime) {
+        params.set("before_time", options.beforeTime);
+      }
+      if (typeof options?.limit === "number" && options.limit > 0) {
+        params.set("limit", String(options.limit));
+      }
+      const data = await protectedJSON<any[]>(appURL("/api/sessions/children", params));
+      return Array.isArray(data) ? data : [];
+    } catch (err) {
+      console.error("[Session] Failed to fetch child sessions:", err);
       return [];
     }
   }
@@ -1057,34 +1241,58 @@ class SessionService {
     }
   }
 
+  async forkSession(
+    rootId: string,
+    sessionKey: string,
+    seq: number,
+  ): Promise<{ session_key: string; session?: Session } | null> {
+    try {
+      if (!rootId || !sessionKey || !seq) {
+        return null;
+      }
+      return await protectedJSON<{ session_key: string; session?: Session }>(
+        appURL("/api/sessions/fork"),
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            root_id: rootId,
+            session_key: sessionKey,
+            seq,
+          }),
+        },
+      );
+    } catch (err) {
+      console.error("[Session] Failed to fork session:", err);
+      return null;
+    }
+  }
+
   async fetchExternalSessions(
     rootId: string,
     agent: string,
     options?: FetchExternalSessionsOptions,
   ): Promise<Session[]> {
-    try {
-      if (!rootId || !agent) {
-        return [];
-      }
-      const params = new URLSearchParams({ root: rootId, agent });
-      if (options?.beforeTime) {
-        params.set("before_time", options.beforeTime);
-      }
-      if (options?.afterTime) {
-        params.set("after_time", options.afterTime);
-      }
-      if (options?.filterBound) {
-        params.set("filter_bound", "true");
-      }
-      if (typeof options?.limit === "number" && options.limit > 0) {
-        params.set("limit", String(options.limit));
-      }
-      const data = await protectedJSON<any[]>(appURL("/api/sessions/external", params));
-      return Array.isArray(data) ? data : [];
-    } catch (err) {
-      console.error("[Session] Failed to fetch external sessions:", err);
+    if (!rootId || !agent) {
       return [];
     }
+    const params = new URLSearchParams({ root: rootId, agent });
+    if (options?.beforeTime) {
+      params.set("before_time", options.beforeTime);
+    }
+    if (options?.afterTime) {
+      params.set("after_time", options.afterTime);
+    }
+    if (options?.filterBound) {
+      params.set("filter_bound", "true");
+    }
+    if (typeof options?.limit === "number" && options.limit > 0) {
+      params.set("limit", String(options.limit));
+    }
+    const data = await protectedJSON<any[]>(appURL("/api/sessions/external", params));
+    return Array.isArray(data) ? data : [];
   }
 
   async importExternalSession(
@@ -1121,6 +1329,10 @@ class SessionService {
       imported_count?: number;
       success: boolean;
       error?: string;
+      error_code?: string;
+      error_detail?: string;
+      error_path?: string;
+      error_operation?: string;
     }>;
   } | null> {
     try {
@@ -1311,6 +1523,10 @@ function withSessionMeta(
         : typeof (base as any).fast_service === "string"
           ? (base as any).fast_service
           : "",
+    plan_mode:
+      typeof (incoming as any).plan_mode === "boolean"
+        ? (incoming as any).plan_mode
+        : !!(base as any).plan_mode,
     name: preferIncomingText(incoming.name, base.name) || "",
     exchanges: Array.isArray(incoming.exchanges) ? [...incoming.exchanges] : [],
     exchange_aux: cloneExchangeAux(incoming.exchange_aux || base.exchange_aux),
@@ -1394,6 +1610,25 @@ export async function deleteCachedSession(
         store.delete(buildSessionCacheKey(rootId, sessionKey)),
       ),
     );
+  } catch {}
+}
+
+export async function clearCachedSessionsForRoot(rootId: string): Promise<void> {
+  if (!rootId) {
+    return;
+  }
+  try {
+    await withSessionStore("readwrite", async (store) => {
+      const entries =
+        (await sessionRequestToPromise(
+          store.getAll() as IDBRequest<CachedSessionRecord[]>,
+        )) || [];
+      await Promise.all(
+        entries
+          .filter((record) => record.rootId === rootId)
+          .map((record) => sessionRequestToPromise(store.delete(record.cacheKey))),
+      );
+    });
   } catch {}
 }
 

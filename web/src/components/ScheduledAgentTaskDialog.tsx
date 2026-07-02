@@ -794,7 +794,7 @@ export function ScheduledAgentTaskDialog({
         />
       </label>
       <CronEditor
-        label="任务计划"
+        label="任务计划（标准 crontab 规则）"
         value={form.task_cron}
         onChange={(value) => setForm((prev) => ({ ...prev, task_cron: value }))}
         placeholder="0 9 * * 1-5"

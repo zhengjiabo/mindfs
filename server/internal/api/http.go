@@ -42,6 +42,7 @@ import (
 type HTTPHandler struct {
 	AppContext    *AppContext
 	StaticDir     string
+	Version       string
 	LocalCLIToken string
 }
 
@@ -55,6 +56,9 @@ const (
 	maxUploadRequestBytes = 64 << 20
 	maxUploadFileCount    = 20
 	sessionListPageSize   = 50
+	multiRootSessionLimit = 6
+	childSessionPageSize  = 20
+	childSessionMaxLimit  = 50
 	e2eeHeaderName        = "X-MindFS-E2EE"
 	clientIDHeaderName    = "X-MindFS-Client-ID"
 	e2eeProofHeaderName   = "X-MindFS-Proof"
@@ -281,9 +285,11 @@ func (h *HTTPHandler) Routes() http.Handler {
 	r.Get("/api/sessions", h.protectedEndpoint(h.handleSessions))
 	r.Get("/api/replying-sessions", h.protectedEndpoint(h.handleReplyingSessions))
 	r.Get("/api/sessions/search", h.protectedEndpoint(h.handleSessionSearch))
+	r.Get("/api/sessions/children", h.protectedEndpoint(h.handleSessionChildren))
 	r.Get("/api/sessions/external", h.protectedEndpoint(h.handleExternalSessionsList))
 	r.Post("/api/sessions/import", h.protectedEndpoint(h.handleExternalSessionImport))
 	r.Post("/api/sessions/import/batch", h.protectedEndpoint(h.handleExternalSessionImportBatch))
+	r.Post("/api/sessions/fork", h.protectedEndpoint(h.handleSessionFork))
 	r.Get("/api/sessions/{key}/toolcalls/{callID}", h.protectedEndpoint(h.handleSessionToolCallGet))
 	r.Get("/api/sessions/{key}", h.protectedEndpoint(h.handleSessionGet))
 	r.Get("/api/sessions/{key}/related-files", h.protectedEndpoint(h.handleSessionRelatedFilesGet))
@@ -303,10 +309,17 @@ func (h *HTTPHandler) Routes() http.Handler {
 	r.Get("/api/relay/status", h.handleRelayStatus)
 	r.Post("/api/relay/bind/start", h.protectedEndpoint(h.handleRelayBindStart))
 	r.Get("/api/relay/tips", h.protectedEndpoint(h.handleRelayTips))
+	r.Get("/api/relay/services", h.protectedEndpoint(h.handleRelayServicesList))
+	r.Post("/api/relay/services", h.protectedEndpoint(h.handleRelayServiceSave))
+	r.Delete("/api/relay/services/{slug}", h.protectedEndpoint(h.handleRelayServiceDelete))
 	r.Post("/api/e2ee/open", h.handleE2EEOpen)
 	r.Get("/api/app/update", h.protectedEndpoint(h.handleAppUpdateGet))
 	r.Post("/api/app/update", h.protectedEndpoint(h.handleAppUpdatePost))
 	r.Post("/api/imports/github", h.protectedEndpoint(h.handleGitHubImportStart))
+	r.Get("/api/web-push/status", h.protectedEndpoint(h.handleWebPushStatus))
+	r.Post("/api/web-push/subscriptions", h.protectedEndpoint(h.handleWebPushSubscriptionSave))
+	r.Delete("/api/web-push/subscriptions", h.protectedEndpoint(h.handleWebPushSubscriptionDelete))
+	r.Post("/api/web-push/test", h.protectedEndpoint(h.handleWebPushTest))
 
 	// Agent status API
 	r.Get("/api/agents", h.protectedEndpoint(h.handleAgentsList))
@@ -323,6 +336,10 @@ func (h *HTTPHandler) Routes() http.Handler {
 
 func (h *HTTPHandler) handleSessions(w http.ResponseWriter, r *http.Request) {
 	rootID := r.URL.Query().Get("root")
+	if truthyQuery(r, "multi_root") {
+		h.handleMultiRootSessions(w, r)
+		return
+	}
 	beforeTime, err := parseOptionalTimeQuery(r, "before_time")
 	if err != nil {
 		respondError(w, http.StatusBadRequest, err)
@@ -337,12 +354,99 @@ func (h *HTTPHandler) handleSessions(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, errInvalidRequest("before_time and after_time are mutually exclusive"))
 		return
 	}
+	limit, err := parsePositiveIntQuery(r, "limit")
+	if err != nil {
+		respondError(w, http.StatusBadRequest, errInvalidRequest("limit must be a positive integer"))
+		return
+	}
+	if limit <= 0 {
+		limit = sessionListPageSize
+	}
 	uc := h.service()
 	out, err := uc.ListSessions(r.Context(), usecase.ListSessionsInput{
-		RootID:     rootID,
-		BeforeTime: beforeTime,
-		AfterTime:  afterTime,
-		Limit:      sessionListPageSize,
+		RootID:          rootID,
+		BeforeTime:      beforeTime,
+		AfterTime:       afterTime,
+		Limit:           limit,
+		TopLevelOnly:    truthyQuery(r, "top_level"),
+		IncludeChildren: truthyQuery(r, "include_children"),
+	})
+	if err != nil {
+		respondError(w, http.StatusServiceUnavailable, err)
+		return
+	}
+	payload := make([]map[string]any, 0, len(out.Sessions))
+	for _, s := range out.Sessions {
+		payload = append(payload, h.sessionListResponse(s))
+	}
+	respondJSON(w, http.StatusOK, map[string]any{
+		"items":       payload,
+		"total_count": out.TotalCount,
+	})
+}
+
+func (h *HTTPHandler) handleMultiRootSessions(w http.ResponseWriter, r *http.Request) {
+	limit, err := parsePositiveIntQuery(r, "limit_per_root")
+	if err != nil {
+		respondError(w, http.StatusBadRequest, errInvalidRequest("limit_per_root must be a positive integer"))
+		return
+	}
+	if limit <= 0 {
+		limit = multiRootSessionLimit
+	}
+	out, err := h.service().ListMultiRootSessions(r.Context(), usecase.ListMultiRootSessionsInput{
+		LimitPerRoot: limit,
+	})
+	if err != nil {
+		respondError(w, http.StatusServiceUnavailable, err)
+		return
+	}
+	groups := make([]map[string]any, 0, len(out.Groups))
+	for _, group := range out.Groups {
+		items := make([]map[string]any, 0, len(group.Sessions))
+		for _, s := range group.Sessions {
+			item := h.sessionListResponse(s)
+			item["root_id"] = group.RootID
+			items = append(items, item)
+		}
+		groups = append(groups, map[string]any{
+			"root_id":             group.RootID,
+			"root_name":           group.RootName,
+			"latest_session_time": group.LatestSessionTime,
+			"items":               items,
+			"total_count":         group.TotalCount,
+		})
+	}
+	respondJSON(w, http.StatusOK, map[string]any{"groups": groups})
+}
+
+func (h *HTTPHandler) handleSessionChildren(w http.ResponseWriter, r *http.Request) {
+	rootID := r.URL.Query().Get("root")
+	parentSessionKey := strings.TrimSpace(r.URL.Query().Get("parent_session_key"))
+	if parentSessionKey == "" {
+		respondError(w, http.StatusBadRequest, errInvalidRequest("parent_session_key required"))
+		return
+	}
+	beforeTime, err := parseOptionalTimeQuery(r, "before_time")
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err)
+		return
+	}
+	limit, err := parsePositiveIntQuery(r, "limit")
+	if err != nil {
+		respondError(w, http.StatusBadRequest, errInvalidRequest("limit must be a positive integer"))
+		return
+	}
+	if limit <= 0 {
+		limit = childSessionPageSize
+	} else if limit > childSessionMaxLimit {
+		limit = childSessionMaxLimit
+	}
+	out, err := h.service().ListChildSessions(r.Context(), usecase.ListChildSessionsInput{
+		RootID:           rootID,
+		ParentSessionKey: parentSessionKey,
+		BeforeTime:       beforeTime,
+		Limit:            limit,
 	})
 	if err != nil {
 		respondError(w, http.StatusServiceUnavailable, err)
@@ -713,6 +817,44 @@ func (h *HTTPHandler) handleSessionRelatedFilesDelete(w http.ResponseWriter, r *
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (h *HTTPHandler) handleSessionFork(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		RootID     string `json:"root_id"`
+		SessionKey string `json:"session_key"`
+		Seq        int    `json:"seq"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, errInvalidRequest("invalid json body"))
+		return
+	}
+	if strings.TrimSpace(req.RootID) == "" || strings.TrimSpace(req.SessionKey) == "" || req.Seq <= 0 {
+		respondError(w, http.StatusBadRequest, errInvalidRequest("root_id, session_key and seq are required"))
+		return
+	}
+	out, err := h.service().ForkSession(r.Context(), usecase.ForkSessionInput{
+		RootID: req.RootID,
+		Key:    req.SessionKey,
+		Seq:    req.Seq,
+	})
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err)
+		return
+	}
+	if h.AppContext != nil && out.Session != nil {
+		h.AppContext.GetSessionStreamHub().BroadcastAll(WSResponse{
+			Type: "session.created",
+			Payload: map[string]any{
+				"root_id": req.RootID,
+				"session": h.sessionListResponse(out.Session),
+			},
+		})
+	}
+	respondJSON(w, http.StatusOK, map[string]any{
+		"session_key": out.Session.Key,
+		"session":     h.sessionResponse(out.Session, nil, agenttypes.ContextWindow{}, nil),
+	})
+}
+
 func (h *HTTPHandler) handleSessionRename(w http.ResponseWriter, r *http.Request) {
 	rootID := r.URL.Query().Get("root")
 	key := chi.URLParam(r, "key")
@@ -749,6 +891,7 @@ func (h *HTTPHandler) handleSessionRename(w http.ResponseWriter, r *http.Request
 					"mode":         session.InferModeFromSession(renamed),
 					"effort":       session.InferEffortFromSession(renamed),
 					"fast_service": session.InferFastServiceFromSession(renamed),
+					"plan_mode":    renamed.PlanMode,
 					"updated_at":   renamed.UpdatedAt,
 				},
 			},
@@ -801,11 +944,13 @@ func (h *HTTPHandler) sessionResponse(
 		"type":                s.Type,
 		"parent_session_key":  s.ParentSessionKey,
 		"parent_tool_call_id": s.ParentToolCallID,
+		"source":              s.Source,
 		"agent":               session.InferAgentFromSession(s),
 		"model":               s.Model,
 		"mode":                session.InferModeFromSession(s),
 		"effort":              session.InferEffortFromSession(s),
 		"fast_service":        session.InferFastServiceFromSession(s),
+		"plan_mode":           s.PlanMode,
 		"shell":               h.commandShellForResponse(s, exchangeAux),
 		"name":                s.Name,
 		"exchanges":           exchanges,
@@ -827,11 +972,13 @@ func (h *HTTPHandler) sessionListResponse(s *session.Session) map[string]any {
 		"type":                s.Type,
 		"parent_session_key":  s.ParentSessionKey,
 		"parent_tool_call_id": s.ParentToolCallID,
+		"source":              s.Source,
 		"agent":               session.InferAgentFromSession(s),
 		"model":               s.Model,
 		"mode":                session.InferModeFromSession(s),
 		"effort":              session.InferEffortFromSession(s),
 		"fast_service":        session.InferFastServiceFromSession(s),
+		"plan_mode":           s.PlanMode,
 		"shell":               h.commandShellForSession(s),
 		"name":                s.Name,
 		"created_at":          s.CreatedAt,
@@ -909,6 +1056,9 @@ func (h *HTTPHandler) handleAgentsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	statuses := h.AppContext.GetProber().GetInstalledStatuses()
+	if r.URL.Query().Get("all") == "1" {
+		statuses = h.AppContext.GetProber().GetConfiguredStatuses()
+	}
 	if prefs := h.AppContext.GetPreferences(); prefs != nil {
 		statuses = prefs.ApplyAgentDefaults(statuses)
 	}
@@ -992,7 +1142,7 @@ func (h *HTTPHandler) handleFrontend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if isRelayedRequest(r) {
+	if h.shouldRewriteRelayedAssets(r) {
 		w.Write([]byte(rewriteRelayedFrontendContent(indexHTML)))
 		return
 	}
@@ -1031,7 +1181,7 @@ func (h *HTTPHandler) serveStaticAsset(w http.ResponseWriter, r *http.Request) b
 			h.serveFrontendIndex(w, r, staticDir, assetPath)
 			return true
 		}
-		if isRelayedRequest(r) && shouldRewriteRelayedStaticAsset(cleanPath) {
+		if h.shouldRewriteRelayedAssets(r) && shouldRewriteRelayedStaticAsset(cleanPath) {
 			serveRewrittenStaticAsset(w, r, assetPath)
 			return true
 		}
@@ -1066,7 +1216,7 @@ func (h *HTTPHandler) serveFrontendIndex(w http.ResponseWriter, r *http.Request,
 		w.Write([]byte(renderFallbackFrontend(indexHTML, frontendAssetMissingNotice(missing))))
 		return
 	}
-	if isRelayedRequest(r) {
+	if h.shouldRewriteRelayedAssets(r) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write([]byte(rewriteRelayedFrontendContent(string(content))))
 		return
@@ -1148,6 +1298,33 @@ func applyStaticCacheHeaders(w http.ResponseWriter, cleanPath string) {
 
 func isRelayedRequest(r *http.Request) bool {
 	return strings.TrimSpace(r.Header.Get("X-MindFS-Relayed")) == "1"
+}
+
+func (h *HTTPHandler) shouldRewriteRelayedAssets(r *http.Request) bool {
+	return isRelayedRequest(r) && isStandardReleaseVersion(h.Version)
+}
+
+func isStandardReleaseVersion(version string) bool {
+	version = strings.TrimSpace(version)
+	if version == "" {
+		return false
+	}
+	version, _ = strings.CutPrefix(version, "v")
+	parts := strings.Split(version, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+		for _, ch := range part {
+			if ch < '0' || ch > '9' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func shouldRewriteRelayedStaticAsset(cleanPath string) bool {
@@ -1656,6 +1833,15 @@ func parsePositiveIntQuery(r *http.Request, key string) (int, error) {
 		return 0, errInvalidRequest(key + " must be positive")
 	}
 	return value, nil
+}
+
+func truthyQuery(r *http.Request, key string) bool {
+	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func (h *HTTPHandler) handleDirs(w http.ResponseWriter, _ *http.Request) {

@@ -31,6 +31,8 @@ type SessionActivityBroadcaster interface {
 	BroadcastSessionUpdate(rootID, sessionKey string, update agenttypes.Event)
 	BroadcastSessionError(rootID, sessionKey, message string)
 	BroadcastSessionDone(rootID, sessionKey, requestID string)
+	BroadcastScheduledTaskDone(rootID, taskID, taskName, sessionKey, summary string)
+	BroadcastScheduledTaskFailed(rootID, taskID, taskName, sessionKey, message string)
 }
 
 type Task struct {
@@ -69,7 +71,7 @@ func NewStore(root fs.RootInfo) *Store {
 func (s *Store) List() ([]Task, error) {
 	data, err := s.root.ReadMetaFile(tasksMetaFile)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return []Task{}, nil
 		}
 		return nil, err
@@ -437,6 +439,7 @@ func (s *Service) runTask(ctx context.Context, task Task, force bool) error {
 	manager, err := s.registry.GetSessionManager(current.RootID)
 	if err != nil {
 		_ = s.recordRunError(current, err)
+		broadcaster.BroadcastScheduledTaskFailed(current.RootID, current.ID, current.Name, "", err.Error())
 		return err
 	}
 	sessionKey := strings.TrimSpace(current.SessionKey)
@@ -457,6 +460,7 @@ func (s *Service) runTask(ctx context.Context, task Task, force bool) error {
 		})
 		if err != nil {
 			_ = s.recordRunError(current, err)
+			broadcaster.BroadcastScheduledTaskFailed(current.RootID, current.ID, current.Name, "", err.Error())
 			return err
 		}
 		broadcaster.BroadcastSessionMetaUpdated(current.RootID, created)
@@ -507,7 +511,8 @@ func (s *Service) runTask(ctx context.Context, task Task, force bool) error {
 	now := time.Now().UTC()
 	if err != nil {
 		broadcaster.BroadcastSessionError(current.RootID, sessionKey, err.Error())
-		broadcaster.BroadcastSessionDone(current.RootID, sessionKey, "")
+		broadcaster.BroadcastSessionDone(current.RootID, sessionKey, "scheduled:"+current.ID)
+		broadcaster.BroadcastScheduledTaskFailed(current.RootID, current.ID, current.Name, sessionKey, err.Error())
 		_ = s.updateTask(current.RootID, current.ID, func(t *Task) {
 			t.LastRunAt = &now
 			t.LastError = err.Error()
@@ -515,7 +520,8 @@ func (s *Service) runTask(ctx context.Context, task Task, force bool) error {
 		})
 		return err
 	}
-	broadcaster.BroadcastSessionDone(current.RootID, sessionKey, "")
+	broadcaster.BroadcastSessionDone(current.RootID, sessionKey, "scheduled:"+current.ID)
+	broadcaster.BroadcastScheduledTaskDone(current.RootID, current.ID, current.Name, sessionKey, "")
 	return s.updateTask(current.RootID, current.ID, func(t *Task) {
 		t.SessionKey = sessionKey
 		t.LastRunAt = &now

@@ -52,6 +52,8 @@ func main() {
 		fmt.Fprintf(out, "  mindfs --foreground\n")
 		fmt.Fprintf(out, "  mindfs --status\n")
 		fmt.Fprintf(out, "  mindfs --version\n")
+		fmt.Fprintf(out, "  mindfs --update\n")
+		fmt.Fprintf(out, "  mindfs --uninstall\n")
 		fmt.Fprintf(out, "  mindfs --stop\n")
 		fmt.Fprintf(out, "  mindfs -addr :9000 /path/to/project\n")
 		fmt.Fprintf(out, "  mindfs -remove /path/to/project\n")
@@ -60,19 +62,35 @@ func main() {
 	addr := flag.String("addr", "127.0.0.1:7331", "listen address")
 	noRelayer := flag.Bool("no-relayer", false, "disable relay integration")
 	e2eeFlag := flag.Bool("e2ee", false, "enable end-to-end encryption for sensitive data")
+	webPushFlag := flag.Bool("web-push", true, "enable PWA Web Push notifications")
 	foreground := flag.Bool("foreground", false, "run in the foreground instead of as a background service")
 	stop := flag.Bool("stop", false, "stop the background mindfs service")
 	restart := flag.Bool("restart", false, "restart the background mindfs service")
 	statusFlag := flag.Bool("status", false, "show background service status")
 	versionFlag := flag.Bool("version", false, "show version")
+	updateFlag := flag.Bool("update", false, "check for and install the latest MindFS release")
+	uninstallFlag := flag.Bool("uninstall", false, "print the MindFS uninstall command")
 	bindRelay := flag.Bool("bind-relay", false, "start relay binding and print the relayer bind URL")
+	configFlag := flag.String("config", "", "mindfs startup config file; command-line flags override file values")
+	agentConfigFlag := flag.String("agent-config", "", "extra agents.json file for customizable agent(ACP-protocol) and shell")
 	remove := flag.Bool("remove", false, "remove the managed directory")
 	tlsFlag := flag.Bool("tls", false, "enable HTTPS (auto-generates self-signed cert if -cert/-key not provided)")
 	certFlag := flag.String("cert", "", "TLS certificate file (PEM); auto-generated if empty with -tls")
 	keyFlag := flag.String("key", "", "TLS private key file (PEM); auto-generated if empty with -tls")
 	flag.Parse()
+	explicitFlags := visitedFlags(flag.CommandLine)
+	startupCfg, err := loadStartupConfig(*configFlag)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		os.Exit(1)
+	}
+	applyStartupConfig(startupCfg, explicitFlags, addr, noRelayer, e2eeFlag, webPushFlag, foreground, bindRelay, tlsFlag, certFlag, keyFlag, agentConfigFlag)
 	if *versionFlag {
 		printVersion()
+		return
+	}
+	if *uninstallFlag {
+		printUninstallCommand()
 		return
 	}
 	internalRestart := os.Getenv(internalRestartEnvKey) == "1"
@@ -96,6 +114,14 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err.Error())
 		os.Exit(1)
+	}
+
+	if *updateFlag {
+		if err := handleUpdateCommand(context.Background(), *addr, *tlsFlag); err != nil {
+			fmt.Fprintln(os.Stderr, err.Error())
+			os.Exit(1)
+		}
+		return
 	}
 
 	if *statusFlag {
@@ -234,13 +260,15 @@ func main() {
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- app.Start(ctx, *addr, app.StartOptions{
-			NoRelayer:  *noRelayer,
-			Version:    version,
-			Args:       os.Args[1:],
-			E2EEConfig: e2eeResult.Config,
-			UseTLS:     *tlsFlag,
-			CertFile:   resolvedCert,
-			KeyFile:    resolvedKey,
+			NoRelayer:       *noRelayer,
+			Version:         version,
+			Args:            os.Args[1:],
+			AgentConfigPath: *agentConfigFlag,
+			E2EEConfig:      e2eeResult.Config,
+			WebPushEnabled:  *webPushFlag,
+			UseTLS:          *tlsFlag,
+			CertFile:        resolvedCert,
+			KeyFile:         resolvedKey,
 		})
 	}()
 	if err := waitForServer(*addr, *tlsFlag, 8*time.Second); err != nil {
@@ -327,6 +355,101 @@ func sanitizeAddrForFile(addr string) string {
 		return "default"
 	}
 	return b.String()
+}
+
+type startupConfig struct {
+	Addr          *string `json:"addr"`
+	NoRelayer     *bool   `json:"noRelayer"`
+	NoRelayerFlag *bool   `json:"no-relayer"`
+	E2EE          *bool   `json:"e2ee"`
+	WebPush       *bool   `json:"webPush"`
+	WebPushFlag   *bool   `json:"web-push"`
+	Foreground    *bool   `json:"foreground"`
+	BindRelay     *bool   `json:"bindRelay"`
+	BindRelayFlag *bool   `json:"bind-relay"`
+	TLS           *bool   `json:"tls"`
+	Cert          *string `json:"cert"`
+	Key           *string `json:"key"`
+	AgentConfig   *string `json:"agent-config"`
+}
+
+func loadStartupConfig(path string) (startupConfig, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return startupConfig{}, nil
+	}
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return startupConfig{}, fmt.Errorf("read config %s: %w", path, err)
+	}
+	var cfg startupConfig
+	if err := json.Unmarshal(payload, &cfg); err != nil {
+		return startupConfig{}, fmt.Errorf("decode config %s: %w", path, err)
+	}
+	return cfg, nil
+}
+
+func visitedFlags(flags *flag.FlagSet) map[string]bool {
+	visited := make(map[string]bool)
+	flags.Visit(func(f *flag.Flag) {
+		visited[f.Name] = true
+	})
+	return visited
+}
+
+func applyStartupConfig(
+	cfg startupConfig,
+	explicit map[string]bool,
+	addr *string,
+	noRelayer *bool,
+	e2ee *bool,
+	webPush *bool,
+	foreground *bool,
+	bindRelay *bool,
+	tlsFlag *bool,
+	cert *string,
+	key *string,
+	agentConfig *string,
+) {
+	if cfg.Addr != nil && !explicit["addr"] {
+		*addr = strings.TrimSpace(*cfg.Addr)
+	}
+	if value := firstBool(cfg.NoRelayer, cfg.NoRelayerFlag); value != nil && !explicit["no-relayer"] {
+		*noRelayer = *value
+	}
+	if cfg.E2EE != nil && !explicit["e2ee"] {
+		*e2ee = *cfg.E2EE
+	}
+	if value := firstBool(cfg.WebPush, cfg.WebPushFlag); value != nil && !explicit["web-push"] {
+		*webPush = *value
+	}
+	if cfg.Foreground != nil && !explicit["foreground"] {
+		*foreground = *cfg.Foreground
+	}
+	if value := firstBool(cfg.BindRelay, cfg.BindRelayFlag); value != nil && !explicit["bind-relay"] {
+		*bindRelay = *value
+	}
+	if cfg.TLS != nil && !explicit["tls"] {
+		*tlsFlag = *cfg.TLS
+	}
+	if cfg.Cert != nil && !explicit["cert"] {
+		*cert = strings.TrimSpace(*cfg.Cert)
+	}
+	if cfg.Key != nil && !explicit["key"] {
+		*key = strings.TrimSpace(*cfg.Key)
+	}
+	if cfg.AgentConfig != nil && !explicit["agent-config"] {
+		*agentConfig = strings.TrimSpace(*cfg.AgentConfig)
+	}
+}
+
+func firstBool(values ...*bool) *bool {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
 }
 
 func startBackgroundProcess(logPath string) error {
@@ -444,6 +567,59 @@ func stopService(addr string, useTLS bool, pidPath string) error {
 
 func printVersion() {
 	fmt.Fprintf(os.Stdout, "mindfs version: %s\n", version)
+}
+
+func printUninstallCommand() {
+	if runtime.GOOS == "windows" {
+		fmt.Fprintln(os.Stdout, "Run one of the following commands manually:")
+		fmt.Fprintln(os.Stdout, "")
+		fmt.Fprintln(os.Stdout, "Uninstall MindFS, keeping user config and project data:")
+		fmt.Fprintln(os.Stdout, "Download scripts/install.ps1 from https://github.com/a9gent/mindfs, then run it with -Uninstall.")
+		fmt.Fprintln(os.Stdout, "")
+		fmt.Fprintln(os.Stdout, "Purge MindFS, including user config and logs:")
+		fmt.Fprintln(os.Stdout, "Download scripts/install.ps1 from https://github.com/a9gent/mindfs, then run it with -Uninstall -Purge.")
+		return
+	}
+	fmt.Fprintln(os.Stdout, "Run one of the following commands manually:")
+	fmt.Fprintln(os.Stdout, "")
+	fmt.Fprintln(os.Stdout, "Uninstall MindFS, keeping user config and project data:")
+	fmt.Fprintln(os.Stdout, `installer="${TMPDIR:-/tmp}/mindfs-install.sh"`)
+	fmt.Fprintln(os.Stdout, `curl -fsSL https://raw.githubusercontent.com/a9gent/mindfs/main/scripts/install.sh -o "$installer"`)
+	fmt.Fprintln(os.Stdout, `bash "$installer" --uninstall`)
+	fmt.Fprintln(os.Stdout, "")
+	fmt.Fprintln(os.Stdout, "Purge MindFS, including user config and logs:")
+	fmt.Fprintln(os.Stdout, `installer="${TMPDIR:-/tmp}/mindfs-install.sh"`)
+	fmt.Fprintln(os.Stdout, `curl -fsSL https://raw.githubusercontent.com/a9gent/mindfs/main/scripts/install.sh -o "$installer"`)
+	fmt.Fprintln(os.Stdout, `bash "$installer" --uninstall --purge`)
+}
+
+func handleUpdateCommand(ctx context.Context, addr string, useTLS bool) error {
+	if runtime.GOOS == "windows" && serverRunning(addr, useTLS) {
+		return errors.New("mindfs service is running. Stop it before updating:\n  mindfs -stop\n  mindfs -update\n  mindfs")
+	}
+	fmt.Fprintln(os.Stdout, "Checking for updates...")
+	result, err := app.UpdateNow(ctx, app.UpdateOptions{
+		Version:  version,
+		Progress: os.Stdout,
+	})
+	if strings.TrimSpace(result.CurrentVersion) != "" {
+		fmt.Fprintf(os.Stdout, "current version: %s\n", result.CurrentVersion)
+	}
+	if strings.TrimSpace(result.LatestVersion) != "" {
+		fmt.Fprintf(os.Stdout, "latest version: %s\n", result.LatestVersion)
+	}
+	if err != nil {
+		return err
+	}
+	if !result.HasUpdate {
+		fmt.Fprintln(os.Stdout, "mindfs is already up to date")
+		return nil
+	}
+	if result.Installed {
+		fmt.Fprintln(os.Stdout, "Restart MindFS to use the new version:")
+		fmt.Fprintln(os.Stdout, "  mindfs -restart")
+	}
+	return nil
 }
 
 func printServiceStatus(addr string, useTLS bool, pidPath, logPath string) error {

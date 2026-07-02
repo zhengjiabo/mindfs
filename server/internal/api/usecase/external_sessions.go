@@ -10,6 +10,7 @@ import (
 	"time"
 
 	agenttypes "mindfs/server/internal/agent/types"
+	"mindfs/server/internal/apperr"
 	"mindfs/server/internal/session"
 )
 
@@ -51,6 +52,10 @@ type ImportExternalSessionsBatchItem struct {
 	ImportedCount  int    `json:"imported_count,omitempty"`
 	Success        bool   `json:"success"`
 	Error          string `json:"error,omitempty"`
+	ErrorCode      string `json:"error_code,omitempty"`
+	ErrorDetail    string `json:"error_detail,omitempty"`
+	ErrorPath      string `json:"error_path,omitempty"`
+	ErrorOperation string `json:"error_operation,omitempty"`
 }
 
 type ImportExternalSessionsBatchOutput struct {
@@ -242,6 +247,12 @@ func (s *Service) ImportExternalSessionsBatch(ctx context.Context, in ImportExte
 		if err != nil {
 			item.Success = false
 			item.Error = err.Error()
+			if appErr, ok := apperr.Classify(err); ok {
+				item.ErrorCode = appErr.Code
+				item.ErrorDetail = appErr.Detail
+				item.ErrorPath = appErr.Path
+				item.ErrorOperation = appErr.Op
+			}
 			out.Items = append(out.Items, item)
 			continue
 		}
@@ -299,19 +310,15 @@ func (s *Service) SyncExternalSessionDelta(ctx context.Context, in SyncExternalS
 		RootPath:       root.RootPath,
 		Agent:          agentName,
 		AgentSessionID: binding.AgentSessionID,
-		AfterTimestamp: lastTimestamp,
 	})
 	if err != nil {
 		return out, err
 	}
 
 	importedCount := 0
-	for _, exchange := range imported.Exchanges {
+	for _, exchange := range externalSessionDeltaAfterCtxSeq(imported.Exchanges, binding.AgentCtxSeq) {
 		role := strings.TrimSpace(exchange.Role)
 		if role != "user" && role != "agent" {
-			continue
-		}
-		if exchange.Timestamp.IsZero() || !exchange.Timestamp.After(lastTimestamp) {
 			continue
 		}
 		if err := manager.AddExchangeForAgentAt(ctx, current, role, exchange.Content, agentName, "", "", "", exchange.Timestamp); err != nil {
@@ -338,6 +345,16 @@ func (s *Service) SyncExternalSessionDelta(ctx context.Context, in SyncExternalS
 	out.LastTimestamp = lastExternalSyncTimestamp(latest.Exchanges)
 	log.Printf("[session/sync] external delta imported root=%s session=%s agent=%s agent_session_id=%s count=%d", strings.TrimSpace(in.RootID), strings.TrimSpace(in.Key), agentName, agentSessionID, importedCount)
 	return out, nil
+}
+
+func externalSessionDeltaAfterCtxSeq(exchanges []agenttypes.ImportedExchange, agentCtxSeq int) []agenttypes.ImportedExchange {
+	if agentCtxSeq <= 0 {
+		return exchanges
+	}
+	if agentCtxSeq >= len(exchanges) {
+		return nil
+	}
+	return exchanges[agentCtxSeq:]
 }
 
 func (s *Service) resolveExternalSessionImporter(agentName string) (agenttypes.ExternalSessionImporter, error) {

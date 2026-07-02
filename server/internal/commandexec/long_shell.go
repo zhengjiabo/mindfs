@@ -275,9 +275,9 @@ func shellRunScript(shell, command, startMarker, endPrefix string) string {
 		}
 	}
 	if base == "fish" {
-		return fmt.Sprintf("printf '\\n%s\\n'\n%s\nset -l __mindfs_status $status\nprintf '\\n%s%%s\\n' $__mindfs_status\n", shellQuote(startMarker), command, shellQuote(endPrefix))
+		return fmt.Sprintf("command printf '\\n%s\\n'\neval %s </dev/null\nset -l __mindfs_status $status\ncommand printf '\\n%s%%s\\n' $__mindfs_status\n", shellQuote(startMarker), shellQuote(command), shellQuote(endPrefix))
 	}
-	return fmt.Sprintf("printf '\\n%%s\\n' %s\n%s\n__mindfs_status=$?\nprintf '\\n%%s%%s\\n' %s \"$__mindfs_status\"\n", shellQuote(startMarker), command, shellQuote(endPrefix))
+	return fmt.Sprintf("command printf '\\n%%s\\n' %s\neval %s </dev/null\n__mindfs_status=$?\ncommand printf '\\n%%s%%s\\n' %s \"$__mindfs_status\"\n", shellQuote(startMarker), shellQuote(command), shellQuote(endPrefix))
 }
 
 func shellQuote(value string) string {

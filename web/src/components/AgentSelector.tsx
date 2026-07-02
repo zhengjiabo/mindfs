@@ -629,21 +629,7 @@ export function AgentSelector({
                           justifySelf: "center",
                         }}
                       >
-                        <svg
-                          width="12"
-                          height="12"
-                          viewBox="0 0 12 12"
-                          fill="none"
-                          aria-hidden="true"
-                        >
-                          <path
-                            d="M4 2.5 8 6 4 9.5"
-                            stroke="currentColor"
-                            strokeWidth="1.5"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                          />
-                        </svg>
+                        <SelectorChevron expanded={isExpanded} />
                       </button>
                     ) : (
                       <span
@@ -1073,29 +1059,35 @@ function SectionHeader({
             {value}
           </span>
         ) : null}
-        <svg
-          width="12"
-          height="12"
-          viewBox="0 0 12 12"
-          fill="none"
-          aria-hidden="true"
-          style={{
-            flexShrink: 0,
-            color: expanded ? "#3b82f6" : "var(--text-secondary)",
-            transform: expanded ? "rotate(90deg)" : "rotate(0deg)",
-            transition: "transform 0.16s ease",
-          }}
-        >
-          <path
-            d="M4 2.5 8 6 4 9.5"
-            stroke="currentColor"
-            strokeWidth="1.5"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        </svg>
+        <SelectorChevron expanded={expanded} />
       </span>
     </button>
+  );
+}
+
+function SelectorChevron({ expanded }: { expanded: boolean }) {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 12 12"
+      fill="none"
+      aria-hidden="true"
+      style={{
+        flexShrink: 0,
+        color: expanded ? "#3b82f6" : "#9ca3af",
+        transform: expanded ? "rotate(90deg)" : "rotate(0deg)",
+        transition: "transform 0.16s ease",
+      }}
+    >
+      <path
+        d="M4 2.5 8 6 4 9.5"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
 }
 

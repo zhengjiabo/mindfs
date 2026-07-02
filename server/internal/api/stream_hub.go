@@ -46,6 +46,7 @@ type SessionPendingState struct {
 	RootID       string
 	SessionTitle string
 	Active       bool
+	QueueFrozen  bool
 	User         *PendingUserMessage
 	Queue        []QueuedUserMessage
 	ReplyingList []StreamEvent
@@ -77,6 +78,13 @@ type ReplyingSessionState struct {
 	Status       string    `json:"status"`
 	Summary      string    `json:"summary"`
 	UpdatedAt    time.Time `json:"updatedAt"`
+}
+
+type PendingSessionSnapshot struct {
+	RootID       string
+	SessionTitle string
+	Summary      string
+	UpdatedAt    time.Time
 }
 
 type replayStep struct {
@@ -135,13 +143,44 @@ func buildSessionStreamResponse(rootID, sessionKey string, event *StreamEvent) W
 	}
 }
 
-func buildSessionDoneResponse(rootID, sessionKey, requestID string) WSResponse {
+func buildSessionDoneResponse(rootID, sessionKey, requestID string, replay bool) WSResponse {
+	payload := map[string]any{
+		"root_id":     rootID,
+		"session_key": sessionKey,
+	}
+	if replay {
+		payload["replay"] = true
+	}
+	return WSResponse{
+		ID:      requestID,
+		Type:    "session.done",
+		Payload: payload,
+	}
+}
+
+func buildSlashCommandStreamResponse(rootID, sessionKey, command, requestID string, event *StreamEvent) WSResponse {
 	return WSResponse{
 		ID:   requestID,
-		Type: "session.done",
+		Type: "session.slash_command.stream",
 		Payload: map[string]any{
 			"root_id":     rootID,
 			"session_key": sessionKey,
+			"command":     command,
+			"request_id":  requestID,
+			"event":       event,
+		},
+	}
+}
+
+func buildSlashCommandDoneResponse(rootID, sessionKey, command, requestID string) WSResponse {
+	return WSResponse{
+		ID:   requestID,
+		Type: "session.slash_command.done",
+		Payload: map[string]any{
+			"root_id":     rootID,
+			"session_key": sessionKey,
+			"command":     command,
+			"request_id":  requestID,
 		},
 	}
 }
@@ -187,13 +226,14 @@ func buildSessionUserMessageResponse(rootID, sessionKey, sessionType, sessionNam
 	}
 }
 
-func buildSessionQueueUpdatedResponse(rootID, sessionKey string, queue []QueuedUserMessage) WSResponse {
+func buildSessionQueueUpdatedResponse(rootID, sessionKey string, queue []QueuedUserMessage, frozen bool) WSResponse {
 	return WSResponse{
 		Type: "session.queue.updated",
 		Payload: map[string]any{
-			"root_id":     rootID,
-			"session_key": sessionKey,
-			"queue":       queue,
+			"root_id":      rootID,
+			"session_key":  sessionKey,
+			"queue":        queue,
+			"queue_frozen": frozen,
 		},
 	}
 }
@@ -354,14 +394,14 @@ func cloneQueue(queue []QueuedUserMessage) []QueuedUserMessage {
 	return out
 }
 
-func (h *StreamHub) queueSnapshot(sessionKey string) (string, []QueuedUserMessage) {
+func (h *StreamHub) queueSnapshot(sessionKey string) (string, []QueuedUserMessage, bool) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	state := h.pendingSessions[sessionKey]
 	if state == nil {
-		return "", nil
+		return "", nil, false
 	}
-	return state.RootID, cloneQueue(state.Queue)
+	return state.RootID, cloneQueue(state.Queue), state.QueueFrozen
 }
 
 func (h *StreamHub) EnqueueSessionMessage(rootID, sessionKey, sessionTitle string, item QueuedUserMessage) []QueuedUserMessage {
@@ -423,6 +463,39 @@ func (h *StreamHub) UpdateQueuedSessionMessage(sessionKey, queueID, content stri
 	return cloneQueue(state.Queue)
 }
 
+func (h *StreamHub) FreezeQueuedSessionMessages(sessionKey string) ([]QueuedUserMessage, bool) {
+	if blank(sessionKey) {
+		return nil, false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	state := h.pendingSessions[sessionKey]
+	if state == nil || len(state.Queue) == 0 {
+		return nil, false
+	}
+	state.QueueFrozen = true
+	state.UpdatedAt = time.Now().UTC()
+	return cloneQueue(state.Queue), true
+}
+
+func (h *StreamHub) UnfreezeQueuedSessionMessages(sessionKey string) ([]QueuedUserMessage, bool) {
+	if blank(sessionKey) {
+		return nil, false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	state := h.pendingSessions[sessionKey]
+	if state == nil || !state.QueueFrozen {
+		if state == nil {
+			return nil, false
+		}
+		return cloneQueue(state.Queue), false
+	}
+	state.QueueFrozen = false
+	state.UpdatedAt = time.Now().UTC()
+	return cloneQueue(state.Queue), true
+}
+
 func (h *StreamHub) PopQueuedSessionMessage(sessionKey, queueID string) (QueuedUserMessage, []QueuedUserMessage, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -431,10 +504,10 @@ func (h *StreamHub) PopQueuedSessionMessage(sessionKey, queueID string) (QueuedU
 		return QueuedUserMessage{}, nil, false
 	}
 	index := 0
-	if strings.TrimSpace(queueID) != "" {
+	if trimmedQueueID := strings.TrimSpace(queueID); trimmedQueueID != "" {
 		index = -1
 		for i := range state.Queue {
-			if state.Queue[i].ID == queueID {
+			if state.Queue[i].ID == trimmedQueueID {
 				index = i
 				break
 			}
@@ -442,6 +515,8 @@ func (h *StreamHub) PopQueuedSessionMessage(sessionKey, queueID string) (QueuedU
 		if index < 0 {
 			return QueuedUserMessage{}, cloneQueue(state.Queue), false
 		}
+	} else if state.QueueFrozen {
+		return QueuedUserMessage{}, cloneQueue(state.Queue), false
 	}
 	item := state.Queue[index]
 	state.Queue = append(state.Queue[:index], state.Queue[index+1:]...)
@@ -472,6 +547,7 @@ func (h *StreamHub) PromoteQueuedSessionMessage(sessionKey, queueID string) ([]Q
 		copy(state.Queue[1:index+1], state.Queue[0:index])
 		state.Queue[0] = item
 	}
+	state.QueueFrozen = false
 	state.UpdatedAt = time.Now().UTC()
 	h.clearReplayStatesForSessionLocked(sessionKey)
 	return cloneQueue(state.Queue), true
@@ -501,6 +577,21 @@ func (h *StreamHub) GetPendingUserExchange(sessionKey string) *session.Exchange 
 		return nil
 	}
 	return cloneUserExchange(state.User)
+}
+
+func (h *StreamHub) PendingSessionSnapshot(sessionKey string) PendingSessionSnapshot {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	state := h.pendingSessions[sessionKey]
+	if state == nil {
+		return PendingSessionSnapshot{}
+	}
+	return PendingSessionSnapshot{
+		RootID:       state.RootID,
+		SessionTitle: state.SessionTitle,
+		Summary:      state.Summary,
+		UpdatedAt:    state.UpdatedAt,
+	}
 }
 
 func (h *StreamHub) AppendReplyEvent(sessionKey string, event StreamEvent) {
@@ -682,7 +773,7 @@ func (h *StreamHub) BroadcastSessionDone(rootID, sessionKey, requestID string) {
 		Completed: time.Now().UTC(),
 	}
 	h.mu.Unlock()
-	resp := buildSessionDoneResponse(rootID, sessionKey, requestID)
+	resp := buildSessionDoneResponse(rootID, sessionKey, requestID, false)
 	for _, clientID := range h.GetSessionClientIDs(sessionKey, false) {
 		h.SendToClient(clientID, resp)
 	}
@@ -713,7 +804,8 @@ func (h *StreamHub) BroadcastSessionUserMessage(
 }
 
 func (h *StreamHub) BroadcastSessionQueueUpdated(rootID, sessionKey string, queue []QueuedUserMessage) {
-	resp := buildSessionQueueUpdatedResponse(rootID, sessionKey, queue)
+	_, _, frozen := h.queueSnapshot(sessionKey)
+	resp := buildSessionQueueUpdatedResponse(rootID, sessionKey, queue, frozen)
 	for _, clientID := range h.GetSessionClientIDs(sessionKey, false) {
 		h.SendToClient(clientID, resp)
 	}
@@ -727,7 +819,7 @@ func lastRunes(value string, max int) string {
 		return value
 	}
 	runes := []rune(value)
-	return string(runes[len(runes)-max:])
+	return "..." + string(runes[len(runes)-max:])
 }
 
 func (h *StreamHub) WriteJSON(clientID string, conn *websocket.Conn, value any) error {
@@ -810,14 +902,14 @@ func (h *StreamHub) replayStepToClient(rootID, clientID, sessionKey string, even
 }
 
 func (h *StreamHub) replayQueueToClient(rootID, clientID, sessionKey string) {
-	stateRoot, queue := h.queueSnapshot(sessionKey)
+	stateRoot, queue, frozen := h.queueSnapshot(sessionKey)
 	if rootID == "" {
 		rootID = stateRoot
 	}
 	if rootID == "" || len(queue) == 0 {
 		return
 	}
-	h.SendToClient(clientID, buildSessionQueueUpdatedResponse(rootID, sessionKey, queue))
+	h.SendToClient(clientID, buildSessionQueueUpdatedResponse(rootID, sessionKey, queue, frozen))
 }
 
 func (h *StreamHub) replayCompletionToClient(rootID, clientID, sessionKey string) {
@@ -830,14 +922,9 @@ func (h *StreamHub) replayCompletionToClient(rootID, clientID, sessionKey string
 		h.mu.Unlock()
 		return
 	}
-	if time.Since(completed.Completed) > 2*time.Minute {
-		delete(h.completed, sessionKey)
-		h.mu.Unlock()
-		return
-	}
 	requestID := completed.RequestID
 	h.mu.Unlock()
-	h.SendToClient(clientID, buildSessionDoneResponse(rootID, sessionKey, requestID))
+	h.SendToClient(clientID, buildSessionDoneResponse(rootID, sessionKey, requestID, true))
 }
 
 func (h *StreamHub) isReplayClientLocked(clientID, sessionKey string) bool {

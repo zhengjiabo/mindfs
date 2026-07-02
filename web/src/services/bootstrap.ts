@@ -109,6 +109,7 @@ class BootstrapService {
     e2eeService.setSecret(trimmed);
     try {
       await e2eeService.ensureSession();
+      await this.refreshRelayStatus();
       this.setState({ phase: "ready", error: "" });
       return this.snapshot();
     } catch (err) {
@@ -133,6 +134,7 @@ class BootstrapService {
         if (e2ee.secretPresent) {
           try {
             await e2eeService.ensureSession();
+            await this.refreshRelayStatus();
             this.setState({ phase: "ready", error: "" });
           } catch (err) {
             if (err instanceof Error && err.message === "e2ee_proof_invalid") {

@@ -1,13 +1,16 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
 	"mindfs/server/internal/agent"
+	agenttypes "mindfs/server/internal/agent/types"
 	"mindfs/server/internal/e2ee"
 )
 
@@ -38,6 +41,23 @@ func TestParseClientContext(t *testing.T) {
 	}
 }
 
+func TestAppendReplyEventPrefixesTruncatedSummary(t *testing.T) {
+	hub := NewStreamHub(nil)
+
+	hub.AppendReplyEvent("sess-1", StreamEvent{
+		Type: "message_chunk",
+		Data: agenttypes.MessageChunk{Content: strings.Repeat("前", 51) + "后"},
+	})
+
+	snapshot := hub.PendingSessionSnapshot("sess-1")
+	if !strings.HasPrefix(snapshot.Summary, "...") {
+		t.Fatalf("summary should start with ellipsis when truncated, got %q", snapshot.Summary)
+	}
+	if !strings.HasSuffix(snapshot.Summary, "后") {
+		t.Fatalf("summary should keep the end of the content, got %q", snapshot.Summary)
+	}
+}
+
 func TestSessionMessageContextHasNoDeadlineWithoutAppContext(t *testing.T) {
 	handler := &WSHandler{}
 
@@ -65,6 +85,127 @@ func TestSessionMessageContextUsesAgentPoolLifecycle(t *testing.T) {
 	case <-ctx.Done():
 	default:
 		t.Fatal("expected session message context to be canceled when agent pool closes")
+	}
+}
+
+func TestTurnUpdateTrackerWaitIdleWaitsForSettleWindow(t *testing.T) {
+	tracker := newTurnUpdateTracker()
+	tracker.Begin()
+	done := make(chan bool, 1)
+	go func() {
+		done <- tracker.WaitIdle(context.Background(), 30*time.Millisecond, 500*time.Millisecond)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("WaitIdle returned while update was in-flight")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	tracker.End()
+	select {
+	case ok := <-done:
+		if !ok {
+			t.Fatal("WaitIdle returned false after update finished")
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("WaitIdle did not return after settle window")
+	}
+}
+
+func TestTurnUpdateTrackerWaitIdleTimesOutWhenUpdateNeverEnds(t *testing.T) {
+	tracker := newTurnUpdateTracker()
+	tracker.Begin()
+
+	if tracker.WaitIdle(context.Background(), 10*time.Millisecond, 30*time.Millisecond) {
+		t.Fatal("expected WaitIdle to time out while update remains in-flight")
+	}
+}
+
+func TestStreamHubFrozenQueueBlocksAutomaticPopUntilUnfrozen(t *testing.T) {
+	hub := NewStreamHub(nil)
+	rootID := "root"
+	sessionKey := "session"
+
+	hub.EnqueueSessionMessage(rootID, sessionKey, "Session", QueuedUserMessage{
+		ID: "first",
+		PendingUserMessage: PendingUserMessage{
+			Content:   "first message",
+			Timestamp: time.Now().UTC(),
+		},
+	})
+	hub.EnqueueSessionMessage(rootID, sessionKey, "Session", QueuedUserMessage{
+		ID: "second",
+		PendingUserMessage: PendingUserMessage{
+			Content:   "second message",
+			Timestamp: time.Now().UTC(),
+		},
+	})
+
+	frozenQueue, frozen := hub.FreezeQueuedSessionMessages(sessionKey)
+	if !frozen {
+		t.Fatal("expected queue freeze to succeed")
+	}
+	if len(frozenQueue) != 2 {
+		t.Fatalf("expected frozen queue snapshot to contain 2 items, got %d", len(frozenQueue))
+	}
+	if _, queue, ok := hub.PopQueuedSessionMessage(sessionKey, ""); ok {
+		t.Fatal("expected frozen queue to block automatic pop")
+	} else if len(queue) != 2 {
+		t.Fatalf("expected frozen queue to remain intact, got %d items", len(queue))
+	}
+
+	queue, ok := hub.PromoteQueuedSessionMessage(sessionKey, "second")
+	if !ok {
+		t.Fatal("expected promote to succeed")
+	}
+	if len(queue) != 2 || queue[0].ID != "second" {
+		t.Fatalf("expected promoted item at queue head, got %#v", queue)
+	}
+
+	item, queue, ok := hub.PopQueuedSessionMessage(sessionKey, "")
+	if !ok {
+		t.Fatal("expected promoted queue to be unfrozen")
+	}
+	if item.ID != "second" {
+		t.Fatalf("expected promoted item to pop first, got %q", item.ID)
+	}
+	if len(queue) != 1 || queue[0].ID != "first" {
+		t.Fatalf("expected remaining queue to contain first item, got %#v", queue)
+	}
+}
+
+func TestStreamHubUnfreezeQueueAllowsAutomaticPop(t *testing.T) {
+	hub := NewStreamHub(nil)
+	sessionKey := "session"
+	hub.EnqueueSessionMessage("root", sessionKey, "Session", QueuedUserMessage{
+		ID: "first",
+		PendingUserMessage: PendingUserMessage{
+			Content:   "first message",
+			Timestamp: time.Now().UTC(),
+		},
+	})
+	_, frozen := hub.FreezeQueuedSessionMessages(sessionKey)
+	if !frozen {
+		t.Fatal("expected queue freeze to succeed")
+	}
+
+	unfrozenQueue, changed := hub.UnfreezeQueuedSessionMessages(sessionKey)
+	if !changed {
+		t.Fatal("expected queue unfreeze to report changed")
+	}
+	if len(unfrozenQueue) != 1 {
+		t.Fatalf("expected unfreeze queue snapshot to contain 1 item, got %d", len(unfrozenQueue))
+	}
+	item, queue, ok := hub.PopQueuedSessionMessage(sessionKey, "")
+	if !ok {
+		t.Fatal("expected automatic pop after unfreeze")
+	}
+	if item.ID != "first" {
+		t.Fatalf("expected first item, got %q", item.ID)
+	}
+	if len(queue) != 0 {
+		t.Fatalf("expected empty queue, got %#v", queue)
 	}
 }
 

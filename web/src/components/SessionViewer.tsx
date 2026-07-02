@@ -12,6 +12,7 @@ import { savePrompt } from "../services/prompts";
 import { reportError } from "../services/error";
 import { rootBadgeButtonStyle } from "./rootBadgeStyle";
 import { copyText } from "../services/clipboard";
+import type { AgentStatus } from "../services/agents";
 
 type SessionItem = {
   key?: string;
@@ -31,6 +32,7 @@ type SessionItem = {
     role?: string;
     agent?: string;
     model?: string;
+    model_display_name?: string;
     effort?: string;
     fast_service?: string;
     content?: string;
@@ -41,6 +43,7 @@ type SessionItem = {
     };
   }>;
   closed_at?: string;
+  source?: string;
   related_files?: RelatedFile[];
   exchange_aux?: Record<string, ExchangeAux[]>;
 };
@@ -48,6 +51,21 @@ type SessionItem = {
 type SessionViewerProps = {
   session: SessionItem | null;
   loading?: boolean;
+  slashCommandResult?: {
+    command: string;
+    content: string;
+    status: "running" | "complete" | "failed";
+    error?: string;
+    loginNotice?: {
+      status?: string;
+      loginId?: string;
+      verificationUrl?: string;
+      userCode?: string;
+      error?: string;
+      authMode?: string;
+      planType?: string;
+    };
+  } | null;
   rootId?: string | null;
   rootPath?: string | null;
   interactionMode?: "main" | "drawer";
@@ -67,7 +85,9 @@ type SessionViewerProps = {
     answers: Record<string, string>;
   }) => void | Promise<void>;
   onEditUserMessage?: (content: string) => void;
+  onForkAgentMessage?: (seq: number) => void | Promise<void>;
   targetSeqRequestKey?: string | number;
+  agents?: AgentStatus[];
 };
 
 type AskUserQuestionOption = {
@@ -227,11 +247,34 @@ function formatCompactTokenCount(value: number) {
   return String(Math.round(value));
 }
 
-function formatAssistantExchangeMeta(item: TimelineItem): string {
+function modelDisplayName(
+  agents: AgentStatus[] | undefined,
+  agentName?: string,
+  modelID?: string,
+): string {
+  const model = `${modelID || ""}`.trim();
+  if (!model) {
+    return "";
+  }
+  const agent = (agents || []).find(
+    (item) => item.name === `${agentName || ""}`.trim(),
+  );
+  const match = (agent?.models || []).find((item) => item.id === model);
+  return `${match?.name || ""}`.trim() || model;
+}
+
+function formatAssistantExchangeMeta(
+  item: TimelineItem,
+  agents?: AgentStatus[],
+): string {
   if (item.type !== "assistant_text") {
     return "";
   }
-  const parts = [item.model, item.effort]
+  const parts = [
+    `${item.modelDisplayName || ""}`.trim() ||
+      modelDisplayName(agents, item.agent, item.model),
+    item.effort,
+  ]
     .map((value) => `${value || ""}`.trim())
     .filter(Boolean);
   if (`${item.fastService || ""}`.trim().toLowerCase() === "on") {
@@ -356,7 +399,74 @@ const formatTodoToolCallInput = (rawInput: string): string => {
 
 function isAuxiliaryTimelineItem(item: TimelineItem | null): boolean {
   return (
-    item?.type === "tool" || item?.type === "thought" || item?.type === "todo"
+    item?.type === "tool" ||
+    item?.type === "thought" ||
+    item?.type === "todo" ||
+    item?.type === "plan" ||
+    item?.type === "compact"
+  );
+}
+
+function PlanUpdateCard({ content, rootId }: { content: string; rootId?: string | null }) {
+  return (
+    <div
+      style={{
+        width: "100%",
+        minWidth: 0,
+        borderRadius: "10px",
+        border: "1px solid rgba(59, 130, 246, 0.24)",
+        background: "linear-gradient(180deg, rgba(59, 130, 246, 0.08), rgba(59, 130, 246, 0.03))",
+        overflow: "hidden",
+      }}
+    >
+      <div
+        style={{
+          padding: "6px 8px",
+          fontSize: "12px",
+          fontWeight: 600,
+          color: "var(--text-primary)",
+          borderBottom: "1px solid var(--border-color)",
+        }}
+      >
+        Plan
+      </div>
+      <div style={{ padding: "10px" }}>
+        <MarkdownViewer content={content || ""} root={rootId || undefined} />
+      </div>
+    </div>
+  );
+}
+
+function CompactNoticeCard({
+  status,
+  summary,
+}: {
+  status?: string;
+  summary?: string;
+}) {
+  const normalizedStatus = `${status || ""}`.toLowerCase();
+  const label =
+    normalizedStatus === "running"
+      ? "Compacting context"
+      : normalizedStatus === "error"
+        ? "Context compaction failed"
+        : "Context compacted";
+  return (
+    <div
+      style={{
+        width: "100%",
+        minWidth: 0,
+        borderRadius: "10px",
+        border: "1px solid rgba(148, 163, 184, 0.28)",
+        background: "rgba(148, 163, 184, 0.08)",
+        padding: "10px",
+        color: "var(--text-secondary)",
+        fontSize: "13px",
+      }}
+    >
+      <div style={{ fontWeight: 600, color: "var(--text-primary)" }}>{label}</div>
+      {summary ? <div style={{ marginTop: "6px" }}>{summary}</div> : null}
+    </div>
   );
 }
 
@@ -439,6 +549,22 @@ function getAskUserQuestions(toolCall: Partial<ToolCall>): AskUserQuestionItem[]
   }
 }
 
+function getAskUserAnswers(toolCall: Partial<ToolCall>): Record<string, string> {
+  const raw = toolCall.meta?.answers;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return {};
+  }
+  const answers: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    const cleanKey = `${key || ""}`.trim();
+    const cleanValue = `${value || ""}`.trim();
+    if (cleanKey && cleanValue) {
+      answers[cleanKey] = cleanValue;
+    }
+  }
+  return answers;
+}
+
 function AskUserIcon() {
   return (
     <svg
@@ -461,6 +587,29 @@ function AskUserIcon() {
   );
 }
 
+function ForkIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden="true"
+      style={{ transform: "rotate(180deg) scaleX(-1)" }}
+    >
+      <path d="M0 0h24v24H0z" fill="none" />
+      <path
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.5"
+        d="M17 7a2 2 0 1 0 0-4a2 2 0 0 0 0 4M7 7a2 2 0 1 0 0-4a2 2 0 0 0 0 4m0 14a2 2 0 1 0 0-4a2 2 0 0 0 0 4M7 7v10M17 7v1c0 2.5-2 3-2 3l-6 2s-2 .5-2 3v1"
+      />
+    </svg>
+  );
+}
+
 function AskUserQuestionCard({
   toolCall,
   rootId,
@@ -477,10 +626,8 @@ function AskUserQuestionCard({
   onAnswer?: SessionViewerProps["onAskUserAnswer"];
 }) {
   const questions = getAskUserQuestions(toolCall);
-  const [answers, setAnswers] = useState<Record<string, string>>({});
   const [focusedCustomAnswerKey, setFocusedCustomAnswerKey] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [submitted, setSubmitted] = useState(false);
   const status = `${toolCall.status || ""}`.toLowerCase();
   const isCurrent =
     status === "running" || status === "pending" || status === "in_progress";
@@ -488,6 +635,11 @@ function AskUserQuestionCard({
   const toolUseId =
     toolCall.callId ||
     (typeof toolCall.meta?.toolUseId === "string" ? toolCall.meta.toolUseId : "");
+  const persistedAnswers = getAskUserAnswers(toolCall);
+  const persistedAnswersKey = JSON.stringify(persistedAnswers);
+  const hasPersistedAnswers = Object.keys(persistedAnswers).length > 0;
+  const [answers, setAnswers] = useState<Record<string, string>>(persistedAnswers);
+  const [submitted, setSubmitted] = useState(hasPersistedAnswers);
   const firstQuestion = questions[0] || {};
   const questionTitle = `${firstQuestion.question || ""}`.trim();
   const questionHeader = `${firstQuestion.header || ""}`.trim();
@@ -508,6 +660,17 @@ function AskUserQuestionCard({
     questions.every((_, index) => (answers[`q_${index}`] || "").trim() !== "") &&
     !submitting &&
     !submitted;
+
+  useEffect(() => {
+    if (hasPersistedAnswers) {
+      setAnswers(persistedAnswers);
+      setSubmitted(true);
+      setExpanded(false);
+      return;
+    }
+    setAnswers({});
+    setSubmitted(false);
+  }, [toolUseId, persistedAnswersKey, hasPersistedAnswers]);
 
   useEffect(() => {
     if (submitted) {
@@ -809,6 +972,7 @@ function shouldDefaultCollapseRelatedFiles(
 function SessionViewerInner({
   session,
   loading = false,
+  slashCommandResult = null,
   rootId,
   rootPath,
   interactionMode = "main",
@@ -820,6 +984,8 @@ function SessionViewerInner({
   onRemoveRelatedFile,
   onAskUserAnswer,
   onEditUserMessage,
+  onForkAgentMessage,
+  agents,
 }: SessionViewerProps) {
   const [showAllFiles, setShowAllFiles] = useState(false);
   const [relatedFilesCollapsed, setRelatedFilesCollapsed] = useState(false);
@@ -843,13 +1009,14 @@ function SessionViewerInner({
   const relatedFilesDefaultStateRef = useRef<string>("");
   const sessionKey = session?.key || session?.session_key || null;
   const exchanges = Array.isArray(session?.exchanges) ? session.exchanges : [];
+  const isAwaiting = !!(session as any)?.pending;
   const { timeline, isStreaming, streamVersion, streamStatusText } = useSessionStream(
     sessionKey,
     exchanges,
     session?.exchange_aux || {},
     session?.context_window,
+    isAwaiting,
   );
-  const isAwaiting = !!(session as any)?.pending;
   const shouldStickToBottomRef = useRef(true);
   const lastSessionKeyRef = useRef<string | null>(null);
   const targetSeqScrollKeyRef = useRef("");
@@ -927,7 +1094,7 @@ if (useInnerScrollContainer && !container) {
     if (shouldStickToBottomRef.current) {
       scrollEndRef.current.scrollIntoView({ behavior: "auto", block: "end" });
     }
-  }, [sessionKey, timeline, isStreaming, streamVersion, useInnerScrollContainer]);
+  }, [sessionKey, timeline, isStreaming, streamVersion, slashCommandResult, useInnerScrollContainer]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -1142,7 +1309,6 @@ if (useInnerScrollContainer && !container) {
       const tc = item.toolCall || {};
       const isAskUser =
         `${tc.kind || ""}`.toLowerCase() === "ask_user" &&
-        `${tc.status || ""}`.toLowerCase() !== "complete" &&
         getAskUserQuestions(tc).length > 0;
       const isUserShell =
         `${tc.kind || ""}`.toLowerCase() === "execute" &&
@@ -1192,6 +1358,23 @@ if (useInnerScrollContainer && !container) {
         </div>
       );
     }
+    if (item.type === "plan") {
+      return (
+        <div key={timelineItemKey} style={{ marginTop: spacing }}>
+          <PlanUpdateCard content={item.planUpdate?.content || ""} rootId={rootId} />
+        </div>
+      );
+    }
+    if (item.type === "compact") {
+      return (
+        <div key={timelineItemKey} style={{ marginTop: spacing }}>
+          <CompactNoticeCard
+            status={item.compactNotice?.status}
+            summary={item.compactNotice?.summary}
+          />
+        </div>
+      );
+    }
     const isUser = item.type === "user_text";
     const next = idx + 1 < timeline.length ? timeline[idx + 1] : null;
     const hasFollowingAssistantFlow =
@@ -1223,8 +1406,9 @@ if (useInnerScrollContainer && !container) {
       ? collectAssistantFlowMarkdown(timeline, idx)
       : "";
     const assistantExchangeMeta = !isUser
-      ? formatAssistantExchangeMeta(item)
+      ? formatAssistantExchangeMeta(item, agents)
       : "";
+    const canForkAgentMessage = !isUser && Number(item.seq || 0) > 0 && !!onForkAgentMessage;
     return (
       <div
         key={timelineItemKey}
@@ -1533,6 +1717,7 @@ if (useInnerScrollContainer && !container) {
             >
               <MarkdownViewer
                 content={item.content || ""}
+                root={rootId || undefined}
                 onFileClick={onFileClickRef.current}
               />
             </div>
@@ -1622,6 +1807,22 @@ if (useInnerScrollContainer && !container) {
                     </svg>
                   )}
                 </button>
+                {canForkAgentMessage ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const seq = Number(item.seq || 0);
+                      if (seq > 0) {
+                        void onForkAgentMessage?.(seq);
+                      }
+                    }}
+                    style={userMetaButtonStyle}
+                    aria-label="从此消息 fork"
+                    title="从此消息 fork"
+                  >
+                    <ForkIcon />
+                  </button>
+                ) : null}
                 <AgentIcon
                   agentName={item.agent || ""}
                   style={{ width: "12px", height: "12px" }}
@@ -1635,6 +1836,206 @@ if (useInnerScrollContainer && !container) {
             )}
           </div>
         )}
+      </div>
+    );
+  };
+
+  const renderSlashCommandResult = () => {
+    if (!slashCommandResult) {
+      return null;
+    }
+    const commandLabel = `/${slashCommandResult.command || "status"}`;
+    const loginNotice = slashCommandResult.loginNotice;
+    const isLogin = (slashCommandResult.command || "") === "login";
+    const content =
+      slashCommandResult.error ||
+      loginNotice?.error ||
+      slashCommandResult.content ||
+      (slashCommandResult.status === "running"
+        ? isLogin
+          ? "等待登录完成..."
+          : "正在获取状态..."
+        : "");
+    const loginCodeCopyKey = loginNotice?.loginId
+      ? `login-code:${loginNotice.loginId}`
+      : `login-code:${slashCommandResult.sessionKey}`;
+    const loginCodeCopied = !!copiedMessageKeys[loginCodeCopyKey];
+    return (
+      <div
+        style={{
+          marginTop: hasVisibleTimeline ? "18px" : "0",
+          width: "100%",
+          boxSizing: "border-box",
+          border: "1px solid rgba(148,163,184,0.36)",
+          background: "rgba(148,163,184,0.10)",
+          borderRadius: "8px",
+          padding: "10px 12px",
+          color: "var(--text-primary)",
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: "8px",
+            marginBottom: content ? "6px" : 0,
+            fontSize: "11px",
+            lineHeight: 1.4,
+            color: "var(--text-secondary)",
+          }}
+        >
+          <span style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" }}>
+            {commandLabel}
+          </span>
+          <span>
+            {slashCommandResult.status === "running"
+              ? "运行中"
+              : slashCommandResult.status === "failed"
+                ? "失败"
+                : "完成"}
+          </span>
+        </div>
+        {isLogin && loginNotice?.userCode ? (
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: "8px",
+              fontSize: "13px",
+              lineHeight: 1.5,
+            }}
+          >
+            {loginNotice.verificationUrl ? (
+              <a
+                href={loginNotice.verificationUrl}
+                target="_blank"
+                rel="noreferrer"
+                style={{ color: "var(--accent)", overflowWrap: "anywhere" }}
+              >
+                {loginNotice.verificationUrl}
+              </a>
+            ) : null}
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+                flexWrap: "wrap",
+              }}
+            >
+              <span
+                style={{
+                  fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+                  fontSize: "20px",
+                  letterSpacing: "0",
+                  color: "var(--text-primary)",
+                }}
+              >
+                {loginNotice.userCode}
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  const userCode = loginNotice.userCode || "";
+                  if (!userCode) {
+                    reportError("clipboard.write_failed", "验证码为空，无法复制");
+                    return;
+                  }
+                  void copyText(userCode)
+                    .then(() => {
+                      setCopiedMessageKeys((prev) => ({
+                        ...prev,
+                        [loginCodeCopyKey]: true,
+                      }));
+                      if (copyResetTimersRef.current[loginCodeCopyKey]) {
+                        window.clearTimeout(
+                          copyResetTimersRef.current[loginCodeCopyKey],
+                        );
+                      }
+                      copyResetTimersRef.current[loginCodeCopyKey] =
+                        window.setTimeout(() => {
+                          setCopiedMessageKeys((prev) => {
+                            const next = { ...prev };
+                            delete next[loginCodeCopyKey];
+                            return next;
+                          });
+                          delete copyResetTimersRef.current[loginCodeCopyKey];
+                        }, 1000);
+                    })
+                    .catch((err) => {
+                      reportError(
+                        "clipboard.write_failed",
+                        String((err as Error)?.message || "复制失败"),
+                      );
+                    });
+                }}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  width: "22px",
+                  height: "22px",
+                  border: "none",
+                  background: "transparent",
+                  color: "var(--text-secondary)",
+                  borderRadius: "6px",
+                  padding: 0,
+                  cursor: "pointer",
+                }}
+                aria-label={loginCodeCopied ? "已复制验证码" : "复制验证码"}
+                title={loginCodeCopied ? "已复制" : "复制验证码"}
+              >
+                {loginCodeCopied ? (
+                  <span
+                    aria-hidden="true"
+                    style={{ fontSize: "13px", fontWeight: 800, lineHeight: 1 }}
+                  >
+                    ✓
+                  </span>
+                ) : (
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="14"
+                    height="14"
+                    viewBox="0 0 24 24"
+                    aria-hidden="true"
+                  >
+                    <path
+                      fill="currentColor"
+                      d="M20 2H10c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h10c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2m0 12H10V4h10z"
+                    />
+                    <path
+                      fill="currentColor"
+                      d="M14 20H4V10h2V8H4c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h10c1.1 0 2-.9 2-2v-2h-2z"
+                    />
+                  </svg>
+                )}
+              </button>
+            </div>
+            {slashCommandResult.status === "complete" ? (
+              <div style={{ color: "var(--text-secondary)" }}>
+                登录完成
+                {loginNotice.planType ? ` · ${loginNotice.planType}` : ""}
+              </div>
+            ) : null}
+          </div>
+        ) : content ? (
+          <div
+            style={{
+              fontSize: "13px",
+              lineHeight: "1.6",
+              minWidth: 0,
+              overflowWrap: "anywhere",
+            }}
+          >
+            <MarkdownViewer
+              content={content}
+              root={rootId || undefined}
+              onFileClick={onFileClickRef.current}
+            />
+          </div>
+        ) : null}
       </div>
     );
   };
@@ -1753,6 +2154,7 @@ if (useInnerScrollContainer && !container) {
                 timelineItemSpacing(idx > 0 ? timeline[idx - 1] : null, item),
               ),
             )}
+            {renderSlashCommandResult()}
             {(isAwaiting || isStreaming) && (
               <div
                 style={{

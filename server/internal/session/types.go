@@ -18,9 +18,11 @@ type Session struct {
 	Type             string         `json:"type"`
 	ParentSessionKey string         `json:"parent_session_key,omitempty"`
 	ParentToolCallID string         `json:"parent_tool_call_id,omitempty"`
+	Source           string         `json:"source,omitempty"`
 	AgentCtxSeq      map[string]int `json:"agent_ctx_seq,omitempty"`
 	Model            string         `json:"model,omitempty"`
 	Shell            string         `json:"shell,omitempty"`
+	PlanMode         bool           `json:"plan_mode,omitempty"`
 	Name             string         `json:"name"`
 	Exchanges        []Exchange     `json:"exchanges"`
 	RelatedFiles     []RelatedFile  `json:"related_files"`
@@ -30,26 +32,33 @@ type Session struct {
 }
 
 type Exchange struct {
-	Seq         int       `json:"seq"`
-	Role        string    `json:"role"`
-	Agent       string    `json:"agent,omitempty"`
-	Model       string    `json:"model,omitempty"`
-	Mode        string    `json:"mode,omitempty"`
-	Effort      string    `json:"effort,omitempty"`
-	FastService string    `json:"fast_service,omitempty"`
-	Content     string    `json:"content"`
-	Timestamp   time.Time `json:"timestamp"`
+	Seq              int       `json:"seq"`
+	Role             string    `json:"role"`
+	Agent            string    `json:"agent,omitempty"`
+	Model            string    `json:"model,omitempty"`
+	ModelDisplayName string    `json:"model_display_name,omitempty"`
+	Mode             string    `json:"mode,omitempty"`
+	Effort           string    `json:"effort,omitempty"`
+	FastService      string    `json:"fast_service,omitempty"`
+	Content          string    `json:"content"`
+	Timestamp        time.Time `json:"timestamp"`
 }
 
 type ExchangeAux struct {
-	Seq      int                  `json:"seq"`
-	Line     int                  `json:"line"`
-	ToolCall *agenttypes.ToolCall `json:"toolcall,omitempty"`
-	Thought  string               `json:"thought,omitempty"`
+	Seq       int                       `json:"seq"`
+	Line      int                       `json:"line"`
+	ToolCall  *agenttypes.ToolCall      `json:"toolcall,omitempty"`
+	Thought   string                    `json:"thought,omitempty"`
+	ThoughtID string                    `json:"thought_id,omitempty"`
+	Plan      *agenttypes.PlanUpdate    `json:"plan,omitempty"`
+	Compact   *agenttypes.CompactNotice `json:"compact,omitempty"`
 }
 
 func CompactExchangeAux(aux ExchangeAux) (ExchangeAux, bool) {
 	if aux.ToolCall == nil {
+		if aux.Plan != nil || aux.Compact != nil {
+			return aux, true
+		}
 		return ExchangeAux{}, false
 	}
 

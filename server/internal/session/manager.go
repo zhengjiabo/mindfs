@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -19,6 +20,7 @@ import (
 	"unicode/utf8"
 
 	agenttypes "mindfs/server/internal/agent/types"
+	configpkg "mindfs/server/internal/config"
 	"mindfs/server/internal/fs"
 
 	_ "modernc.org/sqlite"
@@ -26,11 +28,12 @@ import (
 
 const (
 	sessionDBPath    = "sessions/session-list.db"
+	sessionDBLinkExt = ".link"
 	exchangeFileTpl  = "sessions/%s.jsonl"
 	auxFileTpl       = "sessions/%s.aux.jsonl"
 	selectSessionSQL = `
-SELECT key, type, parent_session_key, parent_tool_call_id, model, shell, name, related_files_json, created_at, updated_at, closed_at
-FROM sessions`
+	SELECT key, type, parent_session_key, parent_tool_call_id, source, model, shell, plan_mode, name, related_files_json, created_at, updated_at, closed_at
+	FROM sessions`
 	deleteSessionSQL = `
 DELETE FROM sessions
 WHERE key = ?`
@@ -39,15 +42,17 @@ DELETE FROM session_agent_bindings
 WHERE session_key = ?`
 	upsertSessionMetaSQL = `
 INSERT INTO sessions (
-	key, type, parent_session_key, parent_tool_call_id, model, shell, name, related_files_json, created_at, updated_at, closed_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		key, type, parent_session_key, parent_tool_call_id, source, model, shell, plan_mode, name, related_files_json, created_at, updated_at, closed_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(key) DO UPDATE SET
 	type = excluded.type,
 	parent_session_key = excluded.parent_session_key,
-	parent_tool_call_id = excluded.parent_tool_call_id,
-	model = excluded.model,
-	shell = excluded.shell,
-	name = excluded.name,
+		parent_tool_call_id = excluded.parent_tool_call_id,
+		source = excluded.source,
+		model = excluded.model,
+		shell = excluded.shell,
+		plan_mode = excluded.plan_mode,
+		name = excluded.name,
 	related_files_json = excluded.related_files_json,
 	created_at = excluded.created_at,
 	updated_at = excluded.updated_at,
@@ -58,9 +63,11 @@ CREATE TABLE IF NOT EXISTS sessions (
 	type TEXT NOT NULL,
 	parent_session_key TEXT NOT NULL DEFAULT '',
 	parent_tool_call_id TEXT NOT NULL DEFAULT '',
-	model TEXT NOT NULL DEFAULT '',
-	shell TEXT NOT NULL DEFAULT '',
-	name TEXT NOT NULL,
+	source TEXT NOT NULL DEFAULT '',
+		model TEXT NOT NULL DEFAULT '',
+		shell TEXT NOT NULL DEFAULT '',
+		plan_mode INTEGER NOT NULL DEFAULT 0,
+		name TEXT NOT NULL,
 	related_files_json TEXT NOT NULL,
 	created_at TEXT NOT NULL,
 	updated_at TEXT NOT NULL,
@@ -96,6 +103,12 @@ WHERE agent = ? AND agent_session_id = ?
 LIMIT 1`
 )
 
+var openSQLiteDB = func(path string) (*sql.DB, error) {
+	return sql.Open("sqlite", path)
+}
+
+var mindFSConfigDir = configpkg.MindFSConfigDir
+
 type Manager struct {
 	root             fs.RootInfo
 	mu               sync.Mutex
@@ -115,9 +128,11 @@ type CreateInput struct {
 	Type             string
 	ParentSessionKey string
 	ParentToolCallID string
+	Source           string
 	Agent            string
 	Model            string
 	Shell            string
+	PlanMode         bool
 	Name             string
 }
 
@@ -129,9 +144,11 @@ type AgentBinding struct {
 }
 
 type ListOptions struct {
-	BeforeTime time.Time
-	AfterTime  time.Time
-	Limit      int
+	BeforeTime       time.Time
+	AfterTime        time.Time
+	ParentSessionKey string
+	TopLevelOnly     bool
+	Limit            int
 }
 
 func NewManager(root fs.RootInfo, opts ...Option) *Manager {
@@ -199,9 +216,11 @@ func (m *Manager) Create(_ context.Context, input CreateInput) (*Session, error)
 		Type:             input.Type,
 		ParentSessionKey: strings.TrimSpace(input.ParentSessionKey),
 		ParentToolCallID: strings.TrimSpace(input.ParentToolCallID),
+		Source:           strings.TrimSpace(input.Source),
 		AgentCtxSeq:      agentCtxSeq,
 		Model:            strings.TrimSpace(input.Model),
 		Shell:            strings.TrimSpace(input.Shell),
+		PlanMode:         input.PlanMode,
 		Name:             name,
 		Exchanges:        []Exchange{},
 		RelatedFiles:     []RelatedFile{},
@@ -293,6 +312,54 @@ func (m *Manager) UpsertPendingExchangeAux(_ context.Context, sessionKey string,
 	return nil
 }
 
+func (m *Manager) MarkPendingAskUserAnswered(_ context.Context, sessionKey, callID string, answers map[string]string, answeredAt time.Time) error {
+	sessionKey = strings.TrimSpace(sessionKey)
+	if sessionKey == "" {
+		return errors.New("session key required")
+	}
+	callID = strings.TrimSpace(callID)
+	if callID == "" {
+		return errors.New("tool call id required")
+	}
+	cleanAnswers := make(map[string]string, len(answers))
+	for key, value := range answers {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key != "" && value != "" {
+			cleanAnswers[key] = value
+		}
+	}
+	if len(cleanAnswers) == 0 {
+		return errors.New("answers required")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.pendingToolCalls == nil || m.pendingToolCalls[sessionKey] == nil {
+		return errors.New("pending tool call not found")
+	}
+	existing, ok := m.pendingToolCalls[sessionKey][callID]
+	if !ok {
+		return errors.New("pending tool call not found")
+	}
+	if existing.Kind != "" && existing.Kind != agenttypes.ToolKindAskUser {
+		return errors.New("pending tool call is not ask_user")
+	}
+	meta := make(map[string]any, len(existing.Meta)+2)
+	for key, value := range existing.Meta {
+		meta[key] = value
+	}
+	meta["answers"] = cleanAnswers
+	if !answeredAt.IsZero() {
+		meta["answeredAt"] = answeredAt.UTC().Format(time.RFC3339Nano)
+	}
+	existing.Kind = agenttypes.ToolKindAskUser
+	existing.Status = "complete"
+	existing.Meta = meta
+	m.pendingToolCalls[sessionKey][callID] = existing
+	return nil
+}
+
 func (m *Manager) ClearPendingExchangeAux(_ context.Context, sessionKey string) {
 	sessionKey = strings.TrimSpace(sessionKey)
 	if sessionKey == "" {
@@ -307,6 +374,12 @@ func (m *Manager) List(_ context.Context, opts ListOptions) ([]*Session, error) 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.listSessionsUnsafe(opts)
+}
+
+func (m *Manager) Count(_ context.Context, opts ListOptions) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.countSessionsUnsafe(opts)
 }
 
 func (m *Manager) ListMetas(_ context.Context) ([]*Session, error) {
@@ -374,15 +447,33 @@ func (m *Manager) Search(_ context.Context, opts SearchOptions) ([]SearchHit, er
 	return results, nil
 }
 
-func (m *Manager) AddExchangeForAgent(_ context.Context, session *Session, role, content, agent, mode, effort, fastService string) error {
-	return m.addExchangeForAgentAt(session, role, content, agent, mode, effort, fastService, time.Time{})
+type exchangeModelDisplayNameContextKey struct{}
+
+func WithExchangeModelDisplayName(ctx context.Context, displayName string) context.Context {
+	displayName = strings.TrimSpace(displayName)
+	if displayName == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, exchangeModelDisplayNameContextKey{}, displayName)
 }
 
-func (m *Manager) AddExchangeForAgentAt(_ context.Context, session *Session, role, content, agent, mode, effort, fastService string, timestamp time.Time) error {
-	return m.addExchangeForAgentAt(session, role, content, agent, mode, effort, fastService, timestamp)
+func exchangeModelDisplayNameFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	value, _ := ctx.Value(exchangeModelDisplayNameContextKey{}).(string)
+	return strings.TrimSpace(value)
 }
 
-func (m *Manager) addExchangeForAgentAt(session *Session, role, content, agent, mode, effort, fastService string, timestamp time.Time) error {
+func (m *Manager) AddExchangeForAgent(ctx context.Context, session *Session, role, content, agent, mode, effort, fastService string) error {
+	return m.addExchangeForAgentAt(session, role, content, agent, exchangeModelDisplayNameFromContext(ctx), mode, effort, fastService, time.Time{})
+}
+
+func (m *Manager) AddExchangeForAgentAt(ctx context.Context, session *Session, role, content, agent, mode, effort, fastService string, timestamp time.Time) error {
+	return m.addExchangeForAgentAt(session, role, content, agent, exchangeModelDisplayNameFromContext(ctx), mode, effort, fastService, timestamp)
+}
+
+func (m *Manager) addExchangeForAgentAt(session *Session, role, content, agent, modelDisplayName, mode, effort, fastService string, timestamp time.Time) error {
 	if session == nil || strings.TrimSpace(session.Key) == "" {
 		return errors.New("session required")
 	}
@@ -407,15 +498,16 @@ func (m *Manager) addExchangeForAgentAt(session *Session, role, content, agent, 
 		ts = m.now().UTC()
 	}
 	record := Exchange{
-		Seq:         nextSeq,
-		Role:        role,
-		Agent:       resolvedAgent,
-		Model:       session.Model,
-		Mode:        strings.TrimSpace(mode),
-		Effort:      strings.TrimSpace(effort),
-		FastService: fastService,
-		Content:     content,
-		Timestamp:   ts,
+		Seq:              nextSeq,
+		Role:             role,
+		Agent:            resolvedAgent,
+		Model:            session.Model,
+		ModelDisplayName: strings.TrimSpace(modelDisplayName),
+		Mode:             strings.TrimSpace(mode),
+		Effort:           strings.TrimSpace(effort),
+		FastService:      fastService,
+		Content:          content,
+		Timestamp:        ts,
 	}
 	if err := m.appendExchange(session.Key, record); err != nil {
 		log.Printf("[session/store] append.error session=%s seq=%d role=%s agent=%s err=%v", session.Key, record.Seq, role, resolvedAgent, err)
@@ -444,7 +536,7 @@ func (m *Manager) AddExchangeAux(_ context.Context, sessionKey string, aux Excha
 	if aux.Seq <= 0 {
 		return errors.New("aux seq required")
 	}
-	if aux.ToolCall == nil && strings.TrimSpace(aux.Thought) == "" {
+	if aux.ToolCall == nil && strings.TrimSpace(aux.Thought) == "" && aux.Plan == nil && aux.Compact == nil {
 		return errors.New("aux content required")
 	}
 	m.mu.Lock()
@@ -744,6 +836,27 @@ func (m *Manager) UpdateShell(_ context.Context, session *Session, shell string)
 	return m.upsertSessionMetaUnsafe(current)
 }
 
+func (m *Manager) UpdatePlanMode(_ context.Context, session *Session, enabled bool) error {
+	if session == nil || strings.TrimSpace(session.Key) == "" {
+		return errors.New("session required")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current, err := m.getSessionUnsafe(session.Key, 0)
+	if err != nil {
+		return err
+	}
+	if current.PlanMode == enabled {
+		session.PlanMode = enabled
+		return nil
+	}
+	current.PlanMode = enabled
+	current.UpdatedAt = m.now().UTC()
+	session.PlanMode = enabled
+	session.UpdatedAt = current.UpdatedAt
+	return m.upsertSessionMetaUnsafe(current)
+}
+
 func (m *Manager) closeSessionUnsafe(key string) (*Session, error) {
 	session, err := m.getSessionUnsafe(key, 0)
 	if err != nil {
@@ -900,7 +1013,7 @@ func (m *Manager) createSessionUnsafe(session *Session) error {
 	if statErr == nil {
 		return nil
 	}
-	if !os.IsNotExist(statErr) {
+	if !errors.Is(statErr, os.ErrNotExist) {
 		return statErr
 	}
 	return m.root.WriteMetaFile(path, []byte{})
@@ -989,15 +1102,10 @@ func (m *Manager) listSessionsUnsafe(opts ListOptions) ([]*Session, error) {
 	}
 	query := `
 SELECT key FROM sessions`
-	args := make([]any, 0, 2)
-	if !opts.BeforeTime.IsZero() {
+	where, args := sessionListWhere(opts)
+	if len(where) > 0 {
 		query += `
-WHERE updated_at < ?`
-		args = append(args, opts.BeforeTime.UTC().Format(time.RFC3339Nano))
-	} else if !opts.AfterTime.IsZero() {
-		query += `
-WHERE updated_at > ?`
-		args = append(args, opts.AfterTime.UTC().Format(time.RFC3339Nano))
+WHERE ` + strings.Join(where, " AND ")
 	}
 	query += `
 ORDER BY updated_at DESC`
@@ -1031,6 +1139,44 @@ LIMIT ?`
 		items = append(items, session)
 	}
 	return items, nil
+}
+
+func (m *Manager) countSessionsUnsafe(opts ListOptions) (int, error) {
+	db, err := m.ensureSessionMetaDBUnsafe()
+	if err != nil {
+		return 0, err
+	}
+	query := `
+SELECT COUNT(*) FROM sessions`
+	where, args := sessionListWhere(opts)
+	if len(where) > 0 {
+		query += `
+WHERE ` + strings.Join(where, " AND ")
+	}
+	var count int
+	if err := db.QueryRow(query, args...).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func sessionListWhere(opts ListOptions) ([]string, []any) {
+	args := make([]any, 0, 2)
+	where := make([]string, 0, 2)
+	if parentKey := strings.TrimSpace(opts.ParentSessionKey); parentKey != "" {
+		where = append(where, "parent_session_key = ?")
+		args = append(args, parentKey)
+	} else if opts.TopLevelOnly {
+		where = append(where, "parent_session_key = ''")
+	}
+	if !opts.BeforeTime.IsZero() {
+		where = append(where, "updated_at < ?")
+		args = append(args, opts.BeforeTime.UTC().Format(time.RFC3339Nano))
+	} else if !opts.AfterTime.IsZero() {
+		where = append(where, "updated_at > ?")
+		args = append(args, opts.AfterTime.UTC().Format(time.RFC3339Nano))
+	}
+	return where, args
 }
 
 func (m *Manager) loadSessionUnsafe(key string, afterSeq int) (*Session, error) {
@@ -1086,7 +1232,7 @@ func (m *Manager) loadExchanges(key string, afterSeq int) ([]Exchange, int, erro
 	}
 	payload, err := m.root.ReadMetaFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return []Exchange{}, 0, nil
 		}
 		return nil, 0, err
@@ -1163,7 +1309,7 @@ func (m *Manager) loadExchangeAuxEntries(key string, afterSeq int) ([]ExchangeAu
 	}
 	payload, err := m.root.ReadMetaFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return []ExchangeAux{}, nil
 		}
 		return nil, err
@@ -1317,11 +1463,56 @@ func (m *Manager) ensureSessionMetaDBUnsafe() (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	dbFile := filepath.Join(metaDir, filepath.FromSlash(sessionDBPath))
+	legacyDBFile := filepath.Join(metaDir, filepath.FromSlash(sessionDBPath))
+	linkFile := legacyDBFile + sessionDBLinkExt
+	if linkedDBFile, ok, err := readSessionDBLink(linkFile); err != nil {
+		return nil, err
+	} else if ok {
+		db, err := openSessionMetaDB(linkedDBFile)
+		if err != nil {
+			return nil, err
+		}
+		m.db = db
+		return m.db, nil
+	}
+
+	db, err := openSessionMetaDB(legacyDBFile)
+	if err == nil {
+		m.db = db
+		return m.db, nil
+	}
+	legacyErr := err
+
+	fallbackDBFile, err := userDataSessionDBFile(m.root.ID)
+	if err != nil {
+		return nil, fmt.Errorf("open legacy session db: %w; resolve fallback session db: %w", legacyErr, err)
+	}
+	db, err = openSessionMetaDB(fallbackDBFile)
+	if err != nil {
+		return nil, fmt.Errorf("open legacy session db: %w; open fallback session db: %w", legacyErr, err)
+	}
+	if err := writeSessionDBLink(linkFile, fallbackDBFile); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("open legacy session db: %w; write session db link: %w", legacyErr, err)
+	}
+	log.Printf("[session/store] sqlite fallback root=%s legacy=%s fallback=%s err=%v", m.root.ID, legacyDBFile, fallbackDBFile, legacyErr)
+	m.db = db
+	return m.db, nil
+}
+
+func openSessionMetaDB(dbFile string) (db *sql.DB, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			if db != nil {
+				db.Close()
+			}
+			err = fmt.Errorf("sqlite init panic for %s: %v", dbFile, r)
+		}
+	}()
 	if err := os.MkdirAll(filepath.Dir(dbFile), 0o755); err != nil {
 		return nil, err
 	}
-	db, err := sql.Open("sqlite", dbFile)
+	db, err = openSQLiteDB(dbFile)
 	if err != nil {
 		return nil, err
 	}
@@ -1342,17 +1533,64 @@ func (m *Manager) ensureSessionMetaDBUnsafe() (*sql.DB, error) {
 		db.Close()
 		return nil, err
 	}
+	if _, err := db.Exec(`ALTER TABLE sessions ADD COLUMN plan_mode INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+		db.Close()
+		return nil, err
+	}
 	for _, stmt := range []string{
 		`ALTER TABLE sessions ADD COLUMN parent_session_key TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE sessions ADD COLUMN parent_tool_call_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sessions ADD COLUMN source TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := db.Exec(stmt); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
 			db.Close()
 			return nil, err
 		}
 	}
-	m.db = db
-	return m.db, nil
+	return db, nil
+}
+
+func readSessionDBLink(linkFile string) (string, bool, error) {
+	payload, err := os.ReadFile(linkFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	dbFile := strings.TrimSpace(string(payload))
+	if dbFile == "" {
+		return "", false, fmt.Errorf("empty session db link: %s", linkFile)
+	}
+	if !filepath.IsAbs(dbFile) {
+		return "", false, fmt.Errorf("session db link must be absolute: %s", linkFile)
+	}
+	return dbFile, true, nil
+}
+
+func writeSessionDBLink(linkFile, dbFile string) error {
+	if strings.TrimSpace(dbFile) == "" {
+		return errors.New("session db link target required")
+	}
+	if !filepath.IsAbs(dbFile) {
+		return errors.New("session db link target must be absolute")
+	}
+	if err := os.MkdirAll(filepath.Dir(linkFile), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(linkFile, []byte(dbFile+"\n"), 0o644)
+}
+
+func userDataSessionDBFile(rootID string) (string, error) {
+	configDir, err := mindFSConfigDir()
+	if err != nil {
+		return "", err
+	}
+	id := strings.TrimSpace(rootID)
+	if id == "" {
+		id = "default"
+	}
+	return filepath.Join(configDir, url.PathEscape(id), "session-list.db"), nil
 }
 
 func sessionMetaUpsertArgs(session *Session) ([]any, error) {
@@ -1372,14 +1610,23 @@ func sessionMetaUpsertArgs(session *Session) ([]any, error) {
 		session.Type,
 		session.ParentSessionKey,
 		session.ParentToolCallID,
+		session.Source,
 		session.Model,
 		session.Shell,
+		boolToSQLiteInt(session.PlanMode),
 		session.Name,
 		string(relatedFilesJSON),
 		session.CreatedAt.UTC().Format(time.RFC3339Nano),
 		session.UpdatedAt.UTC().Format(time.RFC3339Nano),
 		closedAt,
 	}, nil
+}
+
+func boolToSQLiteInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 type rowScanner interface {
@@ -1392,8 +1639,10 @@ func scanSessionMetaRow(scanner rowScanner) (*Session, error) {
 		typ              string
 		parentSessionKey string
 		parentToolCallID string
+		source           string
 		model            string
 		shell            string
+		planMode         int
 		name             string
 		relatedFilesJSON string
 		createdAtRaw     string
@@ -1405,8 +1654,10 @@ func scanSessionMetaRow(scanner rowScanner) (*Session, error) {
 		&typ,
 		&parentSessionKey,
 		&parentToolCallID,
+		&source,
 		&model,
 		&shell,
+		&planMode,
 		&name,
 		&relatedFilesJSON,
 		&createdAtRaw,
@@ -1420,8 +1671,10 @@ func scanSessionMetaRow(scanner rowScanner) (*Session, error) {
 		Type:             typ,
 		ParentSessionKey: parentSessionKey,
 		ParentToolCallID: parentToolCallID,
+		Source:           source,
 		Model:            model,
 		Shell:            shell,
+		PlanMode:         planMode != 0,
 		Name:             name,
 		Exchanges:        []Exchange{},
 		RelatedFiles:     []RelatedFile{},
@@ -1463,6 +1716,7 @@ func normalizeSessionMeta(s *Session) {
 	}
 	s.ParentSessionKey = strings.TrimSpace(s.ParentSessionKey)
 	s.ParentToolCallID = strings.TrimSpace(s.ParentToolCallID)
+	s.Source = strings.TrimSpace(s.Source)
 }
 
 var errSessionNotFound = errors.New("session not found")
@@ -1553,7 +1807,7 @@ func (m *Manager) searchSessionContent(s *Session, qLower string) (SearchHit, bo
 	}
 	file, err := m.root.OpenMetaFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return SearchHit{}, false, nil
 		}
 		return SearchHit{}, false, err

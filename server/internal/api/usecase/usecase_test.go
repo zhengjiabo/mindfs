@@ -280,6 +280,216 @@ func TestSubSessionSyntheticDonePersistsPartialResponse(t *testing.T) {
 	}
 }
 
+func TestClaudeSubagentRouterCreatesChildSessionAndRoutesChunks(t *testing.T) {
+	ctx := context.Background()
+	rootDir := t.TempDir()
+	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
+	manager := session.NewManager(root)
+	parent, err := manager.Create(ctx, session.CreateInput{Type: session.TypeChat, Agent: "claude", Name: "parent"})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+
+	var created *session.Session
+	var sawDone bool
+	router := newClaudeSubagentRouter(subagentSessionInput{
+		RootID:  root.ID,
+		Parent:  parent,
+		Agent:   "claude",
+		Model:   "sonnet",
+		Mode:    "default",
+		Effort:  "medium",
+		Manager: manager,
+		OnCreated: func(child *session.Session) {
+			created = child
+		},
+		OnUpdate: func(sessionKey string, update agenttypes.Event) {
+			if created != nil && sessionKey == created.Key && update.Type == agenttypes.EventTypeMessageDone {
+				sawDone = true
+			}
+		},
+	})
+
+	parentTask := agenttypes.ToolCall{
+		CallID:  "tool-1",
+		Title:   "Review changes",
+		Status:  "running",
+		Kind:    agenttypes.ToolKindTask,
+		RawType: "claude_task",
+		Meta: map[string]any{
+			"parentToolUseId": "tool-1",
+			"taskId":          "task-1",
+			"taskDescription": "Review changes",
+		},
+	}
+	if consumed := router.Handle(ctx, agenttypes.Event{Type: agenttypes.EventTypeToolCall, Data: parentTask}); consumed {
+		t.Fatalf("parent task lifecycle should not be consumed")
+	}
+	if created != nil {
+		t.Fatalf("parent task lifecycle should not create child")
+	}
+
+	if consumed := router.Handle(ctx, agenttypes.Event{
+		Type: agenttypes.EventTypeMessageChunk,
+		Data: agenttypes.MessageChunk{
+			Content:         "child response",
+			ParentToolUseID: "tool-1",
+			TaskID:          "task-1",
+		},
+	}); !consumed {
+		t.Fatalf("subagent chunk was not consumed")
+	}
+	if created == nil {
+		t.Fatalf("child session was not created")
+	}
+	if created.ParentSessionKey != parent.Key || created.ParentToolCallID != "tool-1" {
+		t.Fatalf("created child parent fields = %#v", created)
+	}
+	if consumed := router.Handle(ctx, agenttypes.Event{
+		Type: agenttypes.EventTypeMessageDone,
+		Data: agenttypes.MessageDone{ParentToolUseID: "tool-1", TaskID: "task-1"},
+	}); !consumed {
+		t.Fatalf("subagent done was not consumed")
+	}
+
+	loaded, err := manager.Get(ctx, created.Key, 0)
+	if err != nil {
+		t.Fatalf("get child: %v", err)
+	}
+	if len(loaded.Exchanges) != 1 || loaded.Exchanges[0].Content != "child response" {
+		t.Fatalf("child exchanges = %#v", loaded.Exchanges)
+	}
+	if !sawDone {
+		t.Fatalf("sub session done update was not emitted")
+	}
+}
+
+func TestClaudeSubagentRouterDoesNotCreateChildFromTaskIDOnly(t *testing.T) {
+	ctx := context.Background()
+	rootDir := t.TempDir()
+	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
+	manager := session.NewManager(root)
+	parent, err := manager.Create(ctx, session.CreateInput{Type: session.TypeChat, Agent: "claude", Name: "parent"})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+
+	var createdCount int
+	router := newClaudeSubagentRouter(subagentSessionInput{
+		RootID:  root.ID,
+		Parent:  parent,
+		Agent:   "claude",
+		Manager: manager,
+		OnCreated: func(*session.Session) {
+			createdCount++
+		},
+	})
+
+	taskOnly := agenttypes.ToolCall{
+		CallID:  "task-opaque-id",
+		Title:   "Task progress",
+		Status:  "running",
+		Kind:    agenttypes.ToolKindTask,
+		RawType: "claude_task",
+		Meta: map[string]any{
+			"taskId": "task-opaque-id",
+		},
+	}
+	if consumed := router.Handle(ctx, agenttypes.Event{Type: agenttypes.EventTypeToolUpdate, Data: taskOnly}); consumed {
+		t.Fatalf("task lifecycle should stay on parent")
+	}
+	if createdCount != 0 {
+		t.Fatalf("createdCount = %d, want 0", createdCount)
+	}
+
+	if consumed := router.Handle(ctx, agenttypes.Event{
+		Type: agenttypes.EventTypeMessageChunk,
+		Data: agenttypes.MessageChunk{Content: "orphan task text", TaskID: "task-opaque-id"},
+	}); consumed {
+		t.Fatalf("task-id-only chunk should not create child")
+	}
+	if createdCount != 0 {
+		t.Fatalf("createdCount after task chunk = %d, want 0", createdCount)
+	}
+
+	if consumed := router.Handle(ctx, agenttypes.Event{
+		Type: agenttypes.EventTypeMessageChunk,
+		Data: agenttypes.MessageChunk{
+			Content:         "subagent text",
+			ParentToolUseID: "call_e365874817b34ca79e665ee9",
+			TaskID:          "task-opaque-id",
+		},
+	}); !consumed {
+		t.Fatalf("parent-tool-use chunk should create child")
+	}
+	if createdCount != 1 {
+		t.Fatalf("createdCount after parent chunk = %d, want 1", createdCount)
+	}
+}
+
+func TestDedupeExchangeAuxBufferMergesDuplicateToolCalls(t *testing.T) {
+	items := []session.ExchangeAux{
+		{
+			Seq:  1,
+			Line: 0,
+			ToolCall: &agenttypes.ToolCall{
+				CallID:  "call-1",
+				Title:   "Print hi",
+				Status:  "running",
+				Kind:    agenttypes.ToolKindTask,
+				RawType: "tool_use",
+				Content: []agenttypes.ToolCallContentItem{{Type: "text", Text: "prompt body"}},
+				Meta:    map[string]any{"prompt": "prompt body"},
+			},
+		},
+		{
+			Seq:  1,
+			Line: 0,
+			ToolCall: &agenttypes.ToolCall{
+				CallID:  "call-1",
+				Status:  "running",
+				Kind:    agenttypes.ToolKindTask,
+				RawType: "claude_task",
+				Meta:    map[string]any{"lastToolName": "Bash"},
+			},
+		},
+	}
+
+	got := dedupeExchangeAuxBuffer(items)
+	if len(got) != 1 || got[0].ToolCall == nil {
+		t.Fatalf("deduped items = %#v, want one toolcall", got)
+	}
+	toolCall := got[0].ToolCall
+	if toolCall.Title != "Print hi" || toolCall.RawType != "claude_task" {
+		t.Fatalf("toolCall latest fields = %#v", toolCall)
+	}
+	if len(toolCall.Content) != 1 || toolCall.Content[0].Text != "prompt body" {
+		t.Fatalf("toolCall content = %#v, want original prompt body", toolCall.Content)
+	}
+	if toolCall.Meta["prompt"] != "prompt body" || toolCall.Meta["lastToolName"] != "Bash" {
+		t.Fatalf("toolCall meta = %#v", toolCall.Meta)
+	}
+}
+
+func TestShouldPersistToolCallAuxSkipsClaudeTaskProgress(t *testing.T) {
+	if shouldPersistToolCallAux(agenttypes.ToolCall{
+		CallID:  "call-1",
+		Kind:    agenttypes.ToolKindTask,
+		RawType: "claude_task",
+		Meta:    map[string]any{"subtype": "task_progress"},
+	}) {
+		t.Fatalf("claude task progress should not persist")
+	}
+	if !shouldPersistToolCallAux(agenttypes.ToolCall{
+		CallID:  "call-1",
+		Kind:    agenttypes.ToolKindTask,
+		RawType: "claude_task",
+		Meta:    map[string]any{"subtype": "task_started"},
+	}) {
+		t.Fatalf("claude task start should persist")
+	}
+}
+
 func TestSendCommandMessageUsesLongShellPerSession(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("windows long-shell behavior is covered by cross-compile checks")
@@ -509,6 +719,7 @@ func TestSkillCandidateProviderSearch(t *testing.T) {
 	mustWriteFile(t, filepath.Join(homeDir, ".codex", "skills", "status", "SKILL.md"), "---\nname: status\ndescription: Home status skill\n---\n")
 	mustWriteFile(t, filepath.Join(homeDir, ".agents", "skills", "review", "SKILL.md"), "---\nname: review\ndescription: Shared review skill\n---\n")
 	mustWriteFile(t, filepath.Join(rootDir, ".codex", "skills", "status", "SKILL.md"), "---\nname: status\ndescription: Root status skill\n---\n")
+	mustWriteFile(t, filepath.Join(rootDir, ".agents", "skills", "trellis-start", "SKILL.md"), "---\nname: trellis-start\ndescription: Start Trellis\n---\n")
 	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
 
 	provider := NewSkillCandidateProvider()
@@ -516,10 +727,10 @@ func TestSkillCandidateProviderSearch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Search returned error: %v", err)
 	}
-	if len(items) != 2 {
-		t.Fatalf("expected 2 unique items, got %d: %#v", len(items), items)
+	if len(items) != 3 {
+		t.Fatalf("expected 3 unique items, got %d: %#v", len(items), items)
 	}
-	if items[0].Name != "review" && items[0].Name != "status" {
+	if items[0].Name != "review" && items[0].Name != "status" && items[0].Name != "trellis-start" {
 		t.Fatalf("unexpected first item: %#v", items[0])
 	}
 	descriptionByName := make(map[string]string, len(items))
@@ -531,6 +742,35 @@ func TestSkillCandidateProviderSearch(t *testing.T) {
 	}
 	if got := descriptionByName["review"]; got != "Shared review skill" {
 		t.Fatalf("unexpected review description: %q", got)
+	}
+	if got := descriptionByName["trellis-start"]; got != "Start Trellis" {
+		t.Fatalf("unexpected trellis-start description: %q", got)
+	}
+}
+
+func TestSkillCandidateProviderSearchIncludesCodexPluginCacheSkills(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	rootDir := t.TempDir()
+	mustWriteFile(t, filepath.Join(homeDir, ".codex", "plugins", "cache", "openai-primary-runtime", "documents", "26.1.0", "skills", "documents", "SKILL.md"), "---\nname: documents\ndescription: Old documents skill\n---\n")
+	mustWriteFile(t, filepath.Join(homeDir, ".codex", "plugins", "cache", "openai-primary-runtime", "documents", "26.10.0", "skills", "documents", "SKILL.md"), "---\nname: documents\ndescription: Current documents skill\n---\n")
+	mustWriteFile(t, filepath.Join(homeDir, ".codex", "plugins", "cache", "openai-curated-remote", "product-design", "0.1.47", "skills", "audit", "SKILL.md"), "---\nname: audit\ndescription: Audit product flows\n---\n")
+	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
+
+	provider := NewSkillCandidateProvider()
+	items, err := provider.Search(context.Background(), root, "codex", "")
+	if err != nil {
+		t.Fatalf("Search returned error: %v", err)
+	}
+	descriptionByName := make(map[string]string, len(items))
+	for _, item := range items {
+		descriptionByName[item.Name] = item.Description
+	}
+	if got := descriptionByName["documents"]; got != "Current documents skill" {
+		t.Fatalf("documents description = %q, want Current documents skill; items=%#v", got, items)
+	}
+	if got := descriptionByName["audit"]; got != "Audit product flows" {
+		t.Fatalf("audit description = %q, want Audit product flows; items=%#v", got, items)
 	}
 }
 
@@ -563,6 +803,66 @@ func TestSkillCandidateProviderSearchFollowsSymlinkedSkillDir(t *testing.T) {
 	}
 	if items[0].Description != "Linked skill" {
 		t.Fatalf("skill description = %q, want Linked skill", items[0].Description)
+	}
+}
+
+func TestSkillCandidateProviderSearchExpandsNamespacedSkillBundle(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	rootDir := t.TempDir()
+	ssotDir := t.TempDir()
+	targetDir := filepath.Join(ssotDir, "aegis-skills")
+	mustWriteFile(t, filepath.Join(targetDir, "brainstorming", "SKILL.md"), "---\nname: brainstorming\ndescription: Aegis brainstorm\n---\n")
+	mustWriteFile(t, filepath.Join(targetDir, "using-aegis", "SKILL.md"), "---\nname: using-aegis\ndescription: Aegis router\n---\n")
+	skillsDir := filepath.Join(homeDir, ".agents", "skills")
+	if err := os.MkdirAll(skillsDir, 0o755); err != nil {
+		t.Fatalf("mkdir skills dir: %v", err)
+	}
+	if err := os.Symlink(targetDir, filepath.Join(skillsDir, "aegis")); err != nil {
+		t.Skipf("symlink not available: %v", err)
+	}
+	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
+
+	provider := NewSkillCandidateProvider()
+	items, err := provider.Search(context.Background(), root, "codex", "aegis")
+	if err != nil {
+		t.Fatalf("Search returned error: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected 2 namespaced skills, got %d: %#v", len(items), items)
+	}
+	descriptionByName := make(map[string]string, len(items))
+	for _, item := range items {
+		descriptionByName[item.Name] = item.Description
+	}
+	if _, ok := descriptionByName["aegis"]; ok {
+		t.Fatalf("did not expect bare namespace item: %#v", items)
+	}
+	if got := descriptionByName["aegis:brainstorming"]; got != "Aegis brainstorm" {
+		t.Fatalf("unexpected aegis:brainstorming description: %q", got)
+	}
+	if got := descriptionByName["aegis:using-aegis"]; got != "Aegis router" {
+		t.Fatalf("unexpected aegis:using-aegis description: %q", got)
+	}
+}
+
+func TestSkillCandidateProviderSearchMatchesNamespacedChildName(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	rootDir := t.TempDir()
+	mustWriteFile(t, filepath.Join(homeDir, ".agents", "skills", "aegis", "brainstorming", "SKILL.md"), "---\nname: brainstorming\ndescription: Aegis brainstorm\n---\n")
+	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
+
+	provider := NewSkillCandidateProvider()
+	items, err := provider.Search(context.Background(), root, "codex", "brain")
+	if err != nil {
+		t.Fatalf("Search returned error: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 namespaced skill, got %d: %#v", len(items), items)
+	}
+	if items[0].Name != "aegis:brainstorming" {
+		t.Fatalf("skill name = %q, want aegis:brainstorming", items[0].Name)
 	}
 }
 
@@ -638,6 +938,19 @@ func TestCommandCandidatesFromStatus(t *testing.T) {
 	}
 	if items[0].Name != "review" {
 		t.Fatalf("expected review command, got %#v", items[0])
+	}
+}
+
+func TestCodexSlashCandidatesIncludeTransientCommands(t *testing.T) {
+	provider := NewSlashCommandCandidateProvider(func(agentName string) (agent.Status, bool) {
+		return agent.Status{Name: agentName}, true
+	})
+	items, err := provider.Search(context.Background(), rootfs.RootInfo{}, "codex", "lo")
+	if err != nil {
+		t.Fatalf("Search returned error: %v", err)
+	}
+	if len(items) != 1 || items[0].Name != "login" {
+		t.Fatalf("items = %#v, want login", items)
 	}
 }
 
@@ -898,6 +1211,81 @@ func TestAppendResponseChunk(t *testing.T) {
 	}
 }
 
+func TestIsNonRecoverableAgentError(t *testing.T) {
+	testCases := []struct {
+		err  error
+		want bool
+	}{
+		{nil, false},
+		{errors.New("codex turn failed: exceeded retry limit, last status: 429 Too Many Requests"), true},
+		{errors.New("remote compaction failed while compact_remote retried"), true},
+		{errors.New("usageLimitExceeded"), true},
+		{errors.New("responseTooManyFailedAttempts"), true},
+		{errors.New("temporary websocket EOF"), false},
+		{context.Canceled, false},
+	}
+
+	for _, tc := range testCases {
+		if got := isNonRecoverableAgentError(tc.err); got != tc.want {
+			t.Fatalf("isNonRecoverableAgentError(%v) = %v, want %v", tc.err, got, tc.want)
+		}
+	}
+}
+
+func TestRecoverAgentTurnStopsOnNonRecoverableError(t *testing.T) {
+	rootDir := t.TempDir()
+	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
+	manager := session.NewManager(root)
+	current, err := manager.Create(context.Background(), session.CreateInput{
+		Type:  session.TypeChat,
+		Agent: "codex",
+		Name:  "chat",
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	service := Service{}
+	runtime := &fakeUsecaseAgentSession{id: "codex-thread"}
+	var sent []string
+	gotSess, err := service.recoverAgentTurn(context.Background(), SendRecoveryInput{
+		RootID:            root.ID,
+		SessionKey:        current.Key,
+		Manager:           manager,
+		Current:           current,
+		AgentName:         "codex",
+		CurrentSession:    runtime,
+		Prompt:            "original prompt",
+		SawAssistantChunk: true,
+		SendWithAttachment: func(_ agenttypes.Session, content string) error {
+			sent = append(sent, content)
+			return errors.New("codex turn failed: exceeded retry limit, last status: 429 Too Many Requests")
+		},
+	})
+	if err == nil {
+		t.Fatal("recoverAgentTurn returned nil error")
+	}
+	if gotSess != nil {
+		t.Fatalf("recoverAgentTurn returned session %#v, want nil", gotSess)
+	}
+	if len(sent) != 1 || sent[0] != "continue" {
+		t.Fatalf("sent = %#v, want one continue recovery attempt", sent)
+	}
+}
+
+func TestCancelRuntimeAfterNonRecoverableErrorClosesSession(t *testing.T) {
+	runtime := &fakeUsecaseAgentSession{id: "codex-thread"}
+
+	cancelRuntimeAfterNonRecoverableError(runtime, nil, "codex", errors.New("429 Too Many Requests"))
+
+	if runtime.cancelCalls != 1 {
+		t.Fatalf("cancel calls = %d, want 1", runtime.cancelCalls)
+	}
+	if runtime.closeCalls != 1 {
+		t.Fatalf("close calls = %d, want 1", runtime.closeCalls)
+	}
+}
+
 func assertFileContent(t *testing.T, path string, want string) {
 	t.Helper()
 	payload, err := os.ReadFile(path)
@@ -1003,8 +1391,10 @@ func (uploadTestRegistry) GetFileWatcher(string, *session.Manager) (*rootfs.Shar
 func (uploadTestRegistry) ReleaseFileWatcher(string, string) {}
 
 type fakeUsecaseAgentSession struct {
-	id       string
-	onUpdate func(agenttypes.Event)
+	id          string
+	cancelCalls int
+	closeCalls  int
+	onUpdate    func(agenttypes.Event)
 }
 
 func (s *fakeUsecaseAgentSession) SendMessage(context.Context, string) error { return nil }
@@ -1023,6 +1413,8 @@ func (s *fakeUsecaseAgentSession) ListModels(context.Context) (agenttypes.ModelL
 
 func (s *fakeUsecaseAgentSession) SetMode(context.Context, string) error { return nil }
 
+func (s *fakeUsecaseAgentSession) SetPlanMode(context.Context, bool) error { return nil }
+
 func (s *fakeUsecaseAgentSession) ListModes(context.Context) (agenttypes.ModeList, error) {
 	return agenttypes.ModeList{}, nil
 }
@@ -1031,7 +1423,10 @@ func (s *fakeUsecaseAgentSession) ListCommands(context.Context) (agenttypes.Comm
 	return agenttypes.CommandList{}, nil
 }
 
-func (s *fakeUsecaseAgentSession) CancelCurrentTurn() error { return nil }
+func (s *fakeUsecaseAgentSession) CancelCurrentTurn() error {
+	s.cancelCalls++
+	return nil
+}
 
 func (s *fakeUsecaseAgentSession) OnUpdate(onUpdate func(agenttypes.Event)) {
 	s.onUpdate = onUpdate
@@ -1043,11 +1438,40 @@ func (s *fakeUsecaseAgentSession) ContextWindow(context.Context) (agenttypes.Con
 	return agenttypes.ContextWindow{}, nil
 }
 
-func (s *fakeUsecaseAgentSession) Close() error { return nil }
+func (s *fakeUsecaseAgentSession) Close() error {
+	s.closeCalls++
+	return nil
+}
 
 func (s *fakeUsecaseAgentSession) emit(event agenttypes.Event) {
 	if s.onUpdate != nil {
 		s.onUpdate(event)
+	}
+}
+
+func TestCancelSessionTurnCancelsTransientActiveTurn(t *testing.T) {
+	rootDir := t.TempDir()
+	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
+	manager := session.NewManager(root)
+	service := Service{Registry: &commandTestRegistry{root: root, manager: manager}}
+	sessionKey := "transient-login-test"
+	turnCtx, cancel := context.WithCancel(context.Background())
+	fakeSession := &fakeUsecaseAgentSession{}
+	registerActiveTurn(root.ID, sessionKey, cancel)
+	setActiveTurnSession(root.ID, sessionKey, fakeSession)
+	defer unregisterActiveTurn(root.ID, sessionKey)
+
+	if err := service.CancelSessionTurn(context.Background(), CancelSessionTurnInput{
+		RootID: root.ID,
+		Key:    sessionKey,
+	}); err != nil {
+		t.Fatalf("CancelSessionTurn returned error: %v", err)
+	}
+	if turnCtx.Err() == nil {
+		t.Fatal("expected transient turn context to be canceled")
+	}
+	if fakeSession.cancelCalls != 1 {
+		t.Fatalf("CancelCurrentTurn calls = %d, want 1", fakeSession.cancelCalls)
 	}
 }
 

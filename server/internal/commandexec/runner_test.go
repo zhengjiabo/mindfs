@@ -1,6 +1,14 @@
 package commandexec
 
-import "testing"
+import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
 
 func TestShellCommandUsesConfiguredShellOrder(t *testing.T) {
 	fallback := DefaultShell()
@@ -69,6 +77,126 @@ func TestCloseSessionRemovesAllShellsForRootSession(t *testing.T) {
 	}
 }
 
+func TestLongShellDoesNotFeedControlScriptToCommandStdin(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	dir := t.TempDir()
+	sessionKey := "stdin-" + strings.ReplaceAll(t.Name(), "/", "-")
+	defer CloseSession("root", sessionKey)
+
+	proc, err := StartInSession(context.Background(), Options{
+		Command: "cat > consumed.txt",
+		Cwd:     dir,
+		Shells:  []ShellSpec{{Command: "sh"}},
+		RootID:  "root",
+		Session: sessionKey,
+	})
+	if err != nil {
+		t.Fatalf("StartInSession returned error: %v", err)
+	}
+
+	done := make(chan Result, 1)
+	go func() {
+		done <- proc.Wait()
+	}()
+
+	select {
+	case result := <-done:
+		if result.ExitCode != 0 {
+			t.Fatalf("exit code = %d, want 0", result.ExitCode)
+		}
+	case <-time.After(3 * time.Second):
+		_ = proc.KillTree()
+		t.Fatal("command did not finish; control script may have been exposed on stdin")
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "consumed.txt"))
+	if err != nil {
+		t.Fatalf("read consumed.txt: %v", err)
+	}
+	if len(data) != 0 {
+		t.Fatalf("consumed.txt = %q, want empty", string(data))
+	}
+}
+
+func TestLongShellEvalKeepsShellState(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	dir := t.TempDir()
+	subdir := filepath.Join(dir, "subdir")
+	if err := os.Mkdir(subdir, 0o755); err != nil {
+		t.Fatalf("mkdir subdir: %v", err)
+	}
+	sessionKey := "state-" + strings.ReplaceAll(t.Name(), "/", "-")
+	defer CloseSession("root", sessionKey)
+
+	first, err := StartInSession(context.Background(), Options{
+		Command: "cd subdir",
+		Cwd:     dir,
+		Shells:  []ShellSpec{{Command: "sh"}},
+		RootID:  "root",
+		Session: sessionKey,
+	})
+	if err != nil {
+		t.Fatalf("first StartInSession returned error: %v", err)
+	}
+	if result := waitForTestCommand(t, first); result.ExitCode != 0 {
+		t.Fatalf("first exit code = %d, want 0", result.ExitCode)
+	}
+
+	second, err := StartInSession(context.Background(), Options{
+		Command: "pwd",
+		Cwd:     dir,
+		Shells:  []ShellSpec{{Command: "sh"}},
+		RootID:  "root",
+		Session: sessionKey,
+	})
+	if err != nil {
+		t.Fatalf("second StartInSession returned error: %v", err)
+	}
+	output := readTestOutput(second.Output())
+	if result := waitForTestCommand(t, second); result.ExitCode != 0 {
+		t.Fatalf("second exit code = %d, want 0", result.ExitCode)
+	}
+	gotPath, err := filepath.EvalSymlinks(strings.TrimSpace(output))
+	if err != nil {
+		t.Fatalf("eval pwd path: %v", err)
+	}
+	wantPath, err := filepath.EvalSymlinks(subdir)
+	if err != nil {
+		t.Fatalf("eval subdir path: %v", err)
+	}
+	if gotPath != wantPath {
+		t.Fatalf("pwd = %q, want %q", gotPath, wantPath)
+	}
+}
+
+func waitForTestCommand(t *testing.T, proc Process) Result {
+	t.Helper()
+	done := make(chan Result, 1)
+	go func() {
+		done <- proc.Wait()
+	}()
+	select {
+	case result := <-done:
+		return result
+	case <-time.After(3 * time.Second):
+		_ = proc.KillTree()
+		t.Fatal("command did not finish")
+	}
+	return Result{ExitCode: -1}
+}
+
+func readTestOutput(output <-chan []byte) string {
+	var out strings.Builder
+	for chunk := range output {
+		out.Write(chunk)
+	}
+	return out.String()
+}
+
 func TestStripShellControlEchoSuppressesSplitPowerShellLine(t *testing.T) {
 	run := &longShellCommand{}
 
@@ -120,10 +248,10 @@ func TestFindMarkersAllowsWindowsPromptPrefix(t *testing.T) {
 	start := "__MINDFS_CMD_START_abc__"
 	end := "__MINDFS_CMD_END_abc__:"
 
-	if got := findMarkerLine("C:\\Users\\me>" + start + "\r\n", start); got < 0 {
+	if got := findMarkerLine("C:\\Users\\me>"+start+"\r\n", start); got < 0 {
 		t.Fatalf("start marker with prompt prefix was not found")
 	}
-	if got := findMarkerLinePrefix("C:\\Users\\me>" + end + "0\r\n", end); got < 0 {
+	if got := findMarkerLinePrefix("C:\\Users\\me>"+end+"0\r\n", end); got < 0 {
 		t.Fatalf("end marker with prompt prefix was not found")
 	}
 }
