@@ -6,6 +6,7 @@ type AgentMenuListProps = {
   agents: AgentStatus[];
   selectedAgent?: string;
   maxHeight?: string;
+  renderEnd?: (agent: AgentStatus) => React.ReactNode;
   onSelect: (agentName: string) => void;
 };
 
@@ -13,6 +14,7 @@ export function AgentMenuList({
   agents,
   selectedAgent = "",
   maxHeight = "180px",
+  renderEnd,
   onSelect,
 }: AgentMenuListProps) {
   return (
@@ -82,6 +84,7 @@ export function AgentMenuList({
                 !
               </span>
             ) : null}
+            {renderEnd ? renderEnd(item) : null}
           </button>
         );
       })}

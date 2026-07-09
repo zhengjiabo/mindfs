@@ -367,6 +367,10 @@ func (h *HTTPHandler) Routes() http.Handler {
 	r.Post("/api/agent-config/backups", h.protectedEndpoint(h.handleAgentConfigBackupCreate))
 	r.Delete("/api/agent-config/backups", h.protectedEndpoint(h.handleAgentConfigBackupDelete))
 	r.Post("/api/agent-config/switch", h.protectedEndpoint(h.handleAgentConfigSwitch))
+	r.Get("/api/agent-api-providers", h.protectedEndpoint(h.handleAgentAPIProvidersList))
+	r.Post("/api/agent-api-providers", h.protectedEndpoint(h.handleAgentAPIProviderCreate))
+	r.Delete("/api/agent-api-providers", h.protectedEndpoint(h.handleAgentAPIProviderDelete))
+	r.Post("/api/agent-api-providers/switch", h.protectedEndpoint(h.handleAgentAPIProviderSwitch))
 	r.NotFound(h.handleNotFound)
 
 	return r
@@ -1153,6 +1157,7 @@ func (h *HTTPHandler) handleAgentsList(w http.ResponseWriter, r *http.Request) {
 	if prefs := h.AppContext.GetPreferences(); prefs != nil {
 		statuses = prefs.ApplyAgentDefaults(statuses)
 	}
+	statuses = applyAgentAPIProviderCapabilities(statuses)
 	shells := []agent.ShellStatus{}
 	if pool := h.AppContext.GetAgentPool(); pool != nil {
 		shells = pool.AvailableShells()

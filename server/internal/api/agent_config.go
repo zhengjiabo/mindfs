@@ -17,6 +17,7 @@ import (
 	"mindfs/server/internal/agent"
 	"mindfs/server/internal/apperr"
 	configpkg "mindfs/server/internal/config"
+	"mindfs/server/internal/preferences"
 )
 
 type agentConfigSource struct {
@@ -393,6 +394,15 @@ func switchAgentConfig(req agentConfigSwitchRequest, app *AppContext) (agentConf
 	}
 	if app != nil && app.GetAgentPool() != nil {
 		app.GetAgentPool().KillAgentProcess(entry.Agent, 0)
+	}
+	if app != nil && app.GetPreferences() != nil {
+		if err := app.GetPreferences().UpdateAgentLastConfigSelection(entry.Agent, preferences.LastConfigSelection{
+			Type: "backup",
+			ID:   entry.ID,
+			Name: entry.Name,
+		}); err != nil {
+			return agentConfigManifestEntry{}, false, err
+		}
 	}
 	triggerAgentConfigSwitchProbe(app, entry.Agent)
 	return entry, false, nil

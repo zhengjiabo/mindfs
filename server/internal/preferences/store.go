@@ -25,9 +25,16 @@ type UserPreferences struct {
 }
 
 type AgentDefaults struct {
-	Model       string `json:"model,omitempty"`
-	Effort      string `json:"effort,omitempty"`
-	FastService string `json:"fast_service,omitempty"`
+	Model               string               `json:"model,omitempty"`
+	Effort              string               `json:"effort,omitempty"`
+	FastService         string               `json:"fast_service,omitempty"`
+	LastConfigSelection *LastConfigSelection `json:"last_config_selection,omitempty"`
+}
+
+type LastConfigSelection struct {
+	Type string `json:"type,omitempty"`
+	ID   string `json:"id,omitempty"`
+	Name string `json:"name,omitempty"`
 }
 
 func NewStore() (*Store, error) {
@@ -107,6 +114,32 @@ func (s *Store) UpdateAgentDefaultsIfChanged(agentName, model, effort, fastServi
 	return true, nil
 }
 
+func (s *Store) UpdateAgentLastConfigSelection(agentName string, selection LastConfigSelection) error {
+	if s == nil {
+		return nil
+	}
+	agentName = strings.TrimSpace(agentName)
+	selection.Type = strings.TrimSpace(selection.Type)
+	selection.ID = strings.TrimSpace(selection.ID)
+	selection.Name = strings.TrimSpace(selection.Name)
+	if agentName == "" || selection.Type == "" || selection.ID == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.data.Agents == nil {
+		s.data.Agents = map[string]AgentDefaults{}
+	}
+	next := s.data.Agents[agentName]
+	if next.LastConfigSelection != nil && *next.LastConfigSelection == selection {
+		return nil
+	}
+	next.LastConfigSelection = &selection
+	s.data.Agents[agentName] = next
+	return s.saveLocked()
+}
+
 func (s *Store) ApplyAgentDefaults(statuses []agent.Status) []agent.Status {
 	if s == nil || len(statuses) == 0 {
 		return statuses
@@ -127,6 +160,9 @@ func (s *Store) ApplyAgentDefaults(statuses []agent.Status) []agent.Status {
 		}
 		if defaults.FastService != "" {
 			out[i].DefaultFastService = defaults.FastService
+		}
+		if defaults.LastConfigSelection != nil {
+			out[i].LastConfigSelection = *defaults.LastConfigSelection
 		}
 	}
 	return out

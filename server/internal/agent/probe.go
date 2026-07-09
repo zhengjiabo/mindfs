@@ -19,31 +19,34 @@ import (
 )
 
 type Status struct {
-	Name                string                   `json:"name"`
-	Protocol            Protocol                 `json:"protocol,omitempty"`
-	Installed           bool                     `json:"installed"`
-	Available           bool                     `json:"available"`
-	Version             string                   `json:"version,omitempty"`
-	Error               string                   `json:"error,omitempty"`
-	RuntimeError        string                   `json:"-"`
-	ProbeError          string                   `json:"-"`
-	LastProbe           time.Time                `json:"last_probe"`
-	CurrentModelID      string                   `json:"current_model_id,omitempty"`
-	CurrentModeID       string                   `json:"current_mode_id,omitempty"`
-	DefaultModelID      string                   `json:"default_model_id,omitempty"`
-	DefaultEffort       string                   `json:"default_effort,omitempty"`
-	DefaultFastService  string                   `json:"default_fast_service,omitempty"`
-	SupportsFastService bool                     `json:"supports_fast_service"`
-	Models              []agenttypes.ModelInfo   `json:"models,omitempty"`
-	Modes               []agenttypes.ModeInfo    `json:"modes"`
-	Efforts             []string                 `json:"efforts,omitempty"`
-	ModelsError         string                   `json:"models_error,omitempty"`
-	ModesError          string                   `json:"modes_error,omitempty"`
-	Commands            []agenttypes.CommandInfo `json:"commands,omitempty"`
-	CommandsError       string                   `json:"commands_error,omitempty"`
-	Brief               string                   `json:"brief,omitempty"`
-	InstallCommands     []string                 `json:"install_commands,omitempty"`
-	UpdateCommands      []string                 `json:"update_commands,omitempty"`
+	Name                          string                   `json:"name"`
+	Protocol                      Protocol                 `json:"protocol,omitempty"`
+	Installed                     bool                     `json:"installed"`
+	Available                     bool                     `json:"available"`
+	Version                       string                   `json:"version,omitempty"`
+	Error                         string                   `json:"error,omitempty"`
+	RuntimeError                  string                   `json:"-"`
+	ProbeError                    string                   `json:"-"`
+	LastProbe                     time.Time                `json:"last_probe"`
+	CurrentModelID                string                   `json:"current_model_id,omitempty"`
+	CurrentModeID                 string                   `json:"current_mode_id,omitempty"`
+	DefaultModelID                string                   `json:"default_model_id,omitempty"`
+	DefaultEffort                 string                   `json:"default_effort,omitempty"`
+	DefaultFastService            string                   `json:"default_fast_service,omitempty"`
+	LastConfigSelection           any                      `json:"last_config_selection,omitempty"`
+	SupportsAPIProviderSwitch     bool                     `json:"supports_api_provider_switch"`
+	SupportedAPIProviderProtocols []string                 `json:"supported_api_provider_protocols,omitempty"`
+	SupportsFastService           bool                     `json:"supports_fast_service"`
+	Models                        []agenttypes.ModelInfo   `json:"models,omitempty"`
+	Modes                         []agenttypes.ModeInfo    `json:"modes"`
+	Efforts                       []string                 `json:"efforts,omitempty"`
+	ModelsError                   string                   `json:"models_error,omitempty"`
+	ModesError                    string                   `json:"modes_error,omitempty"`
+	Commands                      []agenttypes.CommandInfo `json:"commands,omitempty"`
+	CommandsError                 string                   `json:"commands_error,omitempty"`
+	Brief                         string                   `json:"brief,omitempty"`
+	InstallCommands               []string                 `json:"install_commands,omitempty"`
+	UpdateCommands                []string                 `json:"update_commands,omitempty"`
 }
 
 const (

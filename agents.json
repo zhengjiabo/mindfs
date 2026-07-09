@@ -349,7 +349,17 @@
       ],
       "command": "pi-acp",
       "protocol": "acp",
-      "configBackup": {}
+      "configBackup": {
+        "fileSources": [
+          "~/.pi/agent/models.json",
+          "~/.pi/agent/settings.json",
+          "~/.pi/agent/auth.json"
+        ],
+        "envKeys": [
+          "PI_CONFIG_DIR",
+          "PI_CODING_AGENT_DIR"
+        ]
+      }
     },
     {
       "name": "hermes",

@@ -23,11 +23,16 @@ import { SymlinkBadge } from "./SymlinkBadge";
 import { RelayLocalServicesDialog } from "./RelayLocalServicesDialog";
 import { fetchAgentCatalog, fetchAgents, type AgentStatus } from "../services/agents";
 import {
+  createAgentAPIProvider,
   createAgentConfigBackup,
+  deleteAgentAPIProvider,
   deleteAgentConfigBackup,
+  fetchAgentAPIProviders,
   fetchAgentConfigBackups,
   fetchAgentConfigDefaults,
+  switchAgentAPIProvider,
   switchAgentConfig,
+  type AgentAPIProvider,
   type AgentConfigBackup,
 } from "../services/agentConfig";
 import {
@@ -147,6 +152,9 @@ type FileTreeProps = {
 
 type AgentConfigFlow = "backup" | "switch";
 type AgentConfigStep = "agent" | "details" | "confirm";
+type AgentConfigAddTab = "backup" | "api";
+type AgentConfigSwitchTab = "backup" | "api_provider";
+type AgentConfigSwitchSelection = { type: "backup" | "api_provider"; id: string };
 
 function isAgentConfigBackupConflict(error: unknown): boolean {
   const maybeError = error as { status?: unknown; message?: unknown; payload?: { error?: unknown; message?: unknown } } | null;
@@ -538,20 +546,34 @@ function AgentConfigPopover({
   step,
   agents,
   selectedAgent,
+  addTab,
+  switchTab,
   backupName,
   fileSourcesBody,
   envBody,
+  apiProviderName,
+  apiProviderBaseURL,
+  apiProviderAPIKey,
   backups,
+  apiProviders,
   selectedBackupID,
+  selectedAPIProviderID,
   confirmMessage,
   busy,
   error,
   onChooseAgent,
+  onAddTabChange,
+  onSwitchTabChange,
   onBackupNameChange,
   onFileSourcesChange,
   onEnvBodyChange,
+  onAPIProviderNameChange,
+  onAPIProviderBaseURLChange,
+  onAPIProviderAPIKeyChange,
   onSelectedBackupChange,
+  onSelectedAPIProviderChange,
   onDeleteBackup,
+  onDeleteAPIProvider,
   onSave,
   onSwitch,
   onConfirm,
@@ -561,20 +583,34 @@ function AgentConfigPopover({
   step: AgentConfigStep;
   agents: AgentStatus[];
   selectedAgent: string;
+  addTab: AgentConfigAddTab;
+  switchTab: AgentConfigSwitchTab;
   backupName: string;
   fileSourcesBody: string;
   envBody: string;
+  apiProviderName: string;
+  apiProviderBaseURL: string;
+  apiProviderAPIKey: string;
   backups: AgentConfigBackup[];
+  apiProviders: AgentAPIProvider[];
   selectedBackupID: string;
+  selectedAPIProviderID: string;
   confirmMessage: string;
   busy: boolean;
   error: string;
   onChooseAgent: (name: string) => void;
+  onAddTabChange: (tab: AgentConfigAddTab) => void;
+  onSwitchTabChange: (tab: AgentConfigSwitchTab) => void;
   onBackupNameChange: (value: string) => void;
   onFileSourcesChange: (value: string) => void;
   onEnvBodyChange: (value: string) => void;
+  onAPIProviderNameChange: (value: string) => void;
+  onAPIProviderBaseURLChange: (value: string) => void;
+  onAPIProviderAPIKeyChange: (value: string) => void;
   onSelectedBackupChange: (value: string) => void;
+  onSelectedAPIProviderChange: (value: string) => void;
   onDeleteBackup: (id: string) => void;
+  onDeleteAPIProvider: (id: string) => void;
   onSave: () => void;
   onSwitch: () => void;
   onConfirm: () => void;
@@ -584,6 +620,12 @@ function AgentConfigPopover({
     ? "选择要备份配置的 agent"
     : "选择要切换配置的 agent";
   const confirmButtonLabel = flow === "backup" ? "继续备份" : "继续切换";
+  const selectedAgentStatus = agents.find((item) => item.name === selectedAgent);
+  const supportsAPIProvider = Boolean(selectedAgentStatus?.supports_api_provider_switch);
+  const addTabs: AgentConfigAddTab[] = supportsAPIProvider ? ["backup", "api"] : ["backup"];
+  const switchTabs: AgentConfigSwitchTab[] = supportsAPIProvider ? ["backup", "api_provider"] : ["backup"];
+  const effectiveAddTab: AgentConfigAddTab = supportsAPIProvider ? addTab : "backup";
+  const effectiveSwitchTab: AgentConfigSwitchTab = supportsAPIProvider ? switchTab : "backup";
   return (
     <div
       style={{
@@ -614,6 +656,29 @@ function AgentConfigPopover({
               agents={agents}
               selectedAgent={selectedAgent}
               maxHeight="220px"
+              renderEnd={(agent) => {
+                const name = String(agent.last_config_selection?.name || "").trim();
+                if (!name) {
+                  return null;
+                }
+                return (
+                  <span
+                    title={`上次选择：${name}`}
+                    style={{
+                      maxWidth: "120px",
+                      minWidth: 0,
+                      flexShrink: 1,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      fontSize: "11px",
+                      color: agent.name === selectedAgent ? "var(--accent-color)" : "var(--text-secondary)",
+                    }}
+                  >
+                    {name}
+                  </span>
+                );
+              }}
               onSelect={onChooseAgent}
             />
           )}
@@ -634,51 +699,139 @@ function AgentConfigPopover({
         </>
       ) : flow === "backup" ? (
         <>
-          <div style={agentConfigFieldStyle}>
-            <label style={agentConfigLabelStyle}>备份名称</label>
-            <input
-              value={backupName}
-              onChange={(event) => onBackupNameChange(event.target.value)}
-              placeholder="work"
-              style={agentConfigInputStyle}
-            />
-          </div>
-          <div style={agentConfigFieldStyle}>
-            <label style={agentConfigLabelStyle}>配置来源</label>
-            <AgentConfigLineEditor
-              value={fileSourcesBody}
-              onChange={onFileSourcesChange}
-              placeholder="每行一个文件路径"
-            />
-          </div>
-          <div style={agentConfigFieldStyle}>
-            <label style={agentConfigLabelStyle}>环境变量</label>
-            <AgentConfigLineEditor
-              value={envBody}
-              onChange={onEnvBodyChange}
-              placeholder="KEY=value，每行一个"
-            />
-          </div>
+          {addTabs.length > 1 ? (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
+              {addTabs.map((tab) => {
+                const active = effectiveAddTab === tab;
+                return (
+                  <button
+                    key={tab}
+                    type="button"
+                    disabled={busy}
+                    onClick={() => onAddTabChange(tab)}
+                    style={{
+                      border: "1px solid var(--border-color)",
+                      background: active ? "var(--selection-bg)" : "transparent",
+                      color: active ? "var(--accent-color)" : "var(--text-primary)",
+                      borderRadius: "8px",
+                      padding: "7px 8px",
+                      fontSize: "12px",
+                      fontWeight: 700,
+                      cursor: busy ? "default" : "pointer",
+                    }}
+                  >
+                    {tab === "backup" ? "配置备份" : "API 供应商"}
+                  </button>
+                );
+              })}
+            </div>
+          ) : null}
+          {effectiveAddTab === "backup" ? (
+            <>
+              <div style={agentConfigFieldStyle}>
+                <label style={agentConfigLabelStyle}>备份名称</label>
+                <input
+                  value={backupName}
+                  onChange={(event) => onBackupNameChange(event.target.value)}
+                  placeholder="work"
+                  style={agentConfigInputStyle}
+                />
+              </div>
+              <div style={agentConfigFieldStyle}>
+                <label style={agentConfigLabelStyle}>配置来源</label>
+                <AgentConfigLineEditor
+                  value={fileSourcesBody}
+                  onChange={onFileSourcesChange}
+                  placeholder="每行一个文件路径"
+                />
+              </div>
+              <div style={agentConfigFieldStyle}>
+                <label style={agentConfigLabelStyle}>环境变量</label>
+                <AgentConfigLineEditor
+                  value={envBody}
+                  onChange={onEnvBodyChange}
+                  placeholder="KEY=value，每行一个"
+                />
+              </div>
+            </>
+          ) : (
+            <>
+              <div style={agentConfigFieldStyle}>
+                <label style={agentConfigLabelStyle}>供应商名称</label>
+                <input
+                  value={apiProviderName}
+                  onChange={(event) => onAPIProviderNameChange(event.target.value)}
+                  style={agentConfigInputStyle}
+                />
+              </div>
+              <div style={agentConfigFieldStyle}>
+                <label style={agentConfigLabelStyle}>Base URL</label>
+                <input
+                  value={apiProviderBaseURL}
+                  onChange={(event) => onAPIProviderBaseURLChange(event.target.value)}
+                  style={agentConfigInputStyle}
+                />
+              </div>
+              <div style={agentConfigFieldStyle}>
+                <label style={agentConfigLabelStyle}>API Key</label>
+                <input
+                  value={apiProviderAPIKey}
+                  type="password"
+                  onChange={(event) => onAPIProviderAPIKeyChange(event.target.value)}
+                  placeholder="sk-..."
+                  style={agentConfigInputStyle}
+                />
+              </div>
+            </>
+          )}
           <div style={agentConfigActionRowStyle}>
             <button type="button" disabled={busy} onClick={onCancel} style={agentConfigSecondaryButtonStyle(busy)}>
               取消
             </button>
             <button type="button" disabled={busy} onClick={onSave} style={agentConfigPrimaryButtonStyle(busy)}>
-              保存
+              {effectiveAddTab === "backup" ? "保存" : "校验并保存"}
             </button>
           </div>
         </>
       ) : (
         <>
-          <div style={{ display: "flex", flexDirection: "column", gap: "6px", maxHeight: "230px", overflow: "auto" }}>
+          {switchTabs.length > 1 ? (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
+              {switchTabs.map((tab) => {
+                const active = effectiveSwitchTab === tab;
+                return (
+                  <button
+                    key={tab}
+                    type="button"
+                    disabled={busy}
+                    onClick={() => onSwitchTabChange(tab)}
+                    style={{
+                      border: "1px solid var(--border-color)",
+                      background: active ? "var(--selection-bg)" : "transparent",
+                      color: active ? "var(--accent-color)" : "var(--text-primary)",
+                      borderRadius: "8px",
+                      padding: "7px 8px",
+                      fontSize: "12px",
+                      fontWeight: 700,
+                      cursor: busy ? "default" : "pointer",
+                    }}
+                  >
+                    {tab === "backup" ? "配置备份" : "API 供应商"}
+                  </button>
+                );
+              })}
+            </div>
+          ) : null}
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px", maxHeight: "260px", overflow: "auto" }}>
             {busy ? (
               <div style={agentConfigHintStyle}>加载中...</div>
-            ) : backups.length === 0 ? (
-              <div style={agentConfigHintStyle}>暂无配置备份</div>
-            ) : (
-              backups.map((item) => {
+            ) : backups.length === 0 && (supportsAPIProvider ? apiProviders.length === 0 : true) ? (
+              <div style={agentConfigHintStyle}>暂无可切换配置</div>
+            ) : effectiveSwitchTab === "backup" ? (
+              backups.length === 0 ? (
+                <div style={agentConfigHintStyle}>暂无配置备份</div>
+              ) : backups.map((item) => {
                 const selected = item.id === selectedBackupID;
-                const summary = `${item.sources?.length || 0} 个文件 / ${item.envKeys?.length || 0} 个环境变量`;
                 return (
                   <div
                     key={item.id}
@@ -694,10 +847,7 @@ function AgentConfigPopover({
                     }}
                   >
                     <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                      <div style={{ minWidth: 0, flex: 1 }}>
-                        <div style={{ fontSize: "12px", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.name}</div>
-                        <div style={{ marginTop: "4px", fontSize: "11px", color: "var(--text-secondary)" }}>{summary}</div>
-                      </div>
+                      <div style={{ minWidth: 0, flex: 1, fontSize: "12px", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.name}</div>
                       <button
                         type="button"
                         aria-label={`删除配置 ${item.name}`}
@@ -715,13 +865,60 @@ function AgentConfigPopover({
                   </div>
                 );
               })
+            ) : (
+              apiProviders.length === 0 ? (
+                <div style={agentConfigHintStyle}>暂无适配的 API 供应商</div>
+              ) : apiProviders.map((item) => {
+                const selected = item.id === selectedAPIProviderID;
+                const summary = [item.protocol, (item.modelFamilies || []).join(", ")].filter(Boolean).join(" / ");
+                return (
+                  <div
+                    key={item.id}
+                    onClick={() => onSelectedAPIProviderChange(item.id)}
+                    style={{
+                      border: "1px solid var(--border-color)",
+                      background: selected ? "var(--selection-bg)" : "transparent",
+                      color: selected ? "var(--accent-color)" : "var(--text-primary)",
+                      borderRadius: "8px",
+                      padding: "8px 10px",
+                      textAlign: "left",
+                      cursor: "pointer",
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <div style={{ fontSize: "12px", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.name}</div>
+                        <div style={{ marginTop: "4px", fontSize: "11px", color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{summary}</div>
+                      </div>
+                      <button
+                        type="button"
+                        aria-label={`删除 API 供应商 ${item.name}`}
+                        title="删除"
+                        disabled={busy}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onDeleteAPIProvider(item.id);
+                        }}
+                        style={agentConfigIconButtonStyle(busy)}
+                      >
+                        <TrashIcon />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })
             )}
           </div>
           <div style={agentConfigActionRowStyle}>
             <button type="button" disabled={busy} onClick={onCancel} style={agentConfigSecondaryButtonStyle(busy)}>
               取消
             </button>
-            <button type="button" disabled={busy || !selectedBackupID} onClick={onSwitch} style={agentConfigPrimaryButtonStyle(busy || !selectedBackupID)}>
+            <button
+              type="button"
+              disabled={busy || (effectiveSwitchTab === "backup" ? !selectedBackupID : !selectedAPIProviderID)}
+              onClick={onSwitch}
+              style={agentConfigPrimaryButtonStyle(busy || (effectiveSwitchTab === "backup" ? !selectedBackupID : !selectedAPIProviderID))}
+            >
               切换
             </button>
           </div>
@@ -1086,11 +1283,19 @@ export function FileTree({
   const [agentConfigStep, setAgentConfigStep] = React.useState<AgentConfigStep>("agent");
   const [agentConfigAgents, setAgentConfigAgents] = React.useState<AgentStatus[]>([]);
   const [agentConfigAgent, setAgentConfigAgent] = React.useState("");
+  const [agentConfigAddTab, setAgentConfigAddTab] = React.useState<AgentConfigAddTab>("backup");
+  const [agentConfigSwitchTab, setAgentConfigSwitchTab] = React.useState<AgentConfigSwitchTab>("backup");
   const [agentConfigName, setAgentConfigName] = React.useState("");
   const [agentConfigFileSourcesBody, setAgentConfigFileSourcesBody] = React.useState("");
   const [agentConfigEnvBody, setAgentConfigEnvBody] = React.useState("");
+  const [agentAPIProviderName, setAgentAPIProviderName] = React.useState("");
+  const [agentAPIProviderBaseURL, setAgentAPIProviderBaseURL] = React.useState("");
+  const [agentAPIProviderAPIKey, setAgentAPIProviderAPIKey] = React.useState("");
   const [agentConfigBackups, setAgentConfigBackups] = React.useState<AgentConfigBackup[]>([]);
+  const [agentAPIProviders, setAgentAPIProviders] = React.useState<AgentAPIProvider[]>([]);
   const [selectedAgentConfigID, setSelectedAgentConfigID] = React.useState("");
+  const [selectedAgentAPIProviderID, setSelectedAgentAPIProviderID] = React.useState("");
+  const [agentConfigSwitchSelection, setAgentConfigSwitchSelection] = React.useState<AgentConfigSwitchSelection | null>(null);
   const [agentConfigConfirmMessage, setAgentConfigConfirmMessage] = React.useState("");
   const [agentConfigBusy, setAgentConfigBusy] = React.useState(false);
   const [agentConfigError, setAgentConfigError] = React.useState("");
@@ -1532,11 +1737,19 @@ export function FileTree({
     setAgentConfigFlow(flow);
     setAgentConfigStep("agent");
     setAgentConfigAgent("");
+    setAgentConfigAddTab("backup");
+    setAgentConfigSwitchTab("backup");
     setAgentConfigName("");
     setAgentConfigFileSourcesBody("");
     setAgentConfigEnvBody("");
+    setAgentAPIProviderName("");
+    setAgentAPIProviderBaseURL("");
+    setAgentAPIProviderAPIKey("");
     setAgentConfigBackups([]);
+    setAgentAPIProviders([]);
     setSelectedAgentConfigID("");
+    setSelectedAgentAPIProviderID("");
+    setAgentConfigSwitchSelection(null);
     setAgentConfigConfirmMessage("");
     setAgentConfigError("");
     setIsMenuOpen(false);
@@ -1556,6 +1769,8 @@ export function FileTree({
     setAgentConfigStep("agent");
     setAgentConfigError("");
     setAgentConfigConfirmMessage("");
+    setAgentConfigSwitchSelection(null);
+    setAgentConfigSwitchTab("backup");
   }, []);
 
   const openAgentLifecycleFlow = React.useCallback(() => {
@@ -1652,16 +1867,29 @@ export function FileTree({
     setAgentConfigError("");
     setAgentConfigBusy(true);
     try {
+      const selectedAgent = agentConfigAgents.find((item) => item.name === agentName);
+      const supportsAPIProvider = Boolean(selectedAgent?.supports_api_provider_switch);
       if (agentConfigFlow === "backup") {
         const defaults = await fetchAgentConfigDefaults(agentName);
         setAgentConfigName("");
         setAgentConfigFileSourcesBody((defaults.file_sources || []).join("\n"));
         setAgentConfigEnvBody((defaults.env_keys || []).map((key) => `${key}=`).join("\n"));
+        setAgentAPIProviderName("");
+        setAgentAPIProviderBaseURL("");
+        setAgentAPIProviderAPIKey("");
+        setAgentConfigAddTab("backup");
         setAgentConfigStep("details");
       } else {
-        const backups = await fetchAgentConfigBackups(agentName);
+        const [backups, providers] = await Promise.all([
+          fetchAgentConfigBackups(agentName),
+          supportsAPIProvider ? fetchAgentAPIProviders(agentName) : Promise.resolve([]),
+        ]);
         setAgentConfigBackups(backups);
+        setAgentAPIProviders(providers);
         setSelectedAgentConfigID("");
+        setSelectedAgentAPIProviderID("");
+        setAgentConfigSwitchSelection(null);
+        setAgentConfigSwitchTab(supportsAPIProvider && selectedAgent?.last_config_selection?.type === "api_provider" ? "api_provider" : "backup");
         setAgentConfigStep("details");
       }
     } catch (error) {
@@ -1669,7 +1897,7 @@ export function FileTree({
     } finally {
       setAgentConfigBusy(false);
     }
-  }, [agentConfigFlow]);
+  }, [agentConfigAgents, agentConfigFlow]);
 
   const saveAgentConfigBackup = React.useCallback(async (overwrite = false) => {
     if (!agentConfigName.trim()) {
@@ -1701,15 +1929,49 @@ export function FileTree({
     }
   }, [agentConfigAgent, agentConfigEnvBody, agentConfigFileSourcesBody, agentConfigName, closeAgentConfigFlow]);
 
+  const saveAgentAPIProvider = React.useCallback(async () => {
+    if (!agentAPIProviderName.trim()) {
+      setAgentConfigError("请填写 API 供应商名称");
+      return;
+    }
+    if (!agentAPIProviderBaseURL.trim()) {
+      setAgentConfigError("请填写 Base URL");
+      return;
+    }
+    if (!agentAPIProviderAPIKey.trim()) {
+      setAgentConfigError("请填写 API Key");
+      return;
+    }
+    setAgentConfigBusy(true);
+    setAgentConfigError("");
+    try {
+      await createAgentAPIProvider({
+        name: agentAPIProviderName.trim(),
+        baseUrl: agentAPIProviderBaseURL.trim(),
+        apiKey: agentAPIProviderAPIKey.trim(),
+      });
+      closeAgentConfigFlow();
+    } catch (error) {
+      setAgentConfigError(error instanceof Error ? error.message : "保存 API 供应商失败");
+    } finally {
+      setAgentConfigBusy(false);
+    }
+  }, [agentAPIProviderAPIKey, agentAPIProviderBaseURL, agentAPIProviderName, closeAgentConfigFlow]);
+
   const runAgentConfigSwitch = React.useCallback(async (confirmOverwrite = false) => {
-    if (!selectedAgentConfigID) {
+    if (!agentConfigSwitchSelection) {
       setAgentConfigError("请选择配置");
       return;
     }
     setAgentConfigBusy(true);
     setAgentConfigError("");
     try {
-      const result = await switchAgentConfig({ id: selectedAgentConfigID, confirmOverwrite });
+      if (agentConfigSwitchSelection.type === "api_provider") {
+        await switchAgentAPIProvider({ agent: agentConfigAgent, providerID: agentConfigSwitchSelection.id });
+        closeAgentConfigFlow();
+        return;
+      }
+      const result = await switchAgentConfig({ id: agentConfigSwitchSelection.id, confirmOverwrite });
       if (result.needs_confirm) {
         setAgentConfigConfirmMessage(result.message || "目标配置文件已存在，请确保已备份");
         setAgentConfigStep("confirm");
@@ -1721,7 +1983,7 @@ export function FileTree({
     } finally {
       setAgentConfigBusy(false);
     }
-  }, [closeAgentConfigFlow, selectedAgentConfigID]);
+  }, [agentConfigAgent, agentConfigSwitchSelection, closeAgentConfigFlow]);
 
   const deleteSelectedAgentConfigBackup = React.useCallback(async (id: string) => {
     const trimmedID = String(id || "").trim();
@@ -1737,6 +1999,7 @@ export function FileTree({
       setAgentConfigBackups(nextBackups);
       if (selectedAgentConfigID === trimmedID) {
         setSelectedAgentConfigID("");
+        setAgentConfigSwitchSelection(null);
       }
     } catch (error) {
       setAgentConfigError(error instanceof Error ? error.message : "删除配置失败");
@@ -1744,6 +2007,41 @@ export function FileTree({
       setAgentConfigBusy(false);
     }
   }, [agentConfigAgent, agentConfigBackups, selectedAgentConfigID]);
+
+  const deleteSelectedAgentAPIProvider = React.useCallback(async (id: string) => {
+    const trimmedID = String(id || "").trim();
+    if (!trimmedID) {
+      return;
+    }
+    setAgentConfigBusy(true);
+    setAgentConfigError("");
+    try {
+      const result = await deleteAgentAPIProvider(trimmedID);
+      const nextProviders = (result.providers || agentAPIProviders)
+        .filter((item) => item.id !== trimmedID);
+      setAgentAPIProviders(nextProviders);
+      if (selectedAgentAPIProviderID === trimmedID) {
+        setSelectedAgentAPIProviderID("");
+        setAgentConfigSwitchSelection(null);
+      }
+    } catch (error) {
+      setAgentConfigError(error instanceof Error ? error.message : "删除 API 供应商失败");
+    } finally {
+      setAgentConfigBusy(false);
+    }
+  }, [agentAPIProviders, selectedAgentAPIProviderID]);
+
+  const selectAgentConfigBackup = React.useCallback((id: string) => {
+    setSelectedAgentConfigID(id);
+    setSelectedAgentAPIProviderID("");
+    setAgentConfigSwitchSelection(id ? { type: "backup", id } : null);
+  }, []);
+
+  const selectAgentAPIProvider = React.useCallback((id: string) => {
+    setSelectedAgentAPIProviderID(id);
+    setSelectedAgentConfigID("");
+    setAgentConfigSwitchSelection(id ? { type: "api_provider", id } : null);
+  }, []);
 
   React.useEffect(() => {
     if (visibleRelayTips.length === 0) {
@@ -2177,7 +2475,7 @@ export function FileTree({
                   style={fileTreeMenuButtonStyle}
                 >
                   <ConfigArchiveIcon />
-                  <span>Agent 配置备份</span>
+                  <span>添加 Agent 配置</span>
                 </button>
                 <button
                   type="button"
@@ -2493,25 +2791,45 @@ export function FileTree({
               step={agentConfigStep}
               agents={agentConfigAgents}
               selectedAgent={agentConfigAgent}
+              addTab={agentConfigAddTab}
+              switchTab={agentConfigSwitchTab}
               backupName={agentConfigName}
               fileSourcesBody={agentConfigFileSourcesBody}
               envBody={agentConfigEnvBody}
+              apiProviderName={agentAPIProviderName}
+              apiProviderBaseURL={agentAPIProviderBaseURL}
+              apiProviderAPIKey={agentAPIProviderAPIKey}
               backups={agentConfigBackups}
+              apiProviders={agentAPIProviders}
               selectedBackupID={selectedAgentConfigID}
+              selectedAPIProviderID={selectedAgentAPIProviderID}
               confirmMessage={agentConfigConfirmMessage}
               busy={agentConfigBusy}
               error={agentConfigError}
               onChooseAgent={(name) => {
                 void chooseAgentForConfig(name);
               }}
+              onAddTabChange={setAgentConfigAddTab}
+              onSwitchTabChange={setAgentConfigSwitchTab}
               onBackupNameChange={setAgentConfigName}
               onFileSourcesChange={setAgentConfigFileSourcesBody}
               onEnvBodyChange={setAgentConfigEnvBody}
-              onSelectedBackupChange={setSelectedAgentConfigID}
+              onAPIProviderNameChange={setAgentAPIProviderName}
+              onAPIProviderBaseURLChange={setAgentAPIProviderBaseURL}
+              onAPIProviderAPIKeyChange={setAgentAPIProviderAPIKey}
+              onSelectedBackupChange={selectAgentConfigBackup}
+              onSelectedAPIProviderChange={selectAgentAPIProvider}
               onDeleteBackup={(id) => {
                 void deleteSelectedAgentConfigBackup(id);
               }}
+              onDeleteAPIProvider={(id) => {
+                void deleteSelectedAgentAPIProvider(id);
+              }}
               onSave={() => {
+                if (agentConfigAddTab === "api") {
+                  void saveAgentAPIProvider();
+                  return;
+                }
                 void saveAgentConfigBackup();
               }}
               onSwitch={() => {
