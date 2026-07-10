@@ -296,8 +296,21 @@ func (s *session) handleStreamedEvents(events <-chan codexsdk.ThreadEvent) error
 		switch e := event.(type) {
 		case *codexsdk.ThreadStartedEvent:
 			s.setThreadID(e.ThreadId)
+		case *codexsdk.TurnStartedEvent:
+			continue
+		case *codexsdk.ThreadGoalUpdatedEvent:
+			s.setThreadID(e.ThreadID)
+			continue
+		case *codexsdk.ThreadGoalClearedEvent:
+			s.setThreadID(e.ThreadID)
+			continue
+		case *codexsdk.TurnDiffUpdatedEvent:
+			continue
 		case *codexsdk.ItemStartedEvent:
 			s.logRawToolItem(e.Item)
+			if _, ok := e.Item.(*codexsdk.AgentMessageItem); ok {
+				continue
+			}
 			if s.handleNonToolItem(e.Item, true) {
 				continue
 			}
@@ -885,6 +898,8 @@ func (s *session) handleRawEvent(event *codexsdk.RawEvent) bool {
 		return false
 	}
 	switch normalizeEventType(event.Type) {
+	case "thread.status.changed":
+		return true
 	case "thread.tokenUsage.updated":
 		usage, ok := parseContextWindow(event.Raw)
 		if !ok {
