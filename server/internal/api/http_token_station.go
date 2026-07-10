@@ -22,9 +22,12 @@ func (h *HTTPHandler) handleTokenStationUserInfo(w http.ResponseWriter, r *http.
 		})
 		return
 	}
-	if data, ok := userInfo["data"].(map[string]any); ok {
-		data["topup_url"] = h.tokenStationURL()
+	data, ok := userInfo["data"].(map[string]any)
+	if !ok {
+		data = map[string]any{}
+		userInfo["data"] = data
 	}
+	data["topup_url"] = h.tokenStationURL()
 	respondJSON(w, http.StatusOK, userInfo)
 }
 

@@ -1,5 +1,4 @@
 {
-  "tokenStationUrl": "https://token.a9gent.com",
   "shells": [
     {
       "command": "zsh",
