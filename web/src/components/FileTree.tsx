@@ -3270,9 +3270,10 @@ export function FileTree({
             onClick={() => { void handleInstall(); }}
             style={{
               width: "100%",
-              border: "1px solid var(--border-color)",
-              background: "var(--text-primary)",
-              color: "var(--sidebar-bg)",
+              border:
+                "1px solid color-mix(in srgb, var(--accent-color) 72%, var(--border-color))",
+              background: "var(--accent-color)",
+              color: "#fff",
               borderRadius: "10px",
               padding: "10px 12px",
               display: "flex",
