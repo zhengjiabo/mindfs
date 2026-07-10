@@ -7374,16 +7374,14 @@ export function App({ onGoHome }: AppProps) {
   }, [loadWorktreeList]);
 
   useEffect(() => {
-    if (projectTreeTab !== "worktrees") {
+    if (projectTreeTab !== "worktrees" || !currentRootId) {
       return;
     }
-    managedRootIds.forEach((rootID) => {
-      if (!rootID || worktreeItemsByRoot[rootID] || worktreeLoadingByRoot[rootID]) {
-        return;
-      }
-      void loadProjectTreeWorktrees(rootID);
-    });
-  }, [loadProjectTreeWorktrees, managedRootIds, projectTreeTab, worktreeItemsByRoot, worktreeLoadingByRoot]);
+    if (worktreeItemsByRoot[currentRootId] || worktreeLoadingByRoot[currentRootId]) {
+      return;
+    }
+    void loadProjectTreeWorktrees(currentRootId);
+  }, [currentRootId, loadProjectTreeWorktrees, projectTreeTab, worktreeItemsByRoot, worktreeLoadingByRoot]);
 
   const handleSwitchWorktree = useCallback(async (item: GitWorktreeItem) => {
     const targetPath = String(item.path || "").trim();
@@ -10962,7 +10960,11 @@ export function App({ onGoHome }: AppProps) {
     gitStatusLoading || gitStatusAvailable;
   const shouldRenderGitHistoryPanel =
     gitHistoryLoading || (gitHistoryAvailable && (gitHistory?.items.length || 0) > 0);
-	  const relatedSessionSnapshot = selectedKanbanTaskSessionSnapshot || selectedSessionSnapshot || lastMainSessionSnapshotRef.current;
+	  const relatedSessionSnapshot =
+	    selectedKanbanTaskSessionSnapshot ||
+	    selectedSessionSnapshot ||
+	    drawerSessionSnapshot ||
+	    lastMainSessionSnapshotRef.current;
 	  const relatedSessionRootId =
 	    (relatedSessionSnapshot?.root_id as string | undefined) ||
 	    selectedKanbanTask?.root_id ||
