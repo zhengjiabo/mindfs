@@ -260,7 +260,7 @@ export function AgentSelector({
 
   const handleAgentRowClick = useCallback(
     (entry: AgentStatus) => {
-      handleAgentSelect(entry.name, "");
+      handleAgentSelect(entry.name, entry.default_model_id || entry.current_model_id || "");
     },
     [handleAgentSelect],
   );

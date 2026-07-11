@@ -235,12 +235,24 @@ func isLocalCLIPath(r *http.Request) bool {
 	}
 	switch r.Method {
 	case http.MethodPost:
-		return r.URL.Path == "/api/dirs" || r.URL.Path == "/api/relay/bind/start"
+		return r.URL.Path == "/api/dirs" || r.URL.Path == "/api/relay/bind/start" || isLocalCLITaskPath(r.URL.Path)
 	case http.MethodDelete:
 		return r.URL.Path == "/api/dirs"
+	case http.MethodGet:
+		return isLocalCLITaskPath(r.URL.Path)
 	default:
 		return false
 	}
+}
+
+func isLocalCLITaskPath(path string) bool {
+	if !strings.HasPrefix(path, "/api/tasks/") {
+		return false
+	}
+	if strings.TrimPrefix(path, "/api/tasks/") == "" {
+		return false
+	}
+	return true
 }
 
 func (h *HTTPHandler) broadcastRootChanged(action, rootID string, extra ...map[string]any) {
@@ -274,9 +286,16 @@ func (h *HTTPHandler) Routes() http.Handler {
 	r.Get("/api/git/history", h.protectedEndpoint(h.handleGitHistory))
 	r.Get("/api/git/commit/files", h.protectedEndpoint(h.handleGitCommitFiles))
 	r.Get("/api/git/commit/diff", h.protectedEndpoint(h.handleGitCommitDiff))
+	r.Get("/api/git/related-file/diff", h.protectedEndpoint(h.handleGitRelatedFileDiff))
 	r.Get("/api/git/branches", h.protectedEndpoint(h.handleGitBranches))
 	r.Get("/api/git/worktrees", h.protectedEndpoint(h.handleGitWorktreeList))
 	r.Post("/api/git/checkout", h.protectedEndpoint(h.handleGitCheckout))
+	r.Post("/api/git/pull", h.protectedEndpoint(h.handleGitPull))
+	r.Post("/api/git/push", h.protectedEndpoint(h.handleGitPush))
+	r.Post("/api/git/commit", h.protectedEndpoint(h.handleGitCommit))
+	r.Post("/api/git/stage", h.protectedEndpoint(h.handleGitStage))
+	r.Post("/api/git/unstage", h.protectedEndpoint(h.handleGitUnstage))
+	r.Post("/api/git/discard", h.protectedEndpoint(h.handleGitDiscard))
 	r.Post("/api/git/worktrees", h.protectedEndpoint(h.handleGitWorktreeCreate))
 	r.Delete("/api/git/worktrees", h.protectedEndpoint(h.handleGitWorktreeRemove))
 	r.Post("/api/upload", h.handleUpload)
@@ -291,6 +310,7 @@ func (h *HTTPHandler) Routes() http.Handler {
 	r.Post("/api/sessions/import/batch", h.protectedEndpoint(h.handleExternalSessionImportBatch))
 	r.Post("/api/sessions/fork", h.protectedEndpoint(h.handleSessionFork))
 	r.Get("/api/sessions/{key}/toolcalls/{callID}", h.protectedEndpoint(h.handleSessionToolCallGet))
+	r.Post("/api/sessions/{key}/sync", h.protectedEndpoint(h.handleSessionSync))
 	r.Get("/api/sessions/{key}", h.protectedEndpoint(h.handleSessionGet))
 	r.Get("/api/sessions/{key}/related-files", h.protectedEndpoint(h.handleSessionRelatedFilesGet))
 	r.Post("/api/sessions/{key}/rename", h.protectedEndpoint(h.handleSessionRename))
@@ -301,6 +321,24 @@ func (h *HTTPHandler) Routes() http.Handler {
 	r.Put("/api/scheduled-agent-tasks/{id}", h.protectedEndpoint(h.handleScheduledAgentTaskUpdate))
 	r.Delete("/api/scheduled-agent-tasks/{id}", h.protectedEndpoint(h.handleScheduledAgentTaskDelete))
 	r.Post("/api/scheduled-agent-tasks/{id}/run", h.protectedEndpoint(h.handleScheduledAgentTaskRun))
+	r.Get("/api/task-stage-templates", h.protectedEndpoint(h.handleTaskStageTemplatesList))
+	r.Post("/api/task-stage-templates", h.protectedEndpoint(h.handleTaskStageTemplateSave))
+	r.Delete("/api/task-stage-templates/{id}", h.protectedEndpoint(h.handleTaskStageTemplateDelete))
+	r.Get("/api/task-templates", h.protectedEndpoint(h.handleTaskTemplatesList))
+	r.Post("/api/task-templates", h.protectedEndpoint(h.handleTaskTemplateSave))
+	r.Put("/api/task-templates/{id}", h.protectedEndpoint(h.handleTaskTemplateSave))
+	r.Delete("/api/task-templates/{id}", h.protectedEndpoint(h.handleTaskTemplateDelete))
+	r.Get("/api/tasks", h.protectedEndpoint(h.handleKanbanTasksList))
+	r.Post("/api/tasks", h.protectedEndpoint(h.handleKanbanTaskCreate))
+	r.Post("/api/tasks/{id}/input", h.protectedEndpoint(h.handleKanbanTaskInputUpdate))
+	r.Post("/api/tasks/{id}/next", h.protectedEndpoint(h.handleKanbanTaskNext))
+	r.Post("/api/tasks/{id}/prev", h.protectedEndpoint(h.handleKanbanTaskPrev))
+	r.Post("/api/tasks/{id}/jump", h.protectedEndpoint(h.handleKanbanTaskJump))
+	r.Post("/api/tasks/{id}/pause", h.protectedEndpoint(h.handleKanbanTaskPause))
+	r.Post("/api/tasks/{id}/resume", h.protectedEndpoint(h.handleKanbanTaskResume))
+	r.Post("/api/tasks/{id}/complete", h.protectedEndpoint(h.handleKanbanTaskComplete))
+	r.Post("/api/tasks/{id}/cancel", h.protectedEndpoint(h.handleKanbanTaskCancel))
+	r.Post("/api/tasks/{id}/fail", h.protectedEndpoint(h.handleKanbanTaskFail))
 	r.Get("/api/dirs", h.protectedEndpoint(h.handleDirs))
 	r.Post("/api/dirs", h.protectedEndpoint(h.handleAddDir))
 	r.Post("/api/dirs/{id}/rename", h.protectedEndpoint(h.handleRenameDir))
@@ -503,9 +541,10 @@ func (h *HTTPHandler) handleSessionSearch(w http.ResponseWriter, r *http.Request
 		return
 	}
 	out, err := h.service().SearchSessions(r.Context(), usecase.SearchSessionsInput{
-		RootID: rootID,
-		Query:  query,
-		Limit:  limit,
+		RootID:    rootID,
+		Query:     query,
+		Limit:     limit,
+		MultiRoot: truthyQuery(r, "multi_root"),
 	})
 	if err != nil {
 		respondError(w, http.StatusServiceUnavailable, err)
@@ -741,6 +780,48 @@ func (h *HTTPHandler) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, h.sessionResponse(out, pendingUser, contextWindow, exchangeAux))
 }
 
+func (h *HTTPHandler) handleSessionSync(w http.ResponseWriter, r *http.Request) {
+	rootID := r.URL.Query().Get("root")
+	key := chi.URLParam(r, "key")
+	if strings.TrimSpace(key) == "" {
+		respondError(w, http.StatusBadRequest, errInvalidRequest("session key required"))
+		return
+	}
+	afterSeq, err := parsePositiveIntQuery(r, "seq")
+	if err != nil {
+		respondError(w, http.StatusBadRequest, errInvalidRequest("seq must be a positive integer"))
+		return
+	}
+	uc := h.service()
+	if _, err := uc.SyncExternalSessionDelta(r.Context(), usecase.SyncExternalSessionDeltaInput{
+		RootID: rootID,
+		Key:    key,
+		Full:   true,
+	}); err != nil {
+		respondError(w, http.StatusBadRequest, err)
+		return
+	}
+	out, err := uc.GetSession(r.Context(), usecase.GetSessionInput{
+		RootID: rootID,
+		Key:    key,
+		Seq:    afterSeq,
+	})
+	if err != nil {
+		respondError(w, http.StatusNotFound, err)
+		return
+	}
+	contextWindow, _ := uc.GetSessionContextWindow(r.Context(), usecase.GetSessionContextWindowInput{
+		RootID: rootID,
+		Key:    key,
+	})
+	exchangeAux, _ := uc.GetSessionExchangeAux(r.Context(), usecase.GetSessionExchangeAuxInput{
+		RootID: rootID,
+		Key:    key,
+		Seq:    afterSeq,
+	})
+	respondJSON(w, http.StatusOK, h.sessionResponse(out, nil, contextWindow, exchangeAux))
+}
+
 func (h *HTTPHandler) handleSessionToolCallGet(w http.ResponseWriter, r *http.Request) {
 	rootID := r.URL.Query().Get("root")
 	key := chi.URLParam(r, "key")
@@ -788,6 +869,9 @@ func (h *HTTPHandler) handleSessionRelatedFilesDelete(w http.ResponseWriter, r *
 	rootID := r.URL.Query().Get("root")
 	key := chi.URLParam(r, "key")
 	path := strings.TrimSpace(r.URL.Query().Get("path"))
+	head := strings.TrimSpace(r.URL.Query().Get("head"))
+	repoPath := strings.TrimSpace(r.URL.Query().Get("repo_path"))
+	repoKind := strings.TrimSpace(r.URL.Query().Get("repo_kind"))
 	if strings.TrimSpace(key) == "" {
 		respondError(w, http.StatusBadRequest, errInvalidRequest("session key required"))
 		return
@@ -798,9 +882,12 @@ func (h *HTTPHandler) handleSessionRelatedFilesDelete(w http.ResponseWriter, r *
 	}
 	uc := h.service()
 	if err := uc.RemoveSessionRelatedFile(r.Context(), usecase.RemoveSessionRelatedFileInput{
-		RootID: rootID,
-		Key:    key,
-		Path:   path,
+		RootID:   rootID,
+		Key:      key,
+		Path:     path,
+		Head:     head,
+		RepoPath: repoPath,
+		RepoKind: repoKind,
 	}); err != nil {
 		respondError(w, http.StatusNotFound, err)
 		return
@@ -945,6 +1032,7 @@ func (h *HTTPHandler) sessionResponse(
 		"parent_session_key":  s.ParentSessionKey,
 		"parent_tool_call_id": s.ParentToolCallID,
 		"source":              s.Source,
+		"task_id":             s.TaskID,
 		"agent":               session.InferAgentFromSession(s),
 		"model":               s.Model,
 		"mode":                session.InferModeFromSession(s),
@@ -956,6 +1044,7 @@ func (h *HTTPHandler) sessionResponse(
 		"exchanges":           exchanges,
 		"exchange_aux":        auxPayload,
 		"related_files":       s.RelatedFiles,
+		"related_worktree":    s.RelatedWorktree,
 		"context_window":      contextWindow,
 		"created_at":          s.CreatedAt,
 		"updated_at":          s.UpdatedAt,
@@ -973,6 +1062,7 @@ func (h *HTTPHandler) sessionListResponse(s *session.Session) map[string]any {
 		"parent_session_key":  s.ParentSessionKey,
 		"parent_tool_call_id": s.ParentToolCallID,
 		"source":              s.Source,
+		"task_id":             s.TaskID,
 		"agent":               session.InferAgentFromSession(s),
 		"model":               s.Model,
 		"mode":                session.InferModeFromSession(s),
@@ -981,6 +1071,7 @@ func (h *HTTPHandler) sessionListResponse(s *session.Session) map[string]any {
 		"plan_mode":           s.PlanMode,
 		"shell":               h.commandShellForSession(s),
 		"name":                s.Name,
+		"related_worktree":    s.RelatedWorktree,
 		"created_at":          s.CreatedAt,
 		"updated_at":          s.UpdatedAt,
 		"closed_at":           s.ClosedAt,
@@ -1476,12 +1567,13 @@ func (h *HTTPHandler) handleFile(w http.ResponseWriter, r *http.Request) {
 
 func (h *HTTPHandler) handleGitStatus(w http.ResponseWriter, r *http.Request) {
 	rootID := strings.TrimSpace(r.URL.Query().Get("root"))
-	if rootID == "" {
-		respondError(w, http.StatusBadRequest, errInvalidRequest("root required"))
+	rootPath := strings.TrimSpace(r.URL.Query().Get("path"))
+	if rootID == "" && rootPath == "" {
+		respondError(w, http.StatusBadRequest, errInvalidRequest("root or path required"))
 		return
 	}
 	uc := h.service()
-	out, err := uc.GetGitStatus(r.Context(), usecase.GitStatusInput{RootID: rootID})
+	out, err := uc.GetGitStatus(r.Context(), usecase.GitStatusInput{RootID: rootID, RootPath: rootPath})
 	if err != nil {
 		respondError(w, http.StatusBadRequest, err)
 		return
@@ -1491,6 +1583,7 @@ func (h *HTTPHandler) handleGitStatus(w http.ResponseWriter, r *http.Request) {
 
 func (h *HTTPHandler) handleGitDiff(w http.ResponseWriter, r *http.Request) {
 	rootID := strings.TrimSpace(r.URL.Query().Get("root"))
+	repoPath := strings.TrimSpace(r.URL.Query().Get("repo_path"))
 	path := strings.TrimSpace(r.URL.Query().Get("path"))
 	if rootID == "" {
 		respondError(w, http.StatusBadRequest, errInvalidRequest("root required"))
@@ -1502,8 +1595,9 @@ func (h *HTTPHandler) handleGitDiff(w http.ResponseWriter, r *http.Request) {
 	}
 	uc := h.service()
 	out, err := uc.GetGitDiff(r.Context(), usecase.GitDiffInput{
-		RootID: rootID,
-		Path:   path,
+		RootID:   rootID,
+		RepoPath: repoPath,
+		Path:     path,
 	})
 	if err != nil {
 		respondError(w, http.StatusBadRequest, err)
@@ -1593,6 +1687,35 @@ func (h *HTTPHandler) handleGitCommitDiff(w http.ResponseWriter, r *http.Request
 	respondJSON(w, http.StatusOK, out.Diff)
 }
 
+func (h *HTTPHandler) handleGitRelatedFileDiff(w http.ResponseWriter, r *http.Request) {
+	rootID := strings.TrimSpace(r.URL.Query().Get("root"))
+	repoPath := strings.TrimSpace(r.URL.Query().Get("repo_path"))
+	repoKind := strings.TrimSpace(r.URL.Query().Get("repo_kind"))
+	head := strings.TrimSpace(r.URL.Query().Get("head"))
+	path := strings.TrimSpace(r.URL.Query().Get("path"))
+	if rootID == "" {
+		respondError(w, http.StatusBadRequest, errInvalidRequest("root required"))
+		return
+	}
+	if path == "" {
+		respondError(w, http.StatusBadRequest, errInvalidRequest("path required"))
+		return
+	}
+	uc := h.service()
+	out, err := uc.GetGitRelatedFileDiff(r.Context(), usecase.GitRelatedFileDiffInput{
+		RootID:   rootID,
+		RepoPath: repoPath,
+		RepoKind: repoKind,
+		Head:     head,
+		Path:     path,
+	})
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, out.Diff)
+}
+
 func (h *HTTPHandler) handleGitBranches(w http.ResponseWriter, r *http.Request) {
 	rootID := strings.TrimSpace(r.URL.Query().Get("root"))
 	if rootID == "" {
@@ -1642,6 +1765,122 @@ func (h *HTTPHandler) handleGitCheckout(w http.ResponseWriter, r *http.Request) 
 	respondJSON(w, http.StatusOK, out)
 }
 
+func (h *HTTPHandler) handleGitPull(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeGitActionRequest(w, r, false, false)
+	if !ok {
+		return
+	}
+	uc := h.service()
+	out, err := uc.GitPull(r.Context(), usecase.GitActionInput{RootID: req.RootID})
+	respondGitAction(w, out, err, "git_pull_failed")
+}
+
+func (h *HTTPHandler) handleGitPush(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeGitActionRequest(w, r, false, false)
+	if !ok {
+		return
+	}
+	uc := h.service()
+	out, err := uc.GitPush(r.Context(), usecase.GitActionInput{RootID: req.RootID})
+	respondGitAction(w, out, err, "git_push_failed")
+}
+
+func (h *HTTPHandler) handleGitCommit(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeGitActionRequest(w, r, false, true)
+	if !ok {
+		return
+	}
+	uc := h.service()
+	out, err := uc.GitCommit(r.Context(), usecase.GitActionInput{
+		RootID:  req.RootID,
+		Message: req.Message,
+	})
+	respondGitAction(w, out, err, "git_commit_failed")
+}
+
+func (h *HTTPHandler) handleGitStage(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeGitActionRequest(w, r, true, false)
+	if !ok {
+		return
+	}
+	uc := h.service()
+	out, err := uc.GitStagePath(r.Context(), usecase.GitActionInput{
+		RootID: req.RootID,
+		Path:   req.Path,
+	})
+	respondGitAction(w, out, err, "git_stage_failed")
+}
+
+func (h *HTTPHandler) handleGitUnstage(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeGitActionRequest(w, r, true, false)
+	if !ok {
+		return
+	}
+	uc := h.service()
+	out, err := uc.GitUnstagePath(r.Context(), usecase.GitActionInput{
+		RootID: req.RootID,
+		Path:   req.Path,
+	})
+	respondGitAction(w, out, err, "git_unstage_failed")
+}
+
+func (h *HTTPHandler) handleGitDiscard(w http.ResponseWriter, r *http.Request) {
+	req, ok := decodeGitActionRequest(w, r, true, false)
+	if !ok {
+		return
+	}
+	uc := h.service()
+	out, err := uc.GitDiscardPath(r.Context(), usecase.GitActionInput{
+		RootID: req.RootID,
+		Path:   req.Path,
+		Status: req.Status,
+	})
+	respondGitAction(w, out, err, "git_discard_failed")
+}
+
+type gitActionRequest struct {
+	RootID  string `json:"root"`
+	Path    string `json:"path"`
+	Status  string `json:"status"`
+	Message string `json:"message"`
+}
+
+func decodeGitActionRequest(w http.ResponseWriter, r *http.Request, requirePath bool, requireMessage bool) (gitActionRequest, bool) {
+	var req gitActionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, errInvalidRequest("invalid json body"))
+		return req, false
+	}
+	req.RootID = strings.TrimSpace(req.RootID)
+	req.Path = strings.TrimSpace(req.Path)
+	req.Status = strings.TrimSpace(req.Status)
+	req.Message = strings.TrimSpace(req.Message)
+	if req.RootID == "" {
+		respondError(w, http.StatusBadRequest, errInvalidRequest("root required"))
+		return req, false
+	}
+	if requirePath && req.Path == "" {
+		respondError(w, http.StatusBadRequest, errInvalidRequest("path required"))
+		return req, false
+	}
+	if requireMessage && req.Message == "" {
+		respondError(w, http.StatusBadRequest, errInvalidRequest("message required"))
+		return req, false
+	}
+	return req, true
+}
+
+func respondGitAction(w http.ResponseWriter, out usecase.GitActionOutput, err error, code string) {
+	if err != nil {
+		respondJSON(w, http.StatusConflict, map[string]any{
+			"error":   code,
+			"message": err.Error(),
+		})
+		return
+	}
+	respondJSON(w, http.StatusOK, out)
+}
+
 func (h *HTTPHandler) handleGitWorktreeList(w http.ResponseWriter, r *http.Request) {
 	rootID := strings.TrimSpace(r.URL.Query().Get("root"))
 	if rootID == "" {
@@ -1676,6 +1915,7 @@ func (h *HTTPHandler) handleGitWorktreeCreate(w http.ResponseWriter, r *http.Req
 		Name:       req.Name,
 		BranchMode: req.BranchMode,
 		Branch:     req.Branch,
+		Register:   true,
 	})
 	if err != nil {
 		respondError(w, http.StatusBadRequest, err)

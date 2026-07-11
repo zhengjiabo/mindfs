@@ -14,21 +14,23 @@ const (
 )
 
 type Session struct {
-	Key              string         `json:"key"`
-	Type             string         `json:"type"`
-	ParentSessionKey string         `json:"parent_session_key,omitempty"`
-	ParentToolCallID string         `json:"parent_tool_call_id,omitempty"`
-	Source           string         `json:"source,omitempty"`
-	AgentCtxSeq      map[string]int `json:"agent_ctx_seq,omitempty"`
-	Model            string         `json:"model,omitempty"`
-	Shell            string         `json:"shell,omitempty"`
-	PlanMode         bool           `json:"plan_mode,omitempty"`
-	Name             string         `json:"name"`
-	Exchanges        []Exchange     `json:"exchanges"`
-	RelatedFiles     []RelatedFile  `json:"related_files"`
-	CreatedAt        time.Time      `json:"created_at"`
-	UpdatedAt        time.Time      `json:"updated_at"`
-	ClosedAt         *time.Time     `json:"closed_at,omitempty"`
+	Key              string           `json:"key"`
+	Type             string           `json:"type"`
+	ParentSessionKey string           `json:"parent_session_key,omitempty"`
+	ParentToolCallID string           `json:"parent_tool_call_id,omitempty"`
+	Source           string           `json:"source,omitempty"`
+	TaskID           string           `json:"task_id,omitempty"`
+	AgentCtxSeq      map[string]int   `json:"agent_ctx_seq,omitempty"`
+	Model            string           `json:"model,omitempty"`
+	Shell            string           `json:"shell,omitempty"`
+	PlanMode         bool             `json:"plan_mode,omitempty"`
+	Name             string           `json:"name"`
+	Exchanges        []Exchange       `json:"exchanges"`
+	RelatedFiles     []RelatedFile    `json:"related_files"`
+	RelatedWorktree  *RelatedWorktree `json:"related_worktree,omitempty"`
+	CreatedAt        time.Time        `json:"created_at"`
+	UpdatedAt        time.Time        `json:"updated_at"`
+	ClosedAt         *time.Time       `json:"closed_at,omitempty"`
 }
 
 type Exchange struct {
@@ -50,13 +52,14 @@ type ExchangeAux struct {
 	ToolCall  *agenttypes.ToolCall      `json:"toolcall,omitempty"`
 	Thought   string                    `json:"thought,omitempty"`
 	ThoughtID string                    `json:"thought_id,omitempty"`
+	Todo      *agenttypes.TodoUpdate    `json:"todo,omitempty"`
 	Plan      *agenttypes.PlanUpdate    `json:"plan,omitempty"`
 	Compact   *agenttypes.CompactNotice `json:"compact,omitempty"`
 }
 
 func CompactExchangeAux(aux ExchangeAux) (ExchangeAux, bool) {
 	if aux.ToolCall == nil {
-		if aux.Plan != nil || aux.Compact != nil {
+		if aux.Todo != nil || aux.Plan != nil || aux.Compact != nil {
 			return aux, true
 		}
 		return ExchangeAux{}, false
@@ -211,9 +214,22 @@ func truncateStringBytes(value string, maxBytes int) (string, int, bool) {
 }
 
 type RelatedFile struct {
+	RootID           string `json:"root_id,omitempty"`
+	RepoPath         string `json:"repo_path,omitempty"`
+	RepoName         string `json:"repo_name,omitempty"`
+	RepoKind         string `json:"repo_kind,omitempty"`
 	Path             string `json:"path"`
+	Head             string `json:"head,omitempty"`
 	Relation         string `json:"relation"`
 	CreatedBySession bool   `json:"created_by_session"`
+}
+
+type RelatedWorktree struct {
+	RootID    string    `json:"root_id"`
+	Path      string    `json:"path"`
+	Branch    string    `json:"branch,omitempty"`
+	Head      string    `json:"head,omitempty"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type SearchOptions struct {

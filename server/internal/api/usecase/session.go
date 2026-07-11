@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"mindfs/server/internal/agent"
 	agenttypes "mindfs/server/internal/agent/types"
 	"mindfs/server/internal/commandexec"
+	"mindfs/server/internal/fs"
 	"mindfs/server/internal/session"
 )
 
@@ -72,13 +74,33 @@ type ListChildSessionsInput struct {
 }
 
 type SearchSessionsInput struct {
-	RootID string
-	Query  string
-	Limit  int
+	RootID    string
+	Query     string
+	Limit     int
+	MultiRoot bool
 }
 
 type SearchSessionsOutput struct {
-	Items []session.SearchHit
+	Items []SessionSearchHit
+}
+
+type SessionSearchHit struct {
+	RootID           string     `json:"root_id,omitempty"`
+	Key              string     `json:"key"`
+	Type             string     `json:"type"`
+	ParentSessionKey string     `json:"parent_session_key,omitempty"`
+	ParentToolCallID string     `json:"parent_tool_call_id,omitempty"`
+	Agent            string     `json:"agent,omitempty"`
+	Model            string     `json:"model,omitempty"`
+	Shell            string     `json:"shell,omitempty"`
+	Name             string     `json:"name"`
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
+	ClosedAt         *time.Time `json:"closed_at,omitempty"`
+	MatchType        string     `json:"match_type"`
+	MatchScore       int        `json:"match_score"`
+	Seq              int        `json:"seq"`
+	Snippet          string     `json:"snippet,omitempty"`
 }
 
 func (s *Service) ListSessions(ctx context.Context, in ListSessionsInput) (ListSessionsOutput, error) {
@@ -231,6 +253,9 @@ func (s *Service) SearchSessions(ctx context.Context, in SearchSessionsInput) (S
 	if err := s.ensureRegistry(); err != nil {
 		return SearchSessionsOutput{}, err
 	}
+	if in.MultiRoot {
+		return s.searchMultiRootSessions(ctx, in)
+	}
 	manager, err := s.Registry.GetSessionManager(in.RootID)
 	if err != nil {
 		return SearchSessionsOutput{}, err
@@ -242,7 +267,100 @@ func (s *Service) SearchSessions(ctx context.Context, in SearchSessionsInput) (S
 	if err != nil {
 		return SearchSessionsOutput{}, err
 	}
+	return SearchSessionsOutput{Items: mapSessionSearchHits(in.RootID, items)}, nil
+}
+
+func (s *Service) searchMultiRootSessions(ctx context.Context, in SearchSessionsInput) (SearchSessionsOutput, error) {
+	limit := normalizeSessionSearchLimit(in.Limit)
+	items := make([]SessionSearchHit, 0, limit)
+	for _, root := range s.Registry.ListRoots() {
+		manager, err := s.Registry.GetSessionManager(root.ID)
+		if err != nil {
+			return SearchSessionsOutput{}, err
+		}
+		hits, err := manager.Search(ctx, session.SearchOptions{
+			Query: in.Query,
+			Limit: limit,
+		})
+		if err != nil {
+			return SearchSessionsOutput{}, err
+		}
+		items = append(items, mapSessionSearchHits(root.ID, hits)...)
+	}
+	sortSessionSearchHits(items)
+	if len(items) > limit {
+		items = items[:limit]
+	}
 	return SearchSessionsOutput{Items: items}, nil
+}
+
+func mapSessionSearchHits(rootID string, hits []session.SearchHit) []SessionSearchHit {
+	out := make([]SessionSearchHit, 0, len(hits))
+	for _, hit := range hits {
+		out = append(out, SessionSearchHit{
+			RootID:           strings.TrimSpace(rootID),
+			Key:              hit.Key,
+			Type:             hit.Type,
+			ParentSessionKey: hit.ParentSessionKey,
+			ParentToolCallID: hit.ParentToolCallID,
+			Agent:            hit.Agent,
+			Model:            hit.Model,
+			Shell:            hit.Shell,
+			Name:             hit.Name,
+			CreatedAt:        hit.CreatedAt,
+			UpdatedAt:        hit.UpdatedAt,
+			ClosedAt:         hit.ClosedAt,
+			MatchType:        hit.MatchType,
+			MatchScore:       hit.MatchScore,
+			Seq:              hit.Seq,
+			Snippet:          hit.Snippet,
+		})
+	}
+	return out
+}
+
+func normalizeSessionSearchLimit(limit int) int {
+	switch {
+	case limit <= 0:
+		return 20
+	case limit > 50:
+		return 50
+	default:
+		return limit
+	}
+}
+
+func sortSessionSearchHits(items []SessionSearchHit) {
+	sort.SliceStable(items, func(i, j int) bool {
+		left := items[i]
+		right := items[j]
+		if left.MatchType != right.MatchType {
+			return sessionSearchMatchTypeRank(left.MatchType) < sessionSearchMatchTypeRank(right.MatchType)
+		}
+		if left.MatchScore != right.MatchScore {
+			return left.MatchScore > right.MatchScore
+		}
+		if !left.UpdatedAt.Equal(right.UpdatedAt) {
+			return left.UpdatedAt.After(right.UpdatedAt)
+		}
+		if left.RootID != right.RootID {
+			return left.RootID < right.RootID
+		}
+		return left.Key < right.Key
+	})
+}
+
+func sessionSearchMatchTypeRank(matchType string) int {
+	switch strings.TrimSpace(matchType) {
+	case "name":
+		return 0
+	case "user":
+		return 1
+	case "reply":
+		return 2
+	default:
+		return 3
+	}
 }
 
 type CreateSessionInput struct {
@@ -650,13 +768,47 @@ func (s *Service) GetSessionRelatedFiles(ctx context.Context, in GetSessionRelat
 	if err != nil {
 		return nil, err
 	}
-	return append([]session.RelatedFile(nil), current.RelatedFiles...), nil
+	return normalizeSessionRelatedFiles(ctx, manager.Root(), current.RelatedFiles), nil
+}
+
+func normalizeSessionRelatedFiles(ctx context.Context, root fs.RootInfo, files []session.RelatedFile) []session.RelatedFile {
+	next := append([]session.RelatedFile(nil), files...)
+	rootPath := strings.TrimSpace(root.RootPath)
+	if rootPath == "" {
+		return next
+	}
+	for i := range next {
+		file := &next[i]
+		if !strings.HasPrefix(filepath.ToSlash(strings.TrimSpace(file.Path)), ".worktree/task-") {
+			continue
+		}
+		repoPath := strings.TrimSpace(file.RepoPath)
+		if repoPath != "" && !sameManagedDirPath(repoPath, rootPath) {
+			continue
+		}
+		resolvedRepoPath, resolvedPath, resolvedHead, ok := resolveTaskWorktreeRelatedFile(ctx, rootPath, file.Path)
+		if !ok {
+			continue
+		}
+		file.RootID = strings.TrimSpace(file.RootID)
+		file.RepoKind = "git"
+		file.RepoPath = resolvedRepoPath
+		file.RepoName = filepath.Base(resolvedRepoPath)
+		file.Path = resolvedPath
+		if file.Head == "" {
+			file.Head = resolvedHead
+		}
+	}
+	return next
 }
 
 type RemoveSessionRelatedFileInput struct {
-	RootID string
-	Key    string
-	Path   string
+	RootID   string
+	Key      string
+	Path     string
+	Head     string
+	RepoPath string
+	RepoKind string
 }
 
 func (s *Service) RemoveSessionRelatedFile(ctx context.Context, in RemoveSessionRelatedFileInput) error {
@@ -667,7 +819,33 @@ func (s *Service) RemoveSessionRelatedFile(ctx context.Context, in RemoveSession
 	if err != nil {
 		return err
 	}
-	return manager.RemoveRelatedFile(ctx, in.Key, in.Path)
+	if err := manager.RemoveRelatedFileAtHead(ctx, in.Key, in.Path, in.Head, in.RepoPath, in.RepoKind); err != nil {
+		return err
+	}
+	root := manager.Root()
+	if legacyPath, ok := legacyTaskWorktreeRelatedPath(root.RootPath, in.RepoPath, in.Path); ok {
+		return manager.RemoveRelatedFileAtHead(ctx, in.Key, legacyPath, in.Head, root.RootPath, in.RepoKind)
+	}
+	return nil
+}
+
+func legacyTaskWorktreeRelatedPath(rootPath, repoPath, path string) (string, bool) {
+	rootPath = strings.TrimSpace(rootPath)
+	repoPath = strings.TrimSpace(repoPath)
+	path = strings.TrimSpace(path)
+	if rootPath == "" || repoPath == "" || path == "" || sameManagedDirPath(rootPath, repoPath) {
+		return "", false
+	}
+	absPath := filepath.Clean(filepath.Join(repoPath, filepath.FromSlash(filepath.ToSlash(path))))
+	rel, err := filepath.Rel(filepath.Clean(rootPath), absPath)
+	if err != nil || rel == "." || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	rel = filepath.ToSlash(rel)
+	if !strings.HasPrefix(rel, ".worktree/task-") {
+		return "", false
+	}
+	return rel, true
 }
 
 type CloseSessionInput struct {
@@ -811,13 +989,14 @@ func (s *Service) RenameSession(ctx context.Context, in RenameSessionInput) (*se
 }
 
 type BuildPromptInput struct {
-	Session       *session.Session
-	Manager       *session.Manager
-	Agent         string
-	Message       string
-	ClientContext ClientContext
-	AgentCtxSeq   *int
-	IsInitial     bool
+	Session        *session.Session
+	Manager        *session.Manager
+	Agent          string
+	Message        string
+	ClientContext  ClientContext
+	AgentCtxSeq    *int
+	RuntimeRootAbs string
+	IsInitial      bool
 }
 
 func (s *Service) BuildPrompt(in BuildPromptInput) string {
@@ -848,19 +1027,21 @@ func prependSwitchHint(in BuildPromptInput, prompt string) string {
 	if linesToRead <= 0 {
 		return prompt
 	}
-	logPath := in.Manager.ExchangeLogPath(in.Session.Key)
+	logPath := switchReadHintPath(in.Manager, in.Session.Key, in.RuntimeRootAbs)
 	readHint := buildSwitchReadHint(logPath, linesToRead)
 	return readHint + prompt
 }
 
 type SendMessageInput struct {
 	RootID              string
+	RuntimeRootPath     string
 	Key                 string
 	Agent               string
 	Model               string
 	Mode                string
 	Effort              string
 	FastService         string
+	PlanMode            *bool
 	Shell               string
 	TerminalCols        int
 	Content             string
@@ -1001,6 +1182,27 @@ func calculateSwitchReadLines(total, lastCtxSeq int) int {
 		return switchContextTailLines
 	}
 	return delta
+}
+
+func switchReadHintPath(manager *session.Manager, sessionKey, runtimeRootAbs string) string {
+	if manager == nil {
+		return ""
+	}
+	logPath := manager.ExchangeLogPath(sessionKey)
+	runtimeRootAbs = strings.TrimSpace(runtimeRootAbs)
+	if logPath == "" || runtimeRootAbs == "" {
+		return logPath
+	}
+	rootAbs, err := manager.Root().RootDir()
+	if err != nil || strings.TrimSpace(rootAbs) == "" {
+		return logPath
+	}
+	absLogPath := filepath.Join(rootAbs, filepath.FromSlash(logPath))
+	rel, err := filepath.Rel(runtimeRootAbs, absLogPath)
+	if err != nil || strings.TrimSpace(rel) == "" {
+		return logPath
+	}
+	return filepath.ToSlash(rel)
 }
 
 func buildSwitchReadHint(exchangeLogPath string, lines int) string {
@@ -1740,6 +1942,11 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 	if err != nil {
 		return err
 	}
+	if in.PlanMode != nil && current.PlanMode != *in.PlanMode {
+		if err := manager.UpdatePlanMode(ctx, current, *in.PlanMode); err != nil {
+			return err
+		}
+	}
 	if current.Type == session.TypeCommand {
 		return s.sendCommandMessage(turnCtx, in, manager, current)
 	}
@@ -1758,7 +1965,11 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 		watcher.MarkSessionActive(current.Key)
 	}
 	root := manager.Root()
-	rootAbs, _ := root.RootDir()
+	managedRootAbs, _ := root.RootDir()
+	rootAbs := managedRootAbs
+	if runtimeRootPath := strings.TrimSpace(in.RuntimeRootPath); runtimeRootPath != "" {
+		rootAbs = filepath.Clean(runtimeRootPath)
+	}
 	planMode := current != nil && current.PlanMode
 	sess, agentCtxSeq, err := s.ensureAgentSession(turnCtx, agentPool, manager, current, in.Agent, in.Model, in.Mode, in.Effort, in.FastService, rootAbs)
 	if err != nil {
@@ -1767,13 +1978,14 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 	setActiveTurnSession(in.RootID, current.Key, sess)
 
 	prompt := s.BuildPrompt(BuildPromptInput{
-		Session:       current,
-		Manager:       manager,
-		Agent:         in.Agent,
-		Message:       in.Content,
-		ClientContext: in.ClientCtx,
-		AgentCtxSeq:   agentCtxSeq,
-		IsInitial:     isInitial,
+		Session:        current,
+		Manager:        manager,
+		Agent:          in.Agent,
+		Message:        in.Content,
+		ClientContext:  in.ClientCtx,
+		AgentCtxSeq:    agentCtxSeq,
+		RuntimeRootAbs: rootAbs,
+		IsInitial:      isInitial,
 	})
 	var responseText string
 	sawAssistantChunk := false
@@ -1839,11 +2051,12 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 						if watcher == nil {
 							continue
 						}
+						recordPath := relatedFileRecordPath(managedRootAbs, rootAbs, path)
 						if update.Type == agenttypes.EventTypeToolCall && toolCall.Status == "running" {
-							watcher.RecordPendingWrite(current.Key, path)
+							watcher.RecordPendingWrite(current.Key, recordPath)
 						}
 						if update.Type == agenttypes.EventTypeToolUpdate || toolCall.Status == "complete" {
-							watcher.RecordSessionFile(current.Key, path)
+							watcher.RecordSessionFile(current.Key, recordPath)
 						}
 					}
 				}
@@ -1881,6 +2094,16 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 						Seq:  plannedAssistantSeq,
 						Line: currentAssistantLine(responseText),
 						Plan: &planCopy,
+					})
+				}
+			}
+			if update.Type == agenttypes.EventTypeTodoUpdate {
+				if todo, ok := update.Data.(agenttypes.TodoUpdate); ok && len(todo.Items) > 0 {
+					todoCopy := todo
+					auxBuffer = append(auxBuffer, session.ExchangeAux{
+						Seq:  plannedAssistantSeq,
+						Line: currentAssistantLine(responseText),
+						Todo: &todoCopy,
 					})
 				}
 			}
@@ -2628,6 +2851,16 @@ func attachBackgroundSessionUpdates(ctx context.Context, in subagentSessionInput
 				})
 			}
 		}
+		if update.Type == agenttypes.EventTypeTodoUpdate {
+			if todo, ok := update.Data.(agenttypes.TodoUpdate); ok && len(todo.Items) > 0 {
+				todoCopy := todo
+				auxBuffer = append(auxBuffer, session.ExchangeAux{
+					Seq:  plannedAssistantSeq,
+					Line: currentAssistantLine(responseText),
+					Todo: &todoCopy,
+				})
+			}
+		}
 		if update.Type == agenttypes.EventTypeCompact {
 			if compact, ok := update.Data.(agenttypes.CompactNotice); ok {
 				compactCopy := compact
@@ -3077,6 +3310,7 @@ func dedupeExchangeAuxBuffer(items []session.ExchangeAux) []session.ExchangeAux 
 	seenToolCallIDs := make(map[string]int, len(items))
 	seenPlanIDs := make(map[string]struct{}, len(items))
 	seenCompactIDs := make(map[string]struct{}, len(items))
+	seenTodo := false
 	out := make([]session.ExchangeAux, 0, len(items))
 	for i := len(items) - 1; i >= 0; i-- {
 		item := items[i]
@@ -3093,6 +3327,13 @@ func dedupeExchangeAuxBuffer(items []session.ExchangeAux) []session.ExchangeAux 
 				continue
 			}
 			seenToolCallIDs[callID] = len(out)
+		}
+		isTodo := item.Todo != nil || (item.ToolCall != nil && item.ToolCall.Kind == agenttypes.ToolKindTodo)
+		if isTodo {
+			if seenTodo {
+				continue
+			}
+			seenTodo = true
 		}
 		if item.Plan != nil {
 			planID := strings.TrimSpace(item.Plan.ID)
@@ -3157,6 +3398,9 @@ func mergeBufferedToolCall(base, next agenttypes.ToolCall) agenttypes.ToolCall {
 		}
 		for key, value := range next.Meta {
 			merged.Meta[key] = value
+		}
+		if stringMeta(base.Meta, "taskTool") == "TaskCreate" && stringMeta(next.Meta, "taskTool") == "TaskUpdate" {
+			merged.Meta["taskTool"] = "TaskCreate"
 		}
 	}
 	return merged
@@ -3294,6 +3538,26 @@ func normalizeToolPath(root pathNormalizer, path string) string {
 		return path
 	}
 	return normalized
+}
+
+func relatedFileRecordPath(managedRootAbs, runtimeRootAbs, path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path)
+	}
+	slashPath := filepath.ToSlash(path)
+	if strings.HasPrefix(slashPath, ".worktree/task-") {
+		return filepath.Clean(filepath.Join(managedRootAbs, filepath.FromSlash(slashPath)))
+	}
+	runtimeRootAbs = strings.TrimSpace(runtimeRootAbs)
+	managedRootAbs = strings.TrimSpace(managedRootAbs)
+	if runtimeRootAbs != "" && managedRootAbs != "" && !sameManagedDirPath(runtimeRootAbs, managedRootAbs) {
+		return filepath.Clean(filepath.Join(runtimeRootAbs, filepath.FromSlash(slashPath)))
+	}
+	return path
 }
 
 func normalizeDiffTextPaths(root pathNormalizer, text string) string {

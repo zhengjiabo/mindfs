@@ -19,6 +19,7 @@ import { renderToolIcon } from "./stream/ToolCallCard";
 type SessionInfo = {
   key: string;
   session_key?: string;
+  root_id?: string;
   name: string;
   type: "chat" | "plugin" | "command";
   agent: string;
@@ -845,7 +846,7 @@ export function ActionBar({
         requestAnimationFrame(() => editorRef.current?.focus());
       }
     }
-  }, [serializedInput, pendingAttachments, isConnected, sending, mode, agent, planSessionKey, planRootId, onSetPlanMode, isMobile, model, agentMode, onSendMessage, currentRootId, supportsEffort, effort, supportsServiceTier, fastService, shell]);
+  }, [serializedInput, pendingAttachments, isConnected, sending, mode, agent, currentRootId, planSessionKey, planRootId, onSetPlanMode, isMobile, model, agentMode, onSendMessage, supportsEffort, effort, supportsServiceTier, fastService, shell]);
 
   const handleCancel = useCallback(async () => {
     const sessionKey = currentSession?.key;
@@ -1536,33 +1537,35 @@ export function ActionBar({
 
               <ModeSelector mode={mode} onModeChange={setMode} compact={true} disabled={isModeLocked} />
               {mode !== "command" ? (
-                <AgentSelector
-                  agent={agent}
-                  model={model}
-                  mode={agentMode}
-                  effort={effort}
-                  agents={agents}
-                  onAgentChange={(nextAgent, nextModel) => {
-                    const nextStatus = agents.find((item) => item.name === nextAgent);
-                    const defaults = getAgentDefaults(nextStatus);
-                    setAgent(nextAgent);
-                    setModel(nextModel || defaults.model);
-                    setAgentMode("");
-                    setEffort(defaults.effort);
-                    setFastService(defaults.fastService);
-                  }}
-                  onModeChange={(nextAgentMode) => setAgentMode(nextAgentMode || "")}
-                  onEffortChange={(nextEffort) => setEffort(nextEffort || "")}
-                  fastService={fastService}
-                  onFastServiceChange={(nextFastService) => setFastService(nextFastService || "")}
-                  onAgentRestart={async (targetAgent) => {
-                    await restartAgent(targetAgent);
-                    const items = await fetchAgents(true);
-                    setAgents(items);
-                  }}
-                  compact={true}
-                  warnUnavailable={isSelectedAgentUnavailable}
-                />
+                <div>
+                  <AgentSelector
+                    agent={agent}
+                    model={model}
+                    mode={agentMode}
+                    effort={effort}
+                    agents={agents}
+                    onAgentChange={(nextAgent, nextModel) => {
+                      const nextStatus = agents.find((item) => item.name === nextAgent);
+                      const defaults = getAgentDefaults(nextStatus);
+                      setAgent(nextAgent);
+                      setModel(nextModel || defaults.model);
+                      setAgentMode("");
+                      setEffort(defaults.effort);
+                      setFastService(defaults.fastService);
+                    }}
+                    onModeChange={(nextAgentMode) => setAgentMode(nextAgentMode || "")}
+                    onEffortChange={(nextEffort) => setEffort(nextEffort || "")}
+                    fastService={fastService}
+                    onFastServiceChange={(nextFastService) => setFastService(nextFastService || "")}
+                    onAgentRestart={async (targetAgent) => {
+                      await restartAgent(targetAgent);
+                      const items = await fetchAgents(true);
+                      setAgents(items);
+                    }}
+                    compact={true}
+                    warnUnavailable={isSelectedAgentUnavailable}
+                  />
+                </div>
               ) : (
                 <ShellSelector
                   shell={shell}

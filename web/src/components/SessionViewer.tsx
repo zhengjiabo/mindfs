@@ -1,4 +1,4 @@
-import React, { memo, useEffect, useRef, useState } from "react";
+import React, { memo, useEffect, useMemo, useRef, useState } from "react";
 import { useSessionStream, type TimelineItem } from "../hooks/useSessionStream";
 import type { TodoUpdate } from "../services/session";
 import { ThinkingBlock } from "./stream/ThinkingBlock";
@@ -52,6 +52,7 @@ type SessionViewerProps = {
   session: SessionItem | null;
   loading?: boolean;
   slashCommandResult?: {
+    sessionKey?: string;
     command: string;
     content: string;
     status: "running" | "complete" | "failed";
@@ -74,9 +75,9 @@ type SessionViewerProps = {
     string,
     { status: string; additions: number; deletions: number }
   >;
-  onFileClick?: (path: string) => void;
+  onFileClick?: (file: RelatedFile & { name?: string }) => void;
   onRootClick?: (rootId: string) => void;
-  onRemoveRelatedFile?: (path: string) => void;
+  onRemoveRelatedFile?: (path: string, head?: string, repoPath?: string, repoKind?: string) => void;
   onAskUserAnswer?: (input: {
     rootId: string;
     sessionKey: string;
@@ -606,6 +607,7 @@ function ForkIcon() {
         strokeWidth="1.5"
         d="M17 7a2 2 0 1 0 0-4a2 2 0 0 0 0 4M7 7a2 2 0 1 0 0-4a2 2 0 0 0 0 4m0 14a2 2 0 1 0 0-4a2 2 0 0 0 0 4M7 7v10M17 7v1c0 2.5-2 3-2 3l-6 2s-2 .5-2 3v1"
       />
+      <circle cx="17" cy="5" r="2" fill="currentColor" />
     </svg>
   );
 }
@@ -969,6 +971,29 @@ function shouldDefaultCollapseRelatedFiles(
   return relatedFileCount > 5;
 }
 
+const USER_MESSAGE_SUMMARY_LENGTH = 48;
+
+function normalizeUserMessageSummary(content: string): string {
+  const text = stripUploadAttachmentTokens(content || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!text) {
+    return "空消息";
+  }
+  return text.length > USER_MESSAGE_SUMMARY_LENGTH
+    ? `${text.slice(0, USER_MESSAGE_SUMMARY_LENGTH)}...`
+    : text;
+}
+
+function UserMessageListIcon() {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 32 32" aria-hidden="true">
+      <path d="M0 0h32v32H0z" fill="none" />
+      <path fill="currentColor" d="M4.082 4.083v3h22.835v-3zm0 16.223h22.835v-3H4.082zm0-6.612h22.835v-3H4.082zm0 13.223h22.835v-3H4.082z" />
+    </svg>
+  );
+}
+
 function SessionViewerInner({
   session,
   loading = false,
@@ -1007,6 +1032,7 @@ function SessionViewerInner({
   const onFileClickRef = useRef(onFileClick);
   const copyResetTimersRef = useRef<Record<string, number>>({});
   const relatedFilesDefaultStateRef = useRef<string>("");
+  const userSummaryRootRef = useRef<HTMLDivElement | null>(null);
   const sessionKey = session?.key || session?.session_key || null;
   const exchanges = Array.isArray(session?.exchanges) ? session.exchanges : [];
   const isAwaiting = !!(session as any)?.pending;
@@ -1023,6 +1049,9 @@ function SessionViewerInner({
   const targetSeqFrameRef = useRef<number | null>(null);
   const targetSeqTimerRefs = useRef<number[]>([]);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  const [userSummaryHoverOpen, setUserSummaryHoverOpen] = useState(false);
+  const [userSummaryPinnedOpen, setUserSummaryPinnedOpen] = useState(false);
+  const viewportStickFrameRef = useRef<number | null>(null);
 
   const cancelTargetSeqScroll = () => {
     if (targetSeqFrameRef.current !== null) {
@@ -1031,6 +1060,15 @@ function SessionViewerInner({
     }
     targetSeqTimerRefs.current.forEach((timer) => window.clearTimeout(timer));
     targetSeqTimerRefs.current = [];
+  };
+
+  const stickSessionToBottom = (behavior: ScrollBehavior = "auto") => {
+    const container = scrollRef.current;
+    if (!container) {
+      return;
+    }
+    const maxTop = Math.max(0, container.scrollHeight - container.clientHeight);
+    container.scrollTo({ top: maxTop, behavior });
   };
 
   useEffect(() => {
@@ -1055,12 +1093,76 @@ function SessionViewerInner({
   useEffect(() => {
     setSavedPromptKeys({});
     setCopiedMessageKeys({});
+    setUserSummaryHoverOpen(false);
+    setUserSummaryPinnedOpen(false);
     relatedFilesDefaultStateRef.current = "";
     Object.values(copyResetTimersRef.current).forEach((timer) =>
       window.clearTimeout(timer),
     );
     copyResetTimersRef.current = {};
   }, [sessionKey, useInnerScrollContainer]);
+
+  const userMessageSummaries = useMemo(
+    () =>
+      timeline
+        .filter((item): item is TimelineItem & { type: "user_text"; id: string; content: string } => item.type === "user_text")
+        .map((item, index) => ({
+          id: item.id || `user-${index}`,
+          index: index + 1,
+          summary: normalizeUserMessageSummary(item.content || ""),
+        })),
+    [timeline],
+  );
+  const userSummaryOpen = userSummaryHoverOpen || userSummaryPinnedOpen;
+
+  const scrollToUserMessageSummary = (index: number) => {
+    const container = scrollRef.current;
+    if (!container) {
+      return;
+    }
+    const node = container.querySelector<HTMLElement>(
+      `[data-user-message-index="${index}"]`,
+    );
+    if (!node) {
+      return;
+    }
+    shouldStickToBottomRef.current = false;
+    cancelTargetSeqScroll();
+    const containerRect = container.getBoundingClientRect();
+    const nodeRect = node.getBoundingClientRect();
+    const maxTop = Math.max(0, container.scrollHeight - container.clientHeight);
+    const nextTop = Math.max(
+      0,
+      Math.min(
+        maxTop,
+        container.scrollTop +
+          nodeRect.top -
+          containerRect.top -
+          container.clientHeight / 2 +
+          nodeRect.height / 2,
+      ),
+    );
+    container.scrollTop = nextTop;
+    setShowJumpToLatest(nextTop < maxTop - 40);
+    setUserSummaryPinnedOpen(false);
+    setUserSummaryHoverOpen(false);
+  };
+
+  useEffect(() => {
+    if (!userSummaryOpen) {
+      return;
+    }
+    const handlePointerDown = (event: PointerEvent) => {
+      const root = userSummaryRootRef.current;
+      if (!root || root.contains(event.target as Node)) {
+        return;
+      }
+      setUserSummaryPinnedOpen(false);
+      setUserSummaryHoverOpen(false);
+    };
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    return () => document.removeEventListener("pointerdown", handlePointerDown, true);
+  }, [userSummaryOpen]);
 
   useEffect(() => {
     return () => {
@@ -1071,6 +1173,10 @@ function SessionViewerInner({
       if (targetSeqFrameRef.current !== null) {
         window.cancelAnimationFrame(targetSeqFrameRef.current);
         targetSeqFrameRef.current = null;
+      }
+      if (viewportStickFrameRef.current !== null) {
+        window.cancelAnimationFrame(viewportStickFrameRef.current);
+        viewportStickFrameRef.current = null;
       }
       targetSeqTimerRefs.current.forEach((timer) => window.clearTimeout(timer));
       targetSeqTimerRefs.current = [];
@@ -1092,9 +1198,43 @@ if (useInnerScrollContainer && !container) {
       shouldStickToBottomRef.current = true;
     }
     if (shouldStickToBottomRef.current) {
-      scrollEndRef.current.scrollIntoView({ behavior: "auto", block: "end" });
+      stickSessionToBottom("auto");
     }
   }, [sessionKey, timeline, isStreaming, streamVersion, slashCommandResult, useInnerScrollContainer]);
+
+  useEffect(() => {
+    const container = scrollRef.current;
+    if (!useInnerScrollContainer || !container || typeof window === "undefined") {
+      return;
+    }
+    const queueStickToBottom = () => {
+      if (!shouldStickToBottomRef.current) {
+        return;
+      }
+      if (viewportStickFrameRef.current !== null) {
+        window.cancelAnimationFrame(viewportStickFrameRef.current);
+      }
+      viewportStickFrameRef.current = window.requestAnimationFrame(() => {
+        viewportStickFrameRef.current = null;
+        if (!shouldStickToBottomRef.current) {
+          return;
+        }
+        stickSessionToBottom("auto");
+      });
+    };
+    window.visualViewport?.addEventListener("resize", queueStickToBottom);
+    window.visualViewport?.addEventListener("scroll", queueStickToBottom);
+    window.addEventListener("mindfs:safe-area-updated", queueStickToBottom as EventListener);
+    return () => {
+      window.visualViewport?.removeEventListener("resize", queueStickToBottom);
+      window.visualViewport?.removeEventListener("scroll", queueStickToBottom);
+      window.removeEventListener("mindfs:safe-area-updated", queueStickToBottom as EventListener);
+      if (viewportStickFrameRef.current !== null) {
+        window.cancelAnimationFrame(viewportStickFrameRef.current);
+        viewportStickFrameRef.current = null;
+      }
+    };
+  }, [sessionKey, useInnerScrollContainer]);
 
   useEffect(() => {
     const el = scrollRef.current;
@@ -1196,7 +1336,25 @@ if (useInnerScrollContainer && !container) {
         typeof f === "string" ? f : typeof f?.path === "string" ? f.path : "";
       const name =
         typeof f?.name === "string" ? f.name : path.split("/").pop() || path;
-      return { path, name };
+      const head =
+        typeof f !== "string" && typeof f?.head === "string" ? f.head : "";
+      const repoPath =
+        typeof f !== "string" && typeof f?.repo_path === "string"
+          ? f.repo_path
+          : "";
+      const repoName =
+        typeof f !== "string" && typeof f?.repo_name === "string"
+          ? f.repo_name
+          : repoPath.split(/[\\/]/).filter(Boolean).pop() || "";
+      const repoKind =
+        typeof f !== "string" && typeof f?.repo_kind === "string"
+          ? f.repo_kind
+          : "";
+      const rootID =
+        typeof f !== "string" && typeof f?.root_id === "string"
+          ? f.root_id
+          : "";
+      return { path, name, head, repo_path: repoPath, repo_name: repoName, repo_kind: repoKind, root_id: rootID };
     })
     .filter((f) => f.path);
   const activeAskUserCallId = (() => {
@@ -1259,6 +1417,65 @@ if (useInnerScrollContainer && !container) {
   }
 
   const displayFiles = showAllFiles ? relatedFiles : relatedFiles.slice(0, 10);
+  const displayFileGroups = (() => {
+    const currentRootPath = String(rootPath || "").replace(/[\\/]+$/, "");
+    const repoGroups = displayFiles.reduce<
+      Array<{
+        key: string;
+        repoPath: string;
+        repoName: string;
+        repoKind: string;
+        headGroups: Array<{ key: string; head: string; files: typeof displayFiles }>;
+      }>
+    >((groups, file) => {
+    const head = file.head || "";
+    const rawRepoPath = file.repo_path || "";
+    const normalizedRepoPath = String(rawRepoPath || "").replace(/[\\/]+$/, "");
+    const isCurrentRepoRecord =
+      !rawRepoPath ||
+      file.repo_name === "当前项目" ||
+      (!!currentRootPath && normalizedRepoPath === currentRootPath);
+    const repoPath = isCurrentRepoRecord ? "" : rawRepoPath;
+    const rawRepoKind = file.repo_kind || "";
+    const repoKind = isCurrentRepoRecord && rawRepoKind !== "plain" ? "" : rawRepoKind;
+    const repoKey = `${repoKind}\0${repoPath}`;
+    let repoGroup = groups.find((group) => group.key === repoKey);
+    if (!repoGroup) {
+      repoGroup = {
+        key: repoKey,
+        repoPath,
+        repoName: isCurrentRepoRecord
+          ? "当前项目"
+          : file.repo_name || repoPath.split(/[\\/]/).filter(Boolean).pop() || "当前项目",
+        repoKind,
+        headGroups: [],
+      };
+      groups.push(repoGroup);
+    }
+    const headKey = `${repoKey}\0${head}`;
+    const existing = repoGroup.headGroups.find((group) => group.key === headKey);
+    if (existing) {
+      existing.files.push(file);
+    } else {
+      repoGroup.headGroups.push({
+        key: headKey,
+        head,
+        files: [file],
+      });
+    }
+    return groups;
+    }, []);
+    return repoGroups.flatMap((repoGroup) =>
+      repoGroup.headGroups.map((headGroup) => ({
+        key: headGroup.key,
+        head: headGroup.head,
+        repoPath: repoGroup.repoPath,
+        repoName: repoGroup.repoName,
+        repoKind: repoGroup.repoKind,
+        files: headGroup.files,
+      })),
+    );
+  })();
   const hasMoreFiles = relatedFiles.length > 10;
   const displayName =
     session.name ||
@@ -1376,6 +1593,9 @@ if (useInnerScrollContainer && !container) {
       );
     }
     const isUser = item.type === "user_text";
+    const userMessageIndex = isUser
+      ? timeline.slice(0, idx + 1).filter((timelineItem) => timelineItem.type === "user_text").length
+      : undefined;
     const next = idx + 1 < timeline.length ? timeline[idx + 1] : null;
     const hasFollowingAssistantFlow =
       !isUser && !!next && next.type !== "user_text";
@@ -1413,6 +1633,7 @@ if (useInnerScrollContainer && !container) {
       <div
         key={timelineItemKey}
         data-session-seq={item.seq || undefined}
+        data-user-message-index={userMessageIndex}
         style={{
           marginTop: spacing,
           alignSelf: isUser ? "flex-end" : "flex-start",
@@ -1468,7 +1689,7 @@ if (useInnerScrollContainer && !container) {
                         key={attachment.path}
                         type="button"
                         onClick={() =>
-                          onFileClickRef.current?.(attachment.path)
+                          onFileClickRef.current?.({ path: attachment.path })
                         }
                         style={{
                           border: "none",
@@ -1718,7 +1939,7 @@ if (useInnerScrollContainer && !container) {
               <MarkdownViewer
                 content={item.content || ""}
                 root={rootId || undefined}
-                onFileClick={onFileClickRef.current}
+                onFileClick={(path) => onFileClickRef.current?.({ path })}
               />
             </div>
             {!hideAssistantMeta && (
@@ -2032,7 +2253,7 @@ if (useInnerScrollContainer && !container) {
             <MarkdownViewer
               content={content}
               root={rootId || undefined}
-              onFileClick={onFileClickRef.current}
+              onFileClick={(path) => onFileClickRef.current?.({ path })}
             />
           </div>
         ) : null}
@@ -2193,6 +2414,15 @@ if (useInnerScrollContainer && !container) {
                 }}
               >
                 <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => setRelatedFilesCollapsed((value) => !value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" || event.key === " ") {
+                      event.preventDefault();
+                      setRelatedFilesCollapsed((value) => !value);
+                    }
+                  }}
                   style={{
                     fontSize: "12px",
                     fontWeight: 500,
@@ -2201,6 +2431,10 @@ if (useInnerScrollContainer && !container) {
                     display: "flex",
                     alignItems: "center",
                     justifyContent: "space-between",
+                    cursor: "pointer",
+                    borderRadius: "6px",
+                    padding: "2px 0",
+                    outline: "none",
                   }}
                 >
                   <span>关联文件 {relatedFiles.length}</span>
@@ -2214,7 +2448,10 @@ if (useInnerScrollContainer && !container) {
                     {hasMoreFiles ? (
                       <button
                         type="button"
-                        onClick={() => setShowAllFiles(!showAllFiles)}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setShowAllFiles(!showAllFiles);
+                        }}
                         style={{
                           background: "none",
                           border: "none",
@@ -2229,9 +2466,10 @@ if (useInnerScrollContainer && !container) {
                     ) : null}
                     <button
                       type="button"
-                      onClick={() =>
+                      onClick={(event) => {
+                        event.stopPropagation();
                         setRelatedFilesCollapsed((value) => !value)
-                      }
+                      }}
                       aria-label={
                         relatedFilesCollapsed ? "展开关联文件" : "折叠关联文件"
                       }
@@ -2290,121 +2528,168 @@ if (useInnerScrollContainer && !container) {
                       gap: "4px",
                     }}
                   >
-                    {displayFiles.map((file, i) => (
-                      <div
-                        key={i}
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: "6px",
-                        }}
-                      >
+                    {displayFileGroups.map((group) => {
+                      const normalizedRepoPath = String(group.repoPath || "").replace(/[\\/]+$/, "");
+                      const normalizedRootPath = String(rootPath || "").replace(/[\\/]+$/, "");
+                      const isCurrentRepo =
+                        !group.repoPath ||
+                        group.repoName === "当前项目" ||
+                        normalizedRepoPath === normalizedRootPath;
+                      const showGroupHeader = group.repoKind === "plain" || group.head || !isCurrentRepo;
+                      return (
                         <div
-                          onClick={() => onFileClickRef.current?.(file.path)}
+                          key={group.key}
                           style={{
                             display: "flex",
-                            alignItems: "center",
-                            gap: "8px",
-                            flex: 1,
-                            minWidth: 0,
-                            padding: "3px 6px",
-                            borderRadius: "6px",
-                            cursor: "pointer",
-                            transition: "background 0.15s",
-                          }}
-                          onMouseEnter={(e) => {
-                            e.currentTarget.style.background =
-                              "rgba(0,0,0,0.04)";
-                          }}
-                          onMouseLeave={(e) => {
-                            e.currentTarget.style.background = "transparent";
+                            flexDirection: "column",
+                            gap: "4px",
                           }}
                         >
-                          <svg
-                            xmlns="http://www.w3.org/2000/svg"
-                            width="13"
-                            height="13"
-                            viewBox="0 0 24 24"
-                            fill="none"
-                            stroke="#94a3b8"
-                            strokeWidth="2"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            aria-hidden="true"
-                            style={{ flexShrink: 0 }}
-                          >
-                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                            <polyline points="14 2 14 8 20 8" />
-                            <line x1="16" x2="8" y1="13" y2="13" />
-                            <line x1="16" x2="8" y1="17" y2="17" />
-                            <line x1="10" x2="8" y1="9" y2="9" />
-                          </svg>
-                          <div
-                            style={{
-                              flex: 1,
-                              minWidth: 0,
-                              fontSize: "12px",
-                              color: "var(--text-primary)",
-                              overflow: "hidden",
-                              textOverflow: "ellipsis",
-                              whiteSpace: "nowrap",
-                            }}
-                          >
-                            {file.name}
-                          </div>
-                          {gitFileStatsByPath[file.path] ? (
+                          {showGroupHeader ? (
                             <div
+                              title={[group.repoPath, group.head].filter(Boolean).join(" · ") || group.repoName || "当前项目"}
                               style={{
-                                display: "inline-flex",
-                                alignItems: "center",
-                                gap: "8px",
+                                padding: "2px 6px 0",
                                 fontSize: "11px",
                                 color: "var(--text-secondary)",
+                                fontFamily: group.head
+                                  ? "var(--mono-font, monospace)"
+                                  : undefined,
+                              }}
+                            >
+                              {group.repoKind === "plain"
+                                ? `${group.repoName || "当前项目"} · 非 Git`
+                                : group.head
+                                  ? isCurrentRepo
+                                    ? `HEAD ${group.head.slice(0, 8)}`
+                                    : `${group.repoName || "当前项目"} · HEAD ${group.head.slice(0, 8)}`
+                                  : group.repoName || "当前项目"}
+                            </div>
+                          ) : null}
+                          {group.files.map((file) => (
+                          <div
+                            key={`${file.head || "legacy"}:${file.path}`}
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: "6px",
+                            }}
+                          >
+                            <div
+                              onClick={() => onFileClickRef.current?.(file)}
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: "8px",
+                                flex: 1,
+                                minWidth: 0,
+                                padding: "3px 6px",
+                                borderRadius: "6px",
+                                cursor: "pointer",
+                                transition: "background 0.15s",
+                              }}
+                              onMouseEnter={(e) => {
+                                e.currentTarget.style.background =
+                                  "rgba(0,0,0,0.04)";
+                              }}
+                              onMouseLeave={(e) => {
+                                e.currentTarget.style.background =
+                                  "transparent";
+                              }}
+                            >
+                              <svg
+                                xmlns="http://www.w3.org/2000/svg"
+                                width="13"
+                                height="13"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="#94a3b8"
+                                strokeWidth="2"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                                aria-hidden="true"
+                                style={{ flexShrink: 0 }}
+                              >
+                                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                                <polyline points="14 2 14 8 20 8" />
+                                <line x1="16" x2="8" y1="13" y2="13" />
+                                <line x1="16" x2="8" y1="17" y2="17" />
+                                <line x1="10" x2="8" y1="9" y2="9" />
+                              </svg>
+                              <div
+                                style={{
+                                  flex: 1,
+                                  minWidth: 0,
+                                  fontSize: "12px",
+                                  color: "var(--text-primary)",
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
+                                  whiteSpace: "nowrap",
+                                }}
+                              >
+                                {file.name}
+                              </div>
+                              {gitFileStatsByPath[file.path] ? (
+                                <div
+                                  style={{
+                                    display: "inline-flex",
+                                    alignItems: "center",
+                                    gap: "8px",
+                                    fontSize: "11px",
+                                    color: "var(--text-secondary)",
+                                    flexShrink: 0,
+                                  }}
+                                >
+                                  <span
+                                    style={{
+                                      color: "#15803d",
+                                      fontVariantNumeric: "tabular-nums",
+                                    }}
+                                  >
+                                    +{gitFileStatsByPath[file.path].additions}
+                                  </span>
+                                  <span
+                                    style={{
+                                      color: "#b91c1c",
+                                      fontVariantNumeric: "tabular-nums",
+                                    }}
+                                  >
+                                    -{gitFileStatsByPath[file.path].deletions}
+                                  </span>
+                                </div>
+                              ) : null}
+                            </div>
+                            <button
+                              type="button"
+                              aria-label={`移除关联文件 ${file.name}`}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                onRemoveRelatedFile?.(
+                                  file.path,
+                                  file.head,
+                                  file.repo_path,
+                                  file.repo_kind,
+                                );
+                              }}
+                              style={{
+                                border: "none",
+                                background: "transparent",
+                                color: "#dc2626",
+                                cursor: "pointer",
+                                fontSize: "14px",
+                                lineHeight: 1,
+                                padding: "2px 4px",
+                                borderRadius: "4px",
                                 flexShrink: 0,
                               }}
                             >
-                              <span
-                                style={{
-                                  color: "#15803d",
-                                  fontVariantNumeric: "tabular-nums",
-                                }}
-                              >
-                                +{gitFileStatsByPath[file.path].additions}
-                              </span>
-                              <span
-                                style={{
-                                  color: "#b91c1c",
-                                  fontVariantNumeric: "tabular-nums",
-                                }}
-                              >
-                                -{gitFileStatsByPath[file.path].deletions}
-                              </span>
-                            </div>
-                          ) : null}
+                              x
+                            </button>
+                          </div>
+                          ))}
                         </div>
-                        <button
-                          type="button"
-                          aria-label={`移除关联文件 ${file.name}`}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            onRemoveRelatedFile?.(file.path);
-                          }}
-                          style={{
-                            border: "none",
-                            background: "transparent",
-                            color: "#dc2626",
-                            cursor: "pointer",
-                            fontSize: "14px",
-                            lineHeight: 1,
-                            padding: "2px 4px",
-                            borderRadius: "4px",
-                            flexShrink: 0,
-                          }}
-                        >
-                          x
-                        </button>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 ) : null}
               </div>
@@ -2413,41 +2698,196 @@ if (useInnerScrollContainer && !container) {
           </div>
           </div>
         </div>
-        {showJumpToLatest ? (
-          <button
-            type="button"
-            onClick={() => {
-              cancelTargetSeqScroll();
-              if (targetSeq) {
-                targetSeqScrollKeyRef.current = `${sessionKey || ""}:${targetSeq}:${targetSeqRequestKey}`;
-              }
-              shouldStickToBottomRef.current = true;
-              setShowJumpToLatest(false);
-              scrollEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-            }}
-            aria-label="回到底部最新消息"
-            title="回到底部最新消息"
+        {interactionMode !== "drawer" && (userMessageSummaries.length > 0 || showJumpToLatest) ? (
+          <div
             style={{
               position: "absolute",
               right: "16px",
               bottom: "16px",
-              zIndex: 3,
-              display: "inline-flex",
+              zIndex: 4,
+              display: "flex",
               alignItems: "center",
               gap: "6px",
-              border: "1px solid rgba(37,99,235,0.35)",
-              background: "#2563eb",
-              color: "#ffffff",
-              borderRadius: "999px",
-              padding: "8px 12px",
-              boxShadow: "0 8px 24px rgba(15, 23, 42, 0.14)",
-              cursor: "pointer",
-              fontSize: "12px",
             }}
           >
-            <ChevronDownSmallIcon />
-            <span>回到底部</span>
-          </button>
+            {showJumpToLatest ? (
+              <button
+                type="button"
+                onClick={() => {
+                  cancelTargetSeqScroll();
+                  if (targetSeq) {
+                    targetSeqScrollKeyRef.current = `${sessionKey || ""}:${targetSeq}:${targetSeqRequestKey}`;
+                  }
+                  shouldStickToBottomRef.current = true;
+                  setShowJumpToLatest(false);
+                  stickSessionToBottom("smooth");
+                }}
+                aria-label="回到底部最新消息"
+                title="回到底部最新消息"
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "6px",
+                  height: "34px",
+                  border: "1px solid rgba(37,99,235,0.35)",
+                  background: "#2563eb",
+                  color: "#ffffff",
+                  borderRadius: "999px",
+                  padding: "0 12px",
+                  boxShadow: "0 8px 24px rgba(15, 23, 42, 0.14)",
+                  cursor: "pointer",
+                  fontSize: "12px",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                <span>回到底部</span>
+              </button>
+            ) : null}
+            {userMessageSummaries.length > 0 ? (
+              <div
+                ref={userSummaryRootRef}
+                onMouseEnter={() => setUserSummaryHoverOpen(true)}
+                onMouseLeave={() => setUserSummaryHoverOpen(false)}
+                style={{
+                  position: "relative",
+                  display: "inline-flex",
+                }}
+              >
+                {userSummaryOpen ? (
+                  <>
+                    <div
+                      aria-hidden="true"
+                      style={{
+                        position: "absolute",
+                        right: 0,
+                        bottom: "100%",
+                        width: "min(320px, calc(100vw - 72px))",
+                        height: "8px",
+                      }}
+                    />
+                    <div
+                      role="dialog"
+                      aria-label="用户消息摘要"
+                      style={{
+                        position: "absolute",
+                        right: 0,
+                        bottom: "calc(100% + 8px)",
+                        width: "min(320px, calc(100vw - 72px))",
+                        maxHeight: "260px",
+                        overflowY: "auto",
+                        padding: "6px",
+                        borderRadius: "8px",
+                        border: "1px solid var(--menu-border)",
+                        background: "var(--menu-bg)",
+                        boxShadow: "0 16px 34px rgba(15, 23, 42, 0.18)",
+                        color: "var(--text-primary)",
+                        boxSizing: "border-box",
+                      }}
+                    >
+                      <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
+                        {userMessageSummaries.map((item) => (
+                          <button
+                            key={item.id}
+                            type="button"
+                            onClick={() => scrollToUserMessageSummary(item.index)}
+                            style={{
+                              width: "100%",
+                              border: "none",
+                              background: "transparent",
+                              display: "block",
+                              padding: "6px 8px",
+                              borderRadius: "6px",
+                              cursor: "pointer",
+                              textAlign: "left",
+                              color: "var(--text-primary)",
+                            }}
+                            onMouseEnter={(event) => {
+                              event.currentTarget.style.background = "var(--menu-active-bg)";
+                            }}
+                            onMouseLeave={(event) => {
+                              event.currentTarget.style.background = "transparent";
+                            }}
+                          >
+                            <span
+                              title={item.summary}
+                              style={{
+                                display: "block",
+                                minWidth: 0,
+                                fontSize: "12px",
+                                lineHeight: "18px",
+                                color: "var(--text-primary)",
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {item.summary}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setUserSummaryPinnedOpen((open) => {
+                      const nextOpen = !open;
+                      if (!nextOpen) {
+                        setUserSummaryHoverOpen(false);
+                      }
+                      return nextOpen;
+                    });
+                  }}
+                  aria-label={userSummaryOpen ? "隐藏用户消息摘要" : "显示用户消息摘要"}
+                  title={userSummaryOpen ? "隐藏用户消息摘要" : "显示用户消息摘要"}
+                  style={{
+                    position: "relative",
+                    width: "34px",
+                    height: "34px",
+                    border: "none",
+                    borderRadius: "8px",
+                    background: userSummaryOpen ? "var(--accent-color)" : "var(--menu-bg)",
+                    color: userSummaryOpen ? "#ffffff" : "var(--text-secondary)",
+                    boxShadow: "0 10px 24px rgba(15, 23, 42, 0.16)",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    cursor: "pointer",
+                    fontSize: "18px",
+                  }}
+                >
+                  <UserMessageListIcon />
+                  <span
+                    aria-hidden="true"
+                    style={{
+                      position: "absolute",
+                      top: "-7px",
+                      right: "-7px",
+                      minWidth: "18px",
+                      height: "18px",
+                      padding: "0 5px",
+                      borderRadius: "999px",
+                      background: "#2563eb",
+                      color: "#ffffff",
+                      border: "2px solid var(--menu-bg)",
+                      fontSize: "10px",
+                      fontWeight: 800,
+                      lineHeight: "14px",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      boxSizing: "border-box",
+                      fontVariantNumeric: "tabular-nums",
+                    }}
+                  >
+                    {userMessageSummaries.length > 99 ? "99+" : userMessageSummaries.length}
+                  </span>
+                </button>
+              </div>
+            ) : null}
+          </div>
         ) : null}
       </div>
       <style>{`
@@ -2465,24 +2905,6 @@ if (useInnerScrollContainer && !container) {
         }
       `}</style>
     </div>
-  );
-}
-
-function ChevronDownSmallIcon() {
-  return (
-    <svg
-      width="12"
-      height="12"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="m6 9 6 6 6-6" />
-    </svg>
   );
 }
 

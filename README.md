@@ -37,6 +37,12 @@ Access your personal AI agents and workstation data anywhere, anytime through Mi
 - **Scheduled tasks**: Trigger agents to run tasks at specified times.
 - **Codex Remote Login**: Login to Codex remotely via the /login command.
 
+### Task Board
+- **Concurrent Execution**: Run multiple tasks in parallel, with each task isolated via its own worktree.
+- **Task Templates**: Customize task stages within templates. Each stage supports configuration of the agent, model, planning mode toggle, preset prompts, and more.
+- **Deep Linking**: Dynamic, interactive associations between tasks, worktrees, sessions, and files.
+- **Quick Creation**: Instantly spin up tasks from templates, with support for file uploads, images, and skill inputs.
+
 ### File Access
 
 - **Multiple projects**: Manage several directories at once; sessions are organized per project and stay independent.
@@ -270,6 +276,7 @@ mindfs -agent-config /path/to/agents.json
 | `-no-relayer` | `false` | Disable relay integration. Local and private-network access still work. |
 | `-e2ee` | `false` | Enable end-to-end encryption for sensitive data. The pairing code can also be used as an authentication mechanism: unpaired frontends cannot access node content. LAN access requires `-tls` to work correctly. On first enablement, the CLI prints the pairing secret. |
 | `-web-push` | `true` | Enable PWA Web Push notifications. VAPID keys are generated automatically on first start. |
+| `-notify-script string` | empty | Executable script for notification events. MindFS passes the JSON payload on stdin. |
 | `-tls` | `false` | Enable HTTPS. If `-cert` and `-key` are not provided, MindFS generates and reuses a local self-signed certificate. |
 | `-cert string` | empty | TLS certificate file in PEM format. Used with `-tls`; auto-generated when empty. |
 | `-key string` | empty | TLS private key file in PEM format. Used with `-tls`; auto-generated when empty. |

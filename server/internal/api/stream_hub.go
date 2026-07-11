@@ -10,6 +10,7 @@ import (
 	agenttypes "mindfs/server/internal/agent/types"
 	"mindfs/server/internal/api/usecase"
 	"mindfs/server/internal/e2ee"
+	"mindfs/server/internal/notify"
 	"mindfs/server/internal/session"
 
 	"github.com/gorilla/websocket"
@@ -32,6 +33,7 @@ type PendingUserMessage struct {
 	Mode        string    `json:"mode,omitempty"`
 	Effort      string    `json:"effort,omitempty"`
 	FastService string    `json:"fast_service,omitempty"`
+	PlanMode    bool      `json:"plan_mode,omitempty"`
 	Content     string    `json:"content"`
 	Timestamp   time.Time `json:"timestamp"`
 }
@@ -185,7 +187,7 @@ func buildSlashCommandDoneResponse(rootID, sessionKey, command, requestID string
 	}
 }
 
-func buildSessionUserMessageResponse(rootID, sessionKey, sessionType, sessionName, agentName, model, mode, effort, fastService string, content string, timestamp time.Time, queued bool) WSResponse {
+func buildSessionUserMessageResponse(rootID, sessionKey, sessionType, sessionName, agentName, model, mode, effort, fastService string, planMode bool, content string, timestamp time.Time, queued bool) WSResponse {
 	queueState := "active"
 	if queued {
 		queueState = "dequeued"
@@ -198,6 +200,7 @@ func buildSessionUserMessageResponse(rootID, sessionKey, sessionType, sessionNam
 		"mode":         mode,
 		"effort":       effort,
 		"fast_service": fastService,
+		"plan_mode":    planMode,
 		"created_at":   timestamp,
 		"updated_at":   timestamp,
 	}
@@ -343,7 +346,7 @@ func (h *StreamHub) getAllClientIDs() []string {
 	return clientIDs
 }
 
-func (h *StreamHub) SetPendingUser(rootID, sessionKey, sessionTitle, agent, model, mode, effort, fastService string, content string) *PendingUserMessage {
+func (h *StreamHub) SetPendingUser(rootID, sessionKey, sessionTitle, agent, model, mode, effort, fastService string, planMode bool, content string) *PendingUserMessage {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	state := h.ensurePendingSessionLocked(sessionKey)
@@ -357,6 +360,7 @@ func (h *StreamHub) SetPendingUser(rootID, sessionKey, sessionTitle, agent, mode
 		Mode:        mode,
 		Effort:      effort,
 		FastService: fastService,
+		PlanMode:    planMode,
 		Content:     content,
 		Timestamp:   time.Now().UTC(),
 	}
@@ -370,6 +374,7 @@ func (h *StreamHub) SetPendingUser(rootID, sessionKey, sessionTitle, agent, mode
 		Mode:        state.User.Mode,
 		Effort:      state.User.Effort,
 		FastService: state.User.FastService,
+		PlanMode:    state.User.PlanMode,
 		Content:     state.User.Content,
 		Timestamp:   state.User.Timestamp,
 	}
@@ -606,8 +611,24 @@ func (h *StreamHub) AppendReplyEvent(sessionKey string, event StreamEvent) {
 	state.UpdatedAt = time.Now().UTC()
 	if event.Type == "message_chunk" {
 		if chunk, ok := event.Data.(agenttypes.MessageChunk); ok {
-			state.Summary = lastRunes(state.Summary+chunk.Content, 50)
+			state.Summary = lastRunes(state.Summary+chunk.Content, notify.BodyMaxRunes)
 		}
+	} else if isAuxiliarySummaryBoundary(event.Type) {
+		state.Summary = ""
+	}
+}
+
+func isAuxiliarySummaryBoundary(eventType string) bool {
+	switch agenttypes.EventType(eventType) {
+	case agenttypes.EventTypeThoughtChunk,
+		agenttypes.EventTypeToolCall,
+		agenttypes.EventTypeToolUpdate,
+		agenttypes.EventTypeTodoUpdate,
+		agenttypes.EventTypePlanUpdate,
+		agenttypes.EventTypeCompact:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -789,12 +810,13 @@ func (h *StreamHub) BroadcastSessionUserMessage(
 	mode string,
 	effort string,
 	fastService string,
+	planMode bool,
 	content string,
 	excludeClientID string,
 	queued bool,
 ) {
-	pendingUser := h.SetPendingUser(rootID, sessionKey, sessionName, agentName, model, mode, effort, fastService, content)
-	resp := buildSessionUserMessageResponse(rootID, sessionKey, sessionType, sessionName, agentName, model, mode, effort, fastService, content, pendingUser.Timestamp, queued)
+	pendingUser := h.SetPendingUser(rootID, sessionKey, sessionName, agentName, model, mode, effort, fastService, planMode, content)
+	resp := buildSessionUserMessageResponse(rootID, sessionKey, sessionType, sessionName, agentName, model, mode, effort, fastService, planMode, content, pendingUser.Timestamp, queued)
 	for _, clientID := range h.GetSessionClientIDs(sessionKey, false) {
 		if clientID == excludeClientID {
 			continue

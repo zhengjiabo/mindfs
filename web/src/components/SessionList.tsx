@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AgentIcon } from "./AgentIcon";
 import { ModeIcon } from "./ModeIcon";
-import { rootBadgeStyle } from "./rootBadgeStyle";
+import { rootBadgeButtonStyle, rootBadgeStyle } from "./rootBadgeStyle";
 
 export type SessionType = "chat" | "plugin" | "command";
 
@@ -13,6 +13,7 @@ export type SessionItem = {
   parent_session_key?: string;
   parent_tool_call_id?: string;
   source?: string;
+  task_id?: string;
   agent?: string;
   shell?: string;
   name?: string;
@@ -40,6 +41,7 @@ type SessionListProps = {
   onSearchQueryChange?: (query: string) => void;
   onSearchSubmit?: () => void;
   onSearchBlur?: () => void;
+  syncingSessionKeys?: Set<string>;
   onSelect?: (session: SessionItem) => void;
   onRestore?: (session: SessionItem) => void;
   onSync?: (session: SessionItem) => Promise<void> | void;
@@ -85,11 +87,13 @@ type ProjectSessionListProps = {
   headerAction?: React.ReactNode;
   loading?: boolean;
   emptyText?: React.ReactNode;
+  syncingSessionKeys?: Set<string>;
   onSearchToggle?: () => void;
   onSelect?: (session: SessionItem) => void;
   onSync?: (session: SessionItem) => Promise<void> | void;
   onRename?: (session: SessionItem, nextName: string) => Promise<boolean> | boolean;
   onDelete?: (session: SessionItem) => void;
+  onProjectClick?: (rootId: string) => void;
   onLoadMoreProject?: (group: ProjectSessionGroup) => Promise<void> | void;
   onLoadChildren?: (
     session: SessionItem,
@@ -265,6 +269,24 @@ function forkSessionDisplayName(
   return source.seq > 0 ? `${base}#${source.seq}` : base;
 }
 
+function isSessionSyncing(
+  session: SessionItem,
+  syncingSessionKeys?: Set<string>,
+): boolean {
+  if (!syncingSessionKeys || syncingSessionKeys.size === 0) {
+    return false;
+  }
+  const key = session.key || session.session_key || "";
+  if (!key) {
+    return false;
+  }
+  const rootId = session.root_id || "";
+  return (
+    syncingSessionKeys.has(key) ||
+    (!!rootId && syncingSessionKeys.has(`${rootId}::${key}`))
+  );
+}
+
 export function SessionList({
   sessions,
   selectedKey = "",
@@ -279,6 +301,7 @@ export function SessionList({
   onSearchQueryChange,
   onSearchSubmit,
   onSearchBlur,
+  syncingSessionKeys,
   onSelect,
   onSync,
   onRename,
@@ -300,29 +323,43 @@ export function SessionList({
     const childrenByParent = new Map<string, SessionItem[]>();
     const topLevel: SessionItem[] = [];
     const keys = new Set(sessions.map((item) => item.key));
+    const parentByKey = new Map<string, string>();
     for (const item of sessions) {
       const parentKey = String(item.parent_session_key || "").trim();
       if (parentKey && keys.has(parentKey)) {
         const children = childrenByParent.get(parentKey) || [];
         children.push(item);
         childrenByParent.set(parentKey, children);
+        parentByKey.set(item.key, parentKey);
       } else {
         topLevel.push(item);
+      }
+    }
+    const activeParentKeys = new Set<string>();
+    if (selectedKey) {
+      activeParentKeys.add(selectedKey);
+      let parentKey = parentByKey.get(selectedKey) || "";
+      while (parentKey) {
+        activeParentKeys.add(parentKey);
+        parentKey = parentByKey.get(parentKey) || "";
       }
     }
     const out: VisibleSessionRow[] = [];
     const append = (item: SessionItem) => {
       out.push({ type: "session", session: item });
       const children = childrenByParent.get(item.key) || [];
+      const active = activeParentKeys.has(item.key);
       const expanded = !!expandedChildren[item.key];
-      const visibleChildren = expanded
-        ? children
-        : children.slice(0, COLLAPSED_CHILD_SESSION_LIMIT);
+      const visibleChildren = active
+        ? expanded
+          ? children
+          : children.slice(0, COLLAPSED_CHILD_SESSION_LIMIT)
+        : [];
       for (const child of visibleChildren) {
         append(child);
       }
       const hiddenCount = Math.max(0, children.length - COLLAPSED_CHILD_SESSION_LIMIT);
-      if (children.length > COLLAPSED_CHILD_SESSION_LIMIT || expanded || childrenHasMore[item.key]) {
+      if (active && (children.length > COLLAPSED_CHILD_SESSION_LIMIT || expanded || childrenHasMore[item.key])) {
         out.push({
           type: "child-toggle",
           parent: item,
@@ -334,7 +371,18 @@ export function SessionList({
     };
     topLevel.forEach((item) => append(item));
     return out;
-  }, [childrenHasMore, expandedChildren, searchResultsMode, sessions]);
+  }, [childrenHasMore, expandedChildren, searchResultsMode, selectedKey, sessions]);
+  const childCountByParent = useMemo(() => {
+    const counts = new Map<string, number>();
+    const keys = new Set(sessions.map((item) => item.key));
+    for (const item of sessions) {
+      const parentKey = String(item.parent_session_key || "").trim();
+      if (parentKey && keys.has(parentKey)) {
+        counts.set(parentKey, (counts.get(parentKey) || 0) + 1);
+      }
+    }
+    return counts;
+  }, [sessions]);
   const selectedParentKey = useMemo(() => {
     if (!selectedKey) return "";
     return sessions.find((item) => item.key === selectedKey)?.parent_session_key || "";
@@ -408,7 +456,7 @@ export function SessionList({
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
-          padding: searchResultsMode ? "0 10px 0 4px" : "0 10px 0 16px",
+          padding: searchResultsMode ? "0 10px 0 4px" : "0 10px 0 2px",
           borderBottom: "1px solid var(--border-color)",
           background: "var(--mindfs-topbar-bg, transparent)",
           flexShrink: 0,
@@ -426,18 +474,6 @@ export function SessionList({
           </button>
         ) : (
           <div style={{ display: "inline-flex", alignItems: "center", gap: "4px" }}>
-            <h3
-              style={{
-                margin: 0,
-                fontSize: "11px",
-                fontWeight: 700,
-                color: "var(--text-secondary)",
-                letterSpacing: "0.5px",
-                textTransform: "uppercase",
-              }}
-            >
-              SESSIONS
-            </h3>
             {onSearchToggle ? (
               <button
                 type="button"
@@ -608,41 +644,26 @@ export function SessionList({
                   : row.expanded
                     ? hasMoreChildren
                       ? "加载更多子会话"
-                      : "收起子会话"
+                      : "收起"
                     : row.hiddenCount > 0
-                      ? `还有 ${row.hiddenCount} 个子会话，展开`
+                      ? `还有 ${row.hiddenCount} 个子会话`
                       : "展开子会话";
                 return (
-                  <button
+                  <ToggleRowButton
                     key={`children-toggle-${row.parent.key}`}
-                    type="button"
-                    disabled={loading}
+                    loading={loading}
+                    label={label}
+                    showExpandIcon={!loading && (!row.expanded || hasMoreChildren)}
+                    showCollapseIcon={!loading && row.expanded}
+                    marginLeft={SUB_SESSION_ICON_OFFSET}
                     onClick={() => void handleChildToggle(row)}
-                    style={{
-                      marginLeft: "10px",
-                      marginTop: "-1px",
-                      border: "none",
-                      background: "var(--menu-active-bg)",
-                      color: "var(--text-primary)",
-                      borderRadius: "7px",
-                      padding: "5px 8px",
-                      cursor: loading ? "default" : "pointer",
-                      fontSize: "11px",
-                      textAlign: "left",
-                      opacity: loading ? 0.6 : 1,
-                      display: "inline-flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                    }}
-                    onMouseEnter={(e) => {
-                      e.currentTarget.style.background = "var(--selection-bg)";
-                    }}
-                    onMouseLeave={(e) => {
-                      e.currentTarget.style.background = "var(--menu-active-bg)";
-                    }}
-                  >
-                    {label}
-                  </button>
+                    onCollapse={() =>
+                      setExpandedChildren((prev) => ({
+                        ...prev,
+                        [row.parent.key]: false,
+                      }))
+                    }
+                  />
                 );
               }
               const session = row.session;
@@ -654,6 +675,8 @@ export function SessionList({
                   selected={session.key === selectedKey}
                   parentHighlighted={!!selectedParentKey && session.key === selectedParentKey}
                   highlightQuery={searchResultsMode ? searchQuery : ""}
+                  syncing={isSessionSyncing(session, syncingSessionKeys)}
+                  childCount={childCountByParent.get(session.key) || 0}
                   onSelect={onSelect}
                   onSync={onSync}
                   onRename={onRename}
@@ -688,6 +711,10 @@ export function SessionList({
           0%, 100% { opacity: 1; box-shadow: 0 0 0 1.5px rgba(37,99,235,0.14); }
           50% { opacity: 0.18; box-shadow: 0 0 0 4px rgba(37,99,235,0.08); }
         }
+        @keyframes spin {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
       `}</style>
     </div>
   );
@@ -700,11 +727,13 @@ export function MultiProjectSessionList({
   headerAction,
   loading = false,
   emptyText = "暂无会话记录",
+  syncingSessionKeys,
   onSearchToggle,
   onSelect,
   onSync,
   onRename,
   onDelete,
+  onProjectClick,
   onLoadMoreProject,
   onLoadChildren,
 }: ProjectSessionListProps) {
@@ -776,7 +805,7 @@ export function MultiProjectSessionList({
     }
     return byKey;
   }, [groups]);
-  const childStateKey = (session: SessionItem) => `${session.root_id || ""}:${session.key}`;
+  const childStateKey = (session: SessionItem, fallbackRootId = "") => `${session.root_id || fallbackRootId}:${session.key}`;
 
   const loadChildren = async (parent: SessionItem, beforeTime?: string) => {
     const stateKey = childStateKey(parent);
@@ -792,32 +821,48 @@ export function MultiProjectSessionList({
     }
   };
 
-  const buildRows = (sessions: SessionItem[]): VisibleSessionRow[] => {
+  const buildRows = (sessions: SessionItem[], fallbackRootId: string): VisibleSessionRow[] => {
     const childrenByParent = new Map<string, SessionItem[]>();
     const topLevel: SessionItem[] = [];
     const keys = new Set(sessions.map((item) => item.key));
+    const parentByKey = new Map<string, string>();
     for (const item of sessions) {
       const parentKey = String(item.parent_session_key || "").trim();
       if (parentKey && keys.has(parentKey)) {
         const children = childrenByParent.get(parentKey) || [];
         children.push(item);
         childrenByParent.set(parentKey, children);
+        parentByKey.set(item.key, parentKey);
       } else {
         topLevel.push(item);
+      }
+    }
+    const activeParentKeys = new Set<string>();
+    if (selectedKey && selectedRootId === fallbackRootId) {
+      activeParentKeys.add(selectedKey);
+      let parentKey = parentByKey.get(selectedKey) || "";
+      while (parentKey) {
+        activeParentKeys.add(parentKey);
+        parentKey = parentByKey.get(parentKey) || "";
       }
     }
     const out: VisibleSessionRow[] = [];
     const append = (item: SessionItem) => {
       out.push({ type: "session", session: item });
       const children = childrenByParent.get(item.key) || [];
-      const stateKey = childStateKey(item);
+      const stateKey = childStateKey(item, fallbackRootId);
+      const active = activeParentKeys.has(item.key);
       const expanded = !!expandedChildren[stateKey];
-      const visibleChildren = expanded ? children : children.slice(0, COLLAPSED_CHILD_SESSION_LIMIT);
+      const visibleChildren = active
+        ? expanded
+          ? children
+          : children.slice(0, COLLAPSED_CHILD_SESSION_LIMIT)
+        : [];
       for (const child of visibleChildren) {
         append(child);
       }
       const hiddenCount = Math.max(0, children.length - COLLAPSED_CHILD_SESSION_LIMIT);
-      if (children.length > COLLAPSED_CHILD_SESSION_LIMIT || expanded || childrenHasMore[stateKey]) {
+      if (active && (children.length > COLLAPSED_CHILD_SESSION_LIMIT || expanded || childrenHasMore[stateKey])) {
         out.push({
           type: "child-toggle",
           parent: item,
@@ -834,9 +879,10 @@ export function MultiProjectSessionList({
   const handleChildToggle = async (
     row: Extract<VisibleSessionRow, { type: "child-toggle" }>,
     groupSessions: SessionItem[],
+    fallbackRootId: string,
   ) => {
     const parentKey = row.parent.key;
-    const stateKey = childStateKey(row.parent);
+    const stateKey = childStateKey(row.parent, fallbackRootId);
     if (!row.expanded) {
       setExpandedChildren((prev) => ({ ...prev, [stateKey]: true }));
       await loadChildren(row.parent);
@@ -906,7 +952,7 @@ export function MultiProjectSessionList({
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
-          padding: "0 10px 0 16px",
+          padding: "0 10px 0 2px",
           borderBottom: "1px solid var(--border-color)",
           background: "var(--mindfs-topbar-bg, transparent)",
           flexShrink: 0,
@@ -914,9 +960,6 @@ export function MultiProjectSessionList({
         }}
       >
         <div style={{ display: "inline-flex", alignItems: "center", gap: "4px" }}>
-          <h3 style={{ margin: 0, fontSize: "11px", fontWeight: 700, color: "var(--text-secondary)", letterSpacing: "0.5px", textTransform: "uppercase" }}>
-            SESSIONS
-          </h3>
           {onSearchToggle ? (
             <button
               type="button"
@@ -963,7 +1006,15 @@ export function MultiProjectSessionList({
               const sessions = expanded
                 ? group.sessions
                 : sessionsForTopLevelLimit(group.sessions, MULTI_PROJECT_VISIBLE_LIMIT);
-              const rows = buildRows(sessions);
+              const rows = buildRows(sessions, group.rootId);
+              const childCountByParent = new Map<string, number>();
+              const sessionKeys = new Set(group.sessions.map((item) => item.key));
+              for (const item of group.sessions) {
+                const parentKey = String(item.parent_session_key || "").trim();
+                if (parentKey && sessionKeys.has(parentKey)) {
+                  childCountByParent.set(parentKey, (childCountByParent.get(parentKey) || 0) + 1);
+                }
+              }
               const remaining = Math.max(0, group.totalCount - topLevelSessions.length);
               const projectLoading = !!loadingProjects[group.rootId];
               return (
@@ -991,18 +1042,21 @@ export function MultiProjectSessionList({
                         background: "var(--border-color)",
                       }}
                     />
-                    <span
+                    <button
+                      type="button"
+                      onClick={() => onProjectClick?.(group.rootId)}
                       style={{
-                        ...rootBadgeStyle,
+                        ...rootBadgeButtonStyle,
                         flexShrink: 1,
                         maxWidth: "100%",
                         overflow: "hidden",
                         textOverflow: "ellipsis",
                         whiteSpace: "nowrap",
+                        cursor: onProjectClick ? "pointer" : "default",
                       }}
                     >
                       {group.rootName || group.rootId}
-                    </span>
+                    </button>
                     <span
                       aria-hidden="true"
                       style={{
@@ -1050,7 +1104,7 @@ export function MultiProjectSessionList({
                   <div style={{ display: "flex", flexDirection: "column", gap: "2px", paddingTop: 0 }}>
                     {rows.map((row) => {
                       if (row.type === "child-toggle") {
-                        const stateKey = childStateKey(row.parent);
+                        const stateKey = childStateKey(row.parent, group.rootId);
                         const loadingChild = !!loadingChildren[stateKey];
                         const hasMoreChildren = !!childrenHasMore[stateKey];
                         const label = loadingChild
@@ -1070,11 +1124,11 @@ export function MultiProjectSessionList({
                             showExpandIcon={!loadingChild && (!row.expanded || hasMoreChildren)}
                             showCollapseIcon={!loadingChild && row.expanded}
                             marginLeft={SUB_SESSION_ICON_OFFSET}
-                            onClick={() => void handleChildToggle(row, group.sessions)}
+                            onClick={() => void handleChildToggle(row, group.sessions, group.rootId)}
                             onCollapse={() =>
                               setExpandedChildren((prev) => ({
                                 ...prev,
-                                [childStateKey(row.parent)]: false,
+                                [childStateKey(row.parent, group.rootId)]: false,
                               }))
                             }
                           />
@@ -1090,6 +1144,8 @@ export function MultiProjectSessionList({
                           selected={session.key === selectedKey && sessionRoot === selectedRootId}
                           parentHighlighted={false}
                           highlightQuery=""
+                          syncing={isSessionSyncing({ ...session, root_id: sessionRoot }, syncingSessionKeys)}
+                          childCount={childCountByParent.get(session.key) || 0}
                           onSelect={onSelect}
                           onSync={onSync}
                           onRename={onRename}
@@ -1128,6 +1184,10 @@ export function MultiProjectSessionList({
           0%, 100% { opacity: 1; box-shadow: 0 0 0 1.5px rgba(37,99,235,0.14); }
           50% { opacity: 0.18; box-shadow: 0 0 0 4px rgba(37,99,235,0.08); }
         }
+        @keyframes spin {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
       `}</style>
     </div>
   );
@@ -1139,6 +1199,8 @@ function SessionCard({
   selected,
   parentHighlighted,
   highlightQuery,
+  syncing = false,
+  childCount = 0,
   onSelect,
   onSync,
   onRename,
@@ -1149,6 +1211,8 @@ function SessionCard({
   selected: boolean;
   parentHighlighted?: boolean;
   highlightQuery?: string;
+  syncing?: boolean;
+  childCount?: number;
   onSelect?: (session: SessionItem) => void;
   onSync?: (session: SessionItem) => Promise<void> | void;
   onRename?: (session: SessionItem, nextName: string) => Promise<boolean> | boolean;
@@ -1298,7 +1362,7 @@ function SessionCard({
               isForkSession ? (
                 <ForkSessionIcon />
               ) : (
-                <ModeIcon type={session.type || "chat"} size={16} />
+                <ModeIcon type={session.task_id ? "task" : session.type || "chat"} size={16} />
               )
             )}
             {!isSubagent && session.type === "command" ? (
@@ -1351,6 +1415,33 @@ function SessionCard({
                   agentName={session.agent || ""}
                   style={{ width: "10px", height: "10px", display: "block" }}
                 />
+              </span>
+            ) : null}
+            {!isSubagent && childCount > 0 ? (
+              <span
+                title={`${childCount} 个子会话`}
+                style={{
+                  position: "absolute",
+                  right: "-7px",
+                  top: "-7px",
+                  minWidth: "14px",
+                  height: "14px",
+                  padding: "0 3px",
+                  borderRadius: "999px",
+                  background: "var(--accent-color)",
+                  border: "1px solid var(--content-bg, #fff)",
+                  color: "#fff",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  boxSizing: "border-box",
+                  fontSize: "9px",
+                  fontWeight: 700,
+                  lineHeight: 1,
+                  letterSpacing: 0,
+                }}
+              >
+                {childCount > 99 ? "99+" : childCount}
               </span>
             ) : null}
           </span>
@@ -1525,7 +1616,22 @@ function SessionCard({
             paddingLeft: "2px",
           }}
         >
-          {session.pending ? (
+          {syncing ? (
+            <span
+              aria-label="同步中"
+              title="同步中"
+              style={{
+                width: "12px",
+                height: "12px",
+                borderRadius: "50%",
+                border: "1.5px solid rgba(100,116,139,0.35)",
+                borderTopColor: "var(--accent-color)",
+                display: "inline-block",
+                flexShrink: 0,
+                animation: "spin 0.8s linear infinite",
+              }}
+            />
+          ) : session.pending ? (
             <span
               aria-label="正在回复"
               title="正在回复"
@@ -1615,6 +1721,7 @@ function SessionCard({
           >
             <button
               type="button"
+              disabled={syncing}
               onClick={(e) => {
                 e.stopPropagation();
                 setMenuOpen(false);
@@ -1623,6 +1730,8 @@ function SessionCard({
               style={{
                 ...menuItemStyle,
                 color: "var(--text-primary)",
+                opacity: syncing ? 0.55 : 1,
+                cursor: syncing ? "default" : "pointer",
               }}
             >
               <svg
@@ -1841,6 +1950,7 @@ function ForkSessionIcon() {
         strokeWidth="1.8"
         d="M17 7a2 2 0 1 0 0-4a2 2 0 0 0 0 4M7 7a2 2 0 1 0 0-4a2 2 0 0 0 0 4m0 14a2 2 0 1 0 0-4a2 2 0 0 0 0 4M7 7v10M17 7v1c0 2.5-2 3-2 3l-6 2s-2 .5-2 3v1"
       />
+      <circle cx="17" cy="5" r="2" fill="currentColor" />
     </svg>
   );
 }

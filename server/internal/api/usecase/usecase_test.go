@@ -67,6 +67,137 @@ func TestSaveUploadedFilesDefaultsToAttachmentDirAndRenamesConflicts(t *testing.
 	assertFileContent(t, filepath.Join(rootDir, filepath.FromSlash(wantSecond)), "second file")
 }
 
+func TestGetGitRelatedFileDiffResolvesTaskWorktreePath(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found")
+	}
+	rootDir := t.TempDir()
+	runUsecaseGit(t, rootDir, "init")
+	runUsecaseGit(t, rootDir, "config", "user.email", "test@example.com")
+	runUsecaseGit(t, rootDir, "config", "user.name", "Test User")
+	mustWriteFile(t, filepath.Join(rootDir, "note.txt"), "base\n")
+	runUsecaseGit(t, rootDir, "add", "note.txt")
+	runUsecaseGit(t, rootDir, "commit", "-m", "initial")
+	runUsecaseGit(t, rootDir, "checkout", "-b", "task-1")
+	base := strings.TrimSpace(runUsecaseGit(t, rootDir, "rev-parse", "HEAD"))
+	runUsecaseGit(t, rootDir, "checkout", "-")
+
+	worktreeRoot := filepath.Join(rootDir, ".worktree", "task-1")
+	runUsecaseGit(t, rootDir, "worktree", "add", worktreeRoot, "task-1")
+	mustWriteFile(t, filepath.Join(rootDir, "note.txt"), "main-only\n")
+	mustWriteFile(t, filepath.Join(worktreeRoot, "note.txt"), "worktree-only\n")
+
+	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
+	service := Service{Registry: uploadTestRegistry{root: root}}
+	out, err := service.GetGitRelatedFileDiff(context.Background(), GitRelatedFileDiffInput{
+		RootID:   root.ID,
+		RepoPath: rootDir,
+		RepoKind: "git",
+		Head:     base,
+		Path:     ".worktree/task-1/note.txt",
+	})
+	if err != nil {
+		t.Fatalf("GetGitRelatedFileDiff returned error: %v", err)
+	}
+	if !strings.Contains(out.Diff.Content, "+worktree-only") {
+		t.Fatalf("diff content does not contain worktree change:\n%s", out.Diff.Content)
+	}
+	if strings.Contains(out.Diff.Content, "main-only") {
+		t.Fatalf("diff content used main worktree instead of task worktree:\n%s", out.Diff.Content)
+	}
+
+	out, err = service.GetGitRelatedFileDiff(context.Background(), GitRelatedFileDiffInput{
+		RootID:   root.ID,
+		RepoKind: "git",
+		Head:     base,
+		Path:     ".worktree/task-1/note.txt",
+	})
+	if err != nil {
+		t.Fatalf("GetGitRelatedFileDiff without repo path returned error: %v", err)
+	}
+	if !strings.Contains(out.Diff.Content, "+worktree-only") {
+		t.Fatalf("diff without repo path does not contain worktree change:\n%s", out.Diff.Content)
+	}
+	if strings.Contains(out.Diff.Content, "main-only") {
+		t.Fatalf("diff without repo path used main worktree instead of task worktree:\n%s", out.Diff.Content)
+	}
+}
+
+func TestNormalizeSessionRelatedFilesResolvesLegacyTaskWorktreePath(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found")
+	}
+	rootDir := t.TempDir()
+	runUsecaseGit(t, rootDir, "init")
+	runUsecaseGit(t, rootDir, "config", "user.email", "test@example.com")
+	runUsecaseGit(t, rootDir, "config", "user.name", "Test User")
+	mustWriteFile(t, filepath.Join(rootDir, "note.txt"), "base\n")
+	runUsecaseGit(t, rootDir, "add", "note.txt")
+	runUsecaseGit(t, rootDir, "commit", "-m", "initial")
+	runUsecaseGit(t, rootDir, "checkout", "-b", "task-1")
+	runUsecaseGit(t, rootDir, "checkout", "-")
+
+	worktreeRoot := filepath.Join(rootDir, ".worktree", "task-1")
+	runUsecaseGit(t, rootDir, "worktree", "add", worktreeRoot, "task-1")
+	mustWriteFile(t, filepath.Join(worktreeRoot, "note.txt"), "worktree-only\n")
+
+	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
+	files := normalizeSessionRelatedFiles(context.Background(), root, []session.RelatedFile{{
+		RootID:   root.ID,
+		RepoPath: rootDir,
+		RepoName: root.Name,
+		RepoKind: "git",
+		Path:     ".worktree/task-1/note.txt",
+		Head:     strings.TrimSpace(runUsecaseGit(t, worktreeRoot, "rev-parse", "HEAD")),
+	}})
+	if len(files) != 1 {
+		t.Fatalf("files len = %d, want 1", len(files))
+	}
+	if !sameUsecaseTestPath(files[0].RepoPath, worktreeRoot) {
+		t.Fatalf("RepoPath = %q, want %q", files[0].RepoPath, worktreeRoot)
+	}
+	if files[0].Path != "note.txt" {
+		t.Fatalf("Path = %q, want note.txt", files[0].Path)
+	}
+}
+
+func TestGetGitDiffUsesRepoPath(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not found")
+	}
+	rootDir := t.TempDir()
+	runUsecaseGit(t, rootDir, "init")
+	runUsecaseGit(t, rootDir, "config", "user.email", "test@example.com")
+	runUsecaseGit(t, rootDir, "config", "user.name", "Test User")
+	mustWriteFile(t, filepath.Join(rootDir, "note.txt"), "base\n")
+	runUsecaseGit(t, rootDir, "add", "note.txt")
+	runUsecaseGit(t, rootDir, "commit", "-m", "initial")
+	runUsecaseGit(t, rootDir, "checkout", "-b", "task-1")
+	runUsecaseGit(t, rootDir, "checkout", "-")
+
+	worktreeRoot := filepath.Join(rootDir, ".worktree", "task-1")
+	runUsecaseGit(t, rootDir, "worktree", "add", worktreeRoot, "task-1")
+	mustWriteFile(t, filepath.Join(rootDir, "note.txt"), "main-only\n")
+	mustWriteFile(t, filepath.Join(worktreeRoot, "note.txt"), "worktree-only\n")
+
+	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
+	service := Service{Registry: uploadTestRegistry{root: root}}
+	out, err := service.GetGitDiff(context.Background(), GitDiffInput{
+		RootID:   root.ID,
+		RepoPath: worktreeRoot,
+		Path:     "note.txt",
+	})
+	if err != nil {
+		t.Fatalf("GetGitDiff returned error: %v", err)
+	}
+	if !strings.Contains(out.Diff.Content, "+worktree-only") {
+		t.Fatalf("diff content does not contain worktree change:\n%s", out.Diff.Content)
+	}
+	if strings.Contains(out.Diff.Content, "main-only") {
+		t.Fatalf("diff content used main worktree instead of task worktree:\n%s", out.Diff.Content)
+	}
+}
+
 func TestSendCommandMessagePersistsFinalToolCallAndSuggestion(t *testing.T) {
 	rootDir := t.TempDir()
 	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
@@ -141,6 +272,84 @@ func TestSendCommandMessagePersistsFinalToolCallAndSuggestion(t *testing.T) {
 	}
 	if len(candidates) != 1 || candidates[0].Name != "printf mindfs-command" {
 		t.Fatalf("candidates = %#v", candidates)
+	}
+}
+
+func TestSearchSessionsMultiRootIncludesRootIDs(t *testing.T) {
+	ctx := context.Background()
+	rootA := rootfs.NewRootInfo("root-a", "Root A", t.TempDir())
+	rootB := rootfs.NewRootInfo("root-b", "Root B", t.TempDir())
+	managerA := session.NewManager(rootA)
+	managerB := session.NewManager(rootB)
+	registry := &multiRootSearchTestRegistry{
+		roots:    []rootfs.RootInfo{rootA, rootB},
+		managers: map[string]*session.Manager{rootA.ID: managerA, rootB.ID: managerB},
+	}
+	service := Service{Registry: registry}
+
+	if _, err := managerA.Create(ctx, session.CreateInput{Type: session.TypeChat, Name: "needle alpha"}); err != nil {
+		t.Fatalf("create root A session: %v", err)
+	}
+	rootBSession, err := managerB.Create(ctx, session.CreateInput{Type: session.TypeChat, Name: "beta"})
+	if err != nil {
+		t.Fatalf("create root B session: %v", err)
+	}
+	if err := managerB.AddExchangeForAgent(ctx, rootBSession, "user", "content has needle inside", "codex", "", "", ""); err != nil {
+		t.Fatalf("add root B exchange: %v", err)
+	}
+
+	out, err := service.SearchSessions(ctx, SearchSessionsInput{
+		Query:     "needle",
+		Limit:     20,
+		MultiRoot: true,
+	})
+	if err != nil {
+		t.Fatalf("SearchSessions returned error: %v", err)
+	}
+	if len(out.Items) != 2 {
+		t.Fatalf("items len = %d, want 2: %#v", len(out.Items), out.Items)
+	}
+	seen := map[string]bool{}
+	for _, item := range out.Items {
+		seen[item.RootID] = true
+	}
+	if !seen[rootA.ID] || !seen[rootB.ID] {
+		t.Fatalf("root ids = %#v, want %q and %q", seen, rootA.ID, rootB.ID)
+	}
+}
+
+func TestSearchSessionsMultiRootAppliesGlobalLimit(t *testing.T) {
+	ctx := context.Background()
+	rootA := rootfs.NewRootInfo("root-a", "Root A", t.TempDir())
+	rootB := rootfs.NewRootInfo("root-b", "Root B", t.TempDir())
+	managerA := session.NewManager(rootA)
+	managerB := session.NewManager(rootB)
+	registry := &multiRootSearchTestRegistry{
+		roots:    []rootfs.RootInfo{rootA, rootB},
+		managers: map[string]*session.Manager{rootA.ID: managerA, rootB.ID: managerB},
+	}
+	service := Service{Registry: registry}
+
+	if _, err := managerA.Create(ctx, session.CreateInput{Type: session.TypeChat, Name: "needle alpha"}); err != nil {
+		t.Fatalf("create root A session: %v", err)
+	}
+	if _, err := managerB.Create(ctx, session.CreateInput{Type: session.TypeChat, Name: "needle beta"}); err != nil {
+		t.Fatalf("create root B session: %v", err)
+	}
+
+	out, err := service.SearchSessions(ctx, SearchSessionsInput{
+		Query:     "needle",
+		Limit:     1,
+		MultiRoot: true,
+	})
+	if err != nil {
+		t.Fatalf("SearchSessions returned error: %v", err)
+	}
+	if len(out.Items) != 1 {
+		t.Fatalf("items len = %d, want 1: %#v", len(out.Items), out.Items)
+	}
+	if out.Items[0].RootID == "" {
+		t.Fatal("first item root id is empty")
 	}
 }
 
@@ -471,6 +680,146 @@ func TestDedupeExchangeAuxBufferMergesDuplicateToolCalls(t *testing.T) {
 	}
 }
 
+func TestDedupeExchangeAuxBufferMergesTaskCreateAndUpdateByCallID(t *testing.T) {
+	items := []session.ExchangeAux{
+		{
+			Seq:  1,
+			Line: 0,
+			ToolCall: &agenttypes.ToolCall{
+				CallID: "claude-task-list:7",
+				Title:  "检查 git 状态",
+				Status: "running",
+				Kind:   agenttypes.ToolKindTask,
+				Meta: map[string]any{
+					"toolUseId": "call-create-1",
+					"taskId":    "7",
+					"taskTool":  "TaskCreate",
+				},
+			},
+		},
+		{
+			Seq:  1,
+			Line: 0,
+			ToolCall: &agenttypes.ToolCall{
+				CallID: "claude-task-list:7",
+				Status: "complete",
+				Kind:   agenttypes.ToolKindTask,
+				Meta: map[string]any{
+					"toolUseId":   "call-update-1",
+					"taskId":      "7",
+					"taskStatus":  "complete",
+					"taskTool":    "TaskUpdate",
+					"updatedOnly": true,
+				},
+			},
+		},
+	}
+
+	got := dedupeExchangeAuxBuffer(items)
+	if len(got) != 1 || got[0].ToolCall == nil {
+		t.Fatalf("deduped items = %#v, want one toolcall", got)
+	}
+	if got[0].ToolCall.CallID != "claude-task-list:7" {
+		t.Fatalf("callID = %q, want real task call id", got[0].ToolCall.CallID)
+	}
+	if got[0].ToolCall.Title != "检查 git 状态" {
+		t.Fatalf("title = %q, want original create title", got[0].ToolCall.Title)
+	}
+	if got[0].ToolCall.Status != "complete" {
+		t.Fatalf("status = %q, want latest task status", got[0].ToolCall.Status)
+	}
+	if got[0].ToolCall.Meta["taskId"] != "7" || got[0].ToolCall.Meta["taskTool"] != "TaskCreate" || got[0].ToolCall.Meta["updatedOnly"] != true {
+		t.Fatalf("meta = %#v, want merged task metadata", got[0].ToolCall.Meta)
+	}
+}
+
+func TestDedupeExchangeAuxBufferKeepsLatestTodoState(t *testing.T) {
+	items := []session.ExchangeAux{
+		{
+			Seq:  1,
+			Line: 0,
+			ToolCall: &agenttypes.ToolCall{
+				CallID: "todo-call-1",
+				Title:  "todos",
+				Status: "running",
+				Kind:   agenttypes.ToolKindTodo,
+				Content: []agenttypes.ToolCallContentItem{{
+					Type: "text",
+					Text: "- [ ] first",
+				}},
+			},
+		},
+		{
+			Seq:  1,
+			Line: 0,
+			ToolCall: &agenttypes.ToolCall{
+				CallID: "todo-call-2",
+				Title:  "todos",
+				Status: "running",
+				Kind:   agenttypes.ToolKindTodo,
+				Content: []agenttypes.ToolCallContentItem{{
+					Type: "text",
+					Text: "- [x] first\n- [ ] second",
+				}},
+			},
+		},
+		{
+			Seq:  1,
+			Line: 0,
+			Todo: &agenttypes.TodoUpdate{
+				Items: []agenttypes.TodoItem{{Content: "codex final", Status: "completed"}},
+			},
+		},
+	}
+
+	got := dedupeExchangeAuxBuffer(items)
+	if len(got) != 1 || got[0].Todo == nil {
+		t.Fatalf("deduped items = %#v, want latest codex todo", got)
+	}
+	if got[0].Todo.Items[0].Content != "codex final" {
+		t.Fatalf("todo = %#v, want latest state", got[0].Todo)
+	}
+}
+
+func TestDedupeExchangeAuxBufferMergesDuplicateTodoToolCallBeforeKeepingLatest(t *testing.T) {
+	items := []session.ExchangeAux{
+		{
+			Seq:  1,
+			Line: 0,
+			ToolCall: &agenttypes.ToolCall{
+				CallID: "todo-call-1",
+				Title:  "todos",
+				Status: "running",
+				Kind:   agenttypes.ToolKindTodo,
+				Content: []agenttypes.ToolCallContentItem{{
+					Type: "text",
+					Text: "- [ ] first",
+				}},
+			},
+		},
+		{
+			Seq:  1,
+			Line: 0,
+			ToolCall: &agenttypes.ToolCall{
+				CallID: "todo-call-1",
+				Status: "complete",
+				Kind:   agenttypes.ToolKindTodo,
+			},
+		},
+	}
+
+	got := dedupeExchangeAuxBuffer(items)
+	if len(got) != 1 || got[0].ToolCall == nil {
+		t.Fatalf("deduped items = %#v, want one todo toolcall", got)
+	}
+	if got[0].ToolCall.Status != "complete" {
+		t.Fatalf("status = %q, want complete", got[0].ToolCall.Status)
+	}
+	if len(got[0].ToolCall.Content) != 1 || got[0].ToolCall.Content[0].Text != "- [ ] first" {
+		t.Fatalf("content = %#v, want merged original content", got[0].ToolCall.Content)
+	}
+}
+
 func TestShouldPersistToolCallAuxSkipsClaudeTaskProgress(t *testing.T) {
 	if shouldPersistToolCallAux(agenttypes.ToolCall{
 		CallID:  "call-1",
@@ -587,6 +936,38 @@ func TestSearchCommandCandidatesMergesMindFSAndShellHistory(t *testing.T) {
 	}
 	if candidates[0].Name != "git status" || candidates[1].Name != "git stash" {
 		t.Fatalf("candidates = %#v", candidates)
+	}
+}
+
+func TestSearchCommandCandidatesCleansMindFSControlHistory(t *testing.T) {
+	rootDir := t.TempDir()
+	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
+	manager := session.NewManager(root)
+	historyFile := filepath.Join(rootDir, "zsh_history")
+	history := strings.Join([]string{
+		": 1710000000:0;command printf '\\n%s\\n' '__MINDFS_CMD_START_abc__'",
+		": 1710000001:0;eval 'git status' </dev/null",
+		": 1710000002:0;__mindfs_status=$?",
+		": 1710000003:0;command printf '\\n%s%s\\n' '__MINDFS_CMD_END_abc__:' \"$__mindfs_status\"",
+		": 1710000004:0;eval 'printf '\\''x y'\\''' </dev/null",
+		": 1710000005:0;git stash",
+	}, "\n") + "\n"
+	if err := os.WriteFile(historyFile, []byte(history), 0o644); err != nil {
+		t.Fatalf("write zsh history: %v", err)
+	}
+	t.Setenv("HISTFILE", historyFile)
+
+	candidates, err := SearchCommandCandidates(context.Background(), manager, root.ID, "", 10, ShellHistorySpec{Command: "zsh"})
+	if err != nil {
+		t.Fatalf("SearchCommandCandidates: %v", err)
+	}
+	names := make([]string, 0, len(candidates))
+	for _, item := range candidates {
+		names = append(names, item.Name)
+	}
+	want := []string{"git stash", "printf 'x y'", "git status"}
+	if strings.Join(names, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("candidate names = %#v, want %#v", names, want)
 	}
 }
 
@@ -1029,6 +1410,47 @@ func TestPromptCandidateProviderSearchReturnsNewestFirst(t *testing.T) {
 	}
 }
 
+func TestSwitchReadHintPathUsesRuntimeRoot(t *testing.T) {
+	rootDir := t.TempDir()
+	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
+	manager := session.NewManager(root)
+	created, err := manager.Create(context.Background(), session.CreateInput{
+		Type: session.TypeChat,
+		Name: "Task",
+	})
+	if err != nil {
+		t.Fatalf("Create session: %v", err)
+	}
+
+	basePath := switchReadHintPath(manager, created.Key, rootDir)
+	if !strings.HasPrefix(basePath, ".mindfs/") {
+		t.Fatalf("base path = %q, want .mindfs relative path", basePath)
+	}
+
+	worktreeRoot := filepath.Join(rootDir, ".worktree", "task-1")
+	worktreePath := switchReadHintPath(manager, created.Key, worktreeRoot)
+	if !strings.HasPrefix(worktreePath, "../../.mindfs/") {
+		t.Fatalf("worktree path = %q, want path relative to worktree cwd", worktreePath)
+	}
+}
+
+func TestRelatedFileRecordPathUsesRuntimeRoot(t *testing.T) {
+	rootDir := filepath.Clean("/project/mindfs")
+	worktreeRoot := filepath.Join(rootDir, ".worktree", "task-55")
+
+	got := relatedFileRecordPath(rootDir, worktreeRoot, "test.json")
+	want := filepath.Join(worktreeRoot, "test.json")
+	if got != want {
+		t.Fatalf("relatedFileRecordPath relative = %q, want %q", got, want)
+	}
+
+	got = relatedFileRecordPath(rootDir, worktreeRoot, ".worktree/task-55/test.json")
+	want = filepath.Join(rootDir, ".worktree", "task-55", "test.json")
+	if got != want {
+		t.Fatalf("relatedFileRecordPath worktree rel = %q, want %q", got, want)
+	}
+}
+
 func TestBuildUserPromptSelectionOnly(t *testing.T) {
 	got := buildUserPrompt("hello", ClientContext{})
 	if strings.Contains(got, "[USER_SELECTION]") {
@@ -1307,6 +1729,29 @@ func mustWriteFile(t *testing.T, path string, content string) {
 	}
 }
 
+func runUsecaseGit(t *testing.T, root string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s returned error: %v\n%s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	return string(out)
+}
+
+func sameUsecaseTestPath(left, right string) bool {
+	left = filepath.Clean(left)
+	right = filepath.Clean(right)
+	if resolved, err := filepath.EvalSymlinks(left); err == nil {
+		left = filepath.Clean(resolved)
+	}
+	if resolved, err := filepath.EvalSymlinks(right); err == nil {
+		right = filepath.Clean(resolved)
+	}
+	return left == right
+}
+
 func selectRunnableAgent(cfg agent.Config) (string, bool) {
 	want := strings.TrimSpace(os.Getenv("MINDFS_IT_AGENT_NAME"))
 	if want != "" {
@@ -1532,6 +1977,70 @@ func (r *commandTestRegistry) GetFileWatcher(string, *session.Manager) (*rootfs.
 }
 
 func (r *commandTestRegistry) ReleaseFileWatcher(string, string) {}
+
+type multiRootSearchTestRegistry struct {
+	roots    []rootfs.RootInfo
+	managers map[string]*session.Manager
+}
+
+func (r *multiRootSearchTestRegistry) GetRoot(rootID string) (rootfs.RootInfo, error) {
+	for _, root := range r.roots {
+		if root.ID == rootID {
+			return root, nil
+		}
+	}
+	return rootfs.RootInfo{}, errors.New("root not found")
+}
+
+func (r *multiRootSearchTestRegistry) GetSessionManager(rootID string) (*session.Manager, error) {
+	manager := r.managers[rootID]
+	if manager == nil {
+		return nil, errors.New("session manager not found")
+	}
+	return manager, nil
+}
+
+func (r *multiRootSearchTestRegistry) UpsertRoot(string) (rootfs.RootInfo, error) {
+	return rootfs.RootInfo{}, nil
+}
+
+func (r *multiRootSearchTestRegistry) RemoveRoot(string) (rootfs.RootInfo, error) {
+	return rootfs.RootInfo{}, nil
+}
+
+func (r *multiRootSearchTestRegistry) RenameRoot(string, string, string) (rootfs.RootInfo, error) {
+	return rootfs.RootInfo{}, nil
+}
+
+func (r *multiRootSearchTestRegistry) ListRoots() []rootfs.RootInfo {
+	return append([]rootfs.RootInfo(nil), r.roots...)
+}
+
+func (r *multiRootSearchTestRegistry) GetAgentPool() *agent.Pool {
+	return nil
+}
+
+func (r *multiRootSearchTestRegistry) GetPreferences() *preferences.Store {
+	return nil
+}
+
+func (r *multiRootSearchTestRegistry) GetExternalSessionImporter(string) (agenttypes.ExternalSessionImporter, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (r *multiRootSearchTestRegistry) GetProber() *agent.Prober {
+	return nil
+}
+
+func (r *multiRootSearchTestRegistry) GetCandidateRegistry() *CandidateRegistry {
+	return nil
+}
+
+func (r *multiRootSearchTestRegistry) GetFileWatcher(string, *session.Manager) (*rootfs.SharedFileWatcher, error) {
+	return nil, nil
+}
+
+func (r *multiRootSearchTestRegistry) ReleaseFileWatcher(string, string) {}
 
 type renameManagedDirTestRegistry struct {
 	root                       rootfs.RootInfo

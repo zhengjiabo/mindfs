@@ -35,6 +35,130 @@ func TestManagerUsesSessionDBLink(t *testing.T) {
 	}
 }
 
+func TestManagerRecordRelatedWorktreeDoesNotOverwriteExisting(t *testing.T) {
+	rootDir := t.TempDir()
+	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
+	manager := NewManager(root)
+
+	created, err := manager.Create(context.Background(), CreateInput{Type: TypeChat, Name: "Worktree"})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	firstPath := filepath.Join(rootDir, "..", "mindfs-worktree-a")
+	secondPath := filepath.Join(rootDir, "..", "mindfs-worktree-b")
+	if added, err := manager.RecordRelatedWorktree(context.Background(), created.Key, root.ID, firstPath, "feature/a", "abc123"); err != nil {
+		t.Fatalf("record first worktree: %v", err)
+	} else if !added {
+		t.Fatal("record first worktree added = false, want true")
+	}
+	if added, err := manager.RecordRelatedWorktree(context.Background(), created.Key, root.ID, secondPath, "feature/b", "def456"); err != nil {
+		t.Fatalf("record second worktree: %v", err)
+	} else if added {
+		t.Fatal("record second worktree added = true, want false")
+	}
+
+	current, err := manager.Get(context.Background(), created.Key, 0)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if current.RelatedWorktree == nil {
+		t.Fatal("RelatedWorktree is nil")
+	}
+	if current.RelatedWorktree.Path != filepath.Clean(firstPath) {
+		t.Fatalf("RelatedWorktree.Path = %q, want %q", current.RelatedWorktree.Path, filepath.Clean(firstPath))
+	}
+	if current.RelatedWorktree.Branch != "feature/a" {
+		t.Fatalf("RelatedWorktree.Branch = %q, want feature/a", current.RelatedWorktree.Branch)
+	}
+}
+
+func TestManagerRelatedFilesAreScopedByRepoHeadAndPath(t *testing.T) {
+	rootDir := t.TempDir()
+	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
+	manager := NewManager(root)
+
+	created, err := manager.Create(context.Background(), CreateInput{Type: TypeChat, Name: "Related repos"})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	repoA := filepath.Join(rootDir, "repo-a")
+	repoB := filepath.Join(rootDir, "repo-b")
+	for _, repo := range []string{repoA, repoB} {
+		if err := manager.RecordOutputFileInRepo(context.Background(), created.Key, root.ID, "git", repo, filepath.Base(repo), "src/main.go", "abc123"); err != nil {
+			t.Fatalf("record related file %s: %v", repo, err)
+		}
+	}
+	if err := manager.RecordOutputFileInRepo(context.Background(), created.Key, root.ID, "git", repoA, filepath.Base(repoA), "src/main.go", "abc123"); err != nil {
+		t.Fatalf("record duplicate related file: %v", err)
+	}
+
+	current, err := manager.Get(context.Background(), created.Key, 0)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if len(current.RelatedFiles) != 2 {
+		t.Fatalf("related files len = %d, want 2: %#v", len(current.RelatedFiles), current.RelatedFiles)
+	}
+
+	if err := manager.RemoveRelatedFileAtHead(context.Background(), created.Key, "src/main.go", "abc123", repoA, "git"); err != nil {
+		t.Fatalf("remove related file: %v", err)
+	}
+	current, err = manager.Get(context.Background(), created.Key, 0)
+	if err != nil {
+		t.Fatalf("get after remove: %v", err)
+	}
+	if len(current.RelatedFiles) != 1 {
+		t.Fatalf("related files len after remove = %d, want 1: %#v", len(current.RelatedFiles), current.RelatedFiles)
+	}
+	if current.RelatedFiles[0].RepoPath != filepath.Clean(repoB) {
+		t.Fatalf("remaining repo = %q, want %q", current.RelatedFiles[0].RepoPath, filepath.Clean(repoB))
+	}
+}
+
+func TestManagerRecordsSubSessionRelatedFileOnParent(t *testing.T) {
+	rootDir := t.TempDir()
+	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
+	manager := NewManager(root)
+
+	parent, err := manager.Create(context.Background(), CreateInput{Type: TypeChat, Name: "Parent"})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	child, err := manager.Create(context.Background(), CreateInput{
+		Type:             TypeChat,
+		ParentSessionKey: parent.Key,
+		Name:             "Child",
+	})
+	if err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	repo := filepath.Join(rootDir, "repo")
+	if err := manager.RecordOutputFileInRepo(context.Background(), child.Key, root.ID, "git", repo, filepath.Base(repo), "src/main.go", "abc123"); err != nil {
+		t.Fatalf("record child related file: %v", err)
+	}
+	if err := manager.RecordOutputFileInRepo(context.Background(), child.Key, root.ID, "git", repo, filepath.Base(repo), "src/main.go", "abc123"); err != nil {
+		t.Fatalf("record duplicate child related file: %v", err)
+	}
+
+	loadedChild, err := manager.Get(context.Background(), child.Key, 0)
+	if err != nil {
+		t.Fatalf("get child: %v", err)
+	}
+	loadedParent, err := manager.Get(context.Background(), parent.Key, 0)
+	if err != nil {
+		t.Fatalf("get parent: %v", err)
+	}
+	for label, sess := range map[string]*Session{"child": loadedChild, "parent": loadedParent} {
+		if len(sess.RelatedFiles) != 1 {
+			t.Fatalf("%s related files len = %d, want 1: %#v", label, len(sess.RelatedFiles), sess.RelatedFiles)
+		}
+		file := sess.RelatedFiles[0]
+		if file.Path != "src/main.go" || file.Head != "abc123" || file.RepoPath != filepath.Clean(repo) || file.RepoKind != "git" {
+			t.Fatalf("%s related file = %#v", label, file)
+		}
+	}
+}
+
 func TestManagerFallsBackToUserDataSessionDBOnSQLitePanic(t *testing.T) {
 	rootDir := t.TempDir()
 	root := rootfs.NewRootInfo("panic-root", "panic-root", rootDir)
@@ -244,6 +368,40 @@ func TestManagerStoresPlanAndCompactAux(t *testing.T) {
 	}
 	if aux[2][1].Compact == nil || aux[2][1].Compact.Status != "complete" {
 		t.Fatalf("compact aux = %#v", aux[2][1])
+	}
+}
+
+func TestManagerStoresTodoAux(t *testing.T) {
+	root := rootfs.NewRootInfo("mindfs", "mindfs", t.TempDir())
+	manager := NewManager(root)
+
+	created, err := manager.Create(context.Background(), CreateInput{
+		Type: TypeChat,
+		Name: "Chat",
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	if err := manager.AddExchangeAux(context.Background(), created.Key, ExchangeAux{
+		Seq:  2,
+		Line: 0,
+		Todo: &agenttypes.TodoUpdate{
+			Items: []agenttypes.TodoItem{{Content: "persist todos", Status: "in_progress"}},
+		},
+	}); err != nil {
+		t.Fatalf("add todo aux: %v", err)
+	}
+
+	aux, err := manager.GetExchangeAux(context.Background(), created.Key, 0)
+	if err != nil {
+		t.Fatalf("get aux: %v", err)
+	}
+	if len(aux[2]) != 1 || aux[2][0].Todo == nil {
+		t.Fatalf("aux[2] = %#v, want todo aux", aux[2])
+	}
+	if got := aux[2][0].Todo.Items[0].Content; got != "persist todos" {
+		t.Fatalf("todo content = %q, want persist todos", got)
 	}
 }
 

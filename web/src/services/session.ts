@@ -60,9 +60,23 @@ function estimateCommandTerminalCols(): number | undefined {
 }
 
 export type RelatedFile = {
+  root_id?: string;
+  repo_path?: string;
+  repo_name?: string;
+  repo_kind?: "git" | "plain" | string;
   path: string;
+  head?: string;
   relation?: string;
   created_by_session?: boolean;
+};
+
+export type RelatedWorktree = {
+  root_id: string;
+  path: string;
+  branch?: string;
+  head?: string;
+  current?: boolean;
+  updated_at?: string;
 };
 
 export type ExchangeAux = {
@@ -71,16 +85,20 @@ export type ExchangeAux = {
   toolcall?: ToolCall | null;
   thought?: string | null;
   thought_id?: string;
+  todo?: TodoUpdate | null;
   plan?: PlanUpdate | null;
   compact?: CompactNotice | null;
 };
 
 export type Session = {
   key: string;
+  session_key?: string;
+  root_id?: string;
   type: SessionType;
   parent_session_key?: string;
   parent_tool_call_id?: string;
   source?: string;
+  task_id?: string;
   agent?: string;
   model?: string;
   shell?: string;
@@ -97,6 +115,7 @@ export type Session = {
     modelContextWindow: number;
   };
   related_files?: RelatedFile[];
+  related_worktree?: RelatedWorktree | null;
   exchange_aux?: Record<string, ExchangeAux[]>;
   exchanges?: Array<{
     seq?: number;
@@ -122,6 +141,7 @@ export type Session = {
 };
 
 export type SessionSearchHit = {
+  root_id?: string;
   key: string;
   type: SessionType;
   parent_session_key?: string;
@@ -1054,6 +1074,9 @@ class SessionService {
         totalCount: Number(group?.total_count ?? group?.totalCount ?? 0) || 0,
       })).filter((group: MultiRootSessionGroup) => !!group.rootId);
     } catch (err) {
+      if (err instanceof Error && err.message === "api_not_ready") {
+        return [];
+      }
       console.error("[Session] Failed to fetch multi-root sessions:", err);
       return [];
     }
@@ -1087,13 +1110,19 @@ class SessionService {
     rootId: string,
     query: string,
     limit?: number,
+    options?: { multiRoot?: boolean },
   ): Promise<SessionSearchHit[]> {
     try {
       const trimmed = query.trim();
-      if (!rootId || !trimmed) {
+      if ((!rootId && !options?.multiRoot) || !trimmed) {
         return [];
       }
-      const params = new URLSearchParams({ root: rootId, q: trimmed });
+      const params = new URLSearchParams({ q: trimmed });
+      if (options?.multiRoot) {
+        params.set("multi_root", "1");
+      } else {
+        params.set("root", rootId);
+      }
       if (typeof limit === "number" && limit > 0) {
         params.set("limit", String(limit));
       }
@@ -1123,6 +1152,27 @@ class SessionService {
       return data as Session;
     } catch (err) {
       console.error("[Session] Failed to get session:", err);
+      return null;
+    }
+  }
+
+  async syncExternalSession(
+    rootId: string,
+    sessionKey: string,
+    seq?: number,
+  ): Promise<Session | null> {
+    try {
+      const params = new URLSearchParams({ root: rootId });
+      if (typeof seq === "number" && seq > 0) {
+        params.set("seq", String(seq));
+      }
+      const data = await protectedJSON<Session>(
+        appURL(`/api/sessions/${encodeURIComponent(sessionKey)}/sync`, params),
+        { method: "POST" },
+      );
+      return data as Session;
+    } catch (err) {
+      console.error("[Session] Failed to sync session:", err);
       return null;
     }
   }
@@ -1177,9 +1227,21 @@ class SessionService {
     rootId: string,
     sessionKey: string,
     path: string,
+    head = "",
+    repoPath = "",
+    repoKind = "",
   ): Promise<boolean> {
     try {
       const params = new URLSearchParams({ root: rootId, path });
+      if (head) {
+        params.set("head", head);
+      }
+      if (repoPath) {
+        params.set("repo_path", repoPath);
+      }
+      if (repoKind) {
+        params.set("repo_kind", repoKind);
+      }
       const res = await protectedFetch(
         appURL(
           `/api/sessions/${encodeURIComponent(sessionKey)}/related-files`,
@@ -1684,10 +1746,13 @@ export async function setCachedSessionRelatedFiles(
 export async function syncSession(
   rootId: string,
   sessionKey: string,
+  options?: { full?: boolean },
 ): Promise<SyncSessionResult> {
   const base = await getCachedSession(rootId, sessionKey);
   const seq = getSessionMaxSeq(base);
-  const incoming = await sessionService.getSession(rootId, sessionKey, seq);
+  const incoming = options?.full
+    ? await sessionService.syncExternalSession(rootId, sessionKey, seq)
+    : await sessionService.getSession(rootId, sessionKey, seq);
   if (!incoming) {
     return { session: base, hasDelta: false };
   }
