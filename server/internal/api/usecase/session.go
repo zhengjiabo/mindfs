@@ -1096,6 +1096,8 @@ type SuggestSessionNameInput struct {
 	SessionKey   string
 	Agent        string
 	FirstMessage string
+	ExpectedName string
+	NamePrefix   string
 }
 
 var (
@@ -1280,7 +1282,8 @@ func (s *Service) SuggestSessionName(ctx context.Context, in SuggestSessionNameI
 		return nil, err
 	}
 	fallback := BuildFallbackSessionName(in.FirstMessage)
-	if strings.TrimSpace(current.Name) != fallback {
+	expectedName := suggestSessionExpectedName(in, fallback)
+	if strings.TrimSpace(current.Name) != expectedName {
 		return nil, nil
 	}
 
@@ -1308,17 +1311,35 @@ func (s *Service) SuggestSessionName(ctx context.Context, in SuggestSessionNameI
 		prober.ReportSuccess(agentName)
 	}
 
-	name := normalizeSessionNameCandidate(rawName)
-	if name == "" || name == fallback {
+	name := composeSuggestedSessionName(in.NamePrefix, rawName)
+	if name == "" || name == expectedName {
 		return nil, nil
 	}
-	renamed, err := manager.Rename(ctx, in.SessionKey, name)
+	renamed, changed, err := manager.RenameIfCurrent(ctx, in.SessionKey, expectedName, name)
 	if err != nil {
 		log.Printf("[session-name] rename.error root=%s session=%s err=%v", in.RootID, in.SessionKey, err)
 		return nil, err
 	}
+	if !changed {
+		return nil, nil
+	}
 	log.Printf("[session-name] rename.done root=%s session=%s name=%q", in.RootID, in.SessionKey, renamed.Name)
 	return renamed, nil
+}
+
+func suggestSessionExpectedName(in SuggestSessionNameInput, fallback string) string {
+	if expected := strings.TrimSpace(in.ExpectedName); expected != "" {
+		return expected
+	}
+	return strings.TrimSpace(fallback)
+}
+
+func composeSuggestedSessionName(prefix, rawName string) string {
+	name := normalizeSessionNameCandidate(rawName)
+	if name == "" {
+		return ""
+	}
+	return normalizeSessionNameCandidate(prefix + name)
 }
 
 func BuildFallbackSessionName(message string) string {

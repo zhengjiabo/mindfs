@@ -906,6 +906,34 @@ func (m *Manager) Rename(_ context.Context, key, name string) (*Session, error) 
 	return session, nil
 }
 
+// RenameIfCurrent atomically renames a session only when its current name still
+// matches expected. The boolean result reports whether the rename was applied.
+func (m *Manager) RenameIfCurrent(_ context.Context, key, expected, name string) (*Session, bool, error) {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return nil, false, errors.New("session name required")
+	}
+	expected = strings.TrimSpace(expected)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	session, err := m.getSessionUnsafe(key, 0)
+	if err != nil {
+		return nil, false, err
+	}
+	if strings.TrimSpace(session.Name) != expected {
+		return session, false, nil
+	}
+	if session.Name == trimmed {
+		return session, false, nil
+	}
+	session.Name = trimmed
+	session.UpdatedAt = m.now().UTC()
+	if err := m.upsertSessionMetaUnsafe(session); err != nil {
+		return nil, false, err
+	}
+	return session, true, nil
+}
+
 func (m *Manager) UpdateModel(_ context.Context, session *Session, model string) error {
 	if session == nil || strings.TrimSpace(session.Key) == "" {
 		return errors.New("session required")

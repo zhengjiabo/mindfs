@@ -226,18 +226,7 @@ func (s *AppContext) EnsureAgentSession(ctx context.Context, exec kanban.AgentSt
 			return strings.TrimSpace(exec.Run.SessionKey), nil
 		}
 	}
-	name := strings.TrimSpace(exec.Task.TaskTemplateName)
-	if exec.Task.TaskNumber > 0 {
-		number := "#" + strconv.Itoa(exec.Task.TaskNumber)
-		if name == "" {
-			name = number
-		} else {
-			name = name + " / " + number
-		}
-	}
-	if strings.TrimSpace(name) == "" {
-		name = usecase.BuildFallbackSessionName(exec.Prompt)
-	}
+	name, titleSource, titlePrefix := taskSessionInitialName(exec.Task, exec.Prompt)
 	created, err := uc.CreateSession(ctx, usecase.CreateSessionInput{
 		RootID: exec.RootID,
 		Input: session.CreateInput{
@@ -253,7 +242,82 @@ func (s *AppContext) EnsureAgentSession(ctx context.Context, exec kanban.AgentSt
 		return "", err
 	}
 	s.BroadcastSessionMetaUpdated(exec.RootID, created)
+	s.suggestTaskSessionName(exec, created.Key, name, titleSource, titlePrefix)
 	return created.Key, nil
+}
+
+func taskSessionTitleSource(prompt string) string {
+	cleaned := strings.TrimSpace(prompt)
+	if index := strings.LastIndex(cleaned, "\n\nTask control context:\n"); index >= 0 {
+		cleaned = strings.TrimSpace(cleaned[:index])
+	}
+
+	sourceIndex := -1
+	lineOffset := 0
+	for _, line := range strings.Split(cleaned, "\n") {
+		leftTrimmed := strings.TrimLeft(line, " \t")
+		leadingLength := len(line) - len(leftTrimmed)
+		for _, marker := range []string{"任务：", "任务:"} {
+			if !strings.HasPrefix(leftTrimmed, marker) {
+				continue
+			}
+			candidateIndex := lineOffset + leadingLength + len(marker)
+			if strings.TrimSpace(cleaned[candidateIndex:]) != "" {
+				sourceIndex = candidateIndex
+			}
+		}
+		lineOffset += len(line) + 1
+	}
+	if sourceIndex >= 0 {
+		return strings.TrimSpace(cleaned[sourceIndex:])
+	}
+	return cleaned
+}
+
+func taskSessionInitialName(task kanban.Task, prompt string) (name, source, prefix string) {
+	source = taskSessionTitleSource(prompt)
+	summary := usecase.BuildFallbackSessionName(source)
+	if task.TaskNumber > 0 {
+		prefix = "#" + strconv.Itoa(task.TaskNumber) + " · "
+	}
+	if summary != "" {
+		return prefix + summary, source, prefix
+	}
+
+	name = strings.TrimSpace(task.TaskTemplateName)
+	if task.TaskNumber > 0 {
+		number := "#" + strconv.Itoa(task.TaskNumber)
+		if name == "" {
+			name = number
+		} else {
+			name += " / " + number
+		}
+	}
+	return name, source, prefix
+}
+
+func (s *AppContext) suggestTaskSessionName(exec kanban.AgentStageExecution, sessionKey, expectedName, source, prefix string) {
+	if s == nil || strings.TrimSpace(sessionKey) == "" || strings.TrimSpace(source) == "" {
+		return
+	}
+	go func() {
+		uc := &usecase.Service{Registry: s}
+		updated, err := uc.SuggestSessionName(context.Background(), usecase.SuggestSessionNameInput{
+			RootID:       exec.RootID,
+			SessionKey:   sessionKey,
+			Agent:        exec.Stage.Agent,
+			FirstMessage: source,
+			ExpectedName: expectedName,
+			NamePrefix:   prefix,
+		})
+		if err != nil {
+			log.Printf("[task-session-name] async.error root=%s task=%s session=%s agent=%s err=%v", exec.RootID, exec.Task.ID, sessionKey, exec.Stage.Agent, err)
+			return
+		}
+		if updated != nil {
+			s.BroadcastSessionMetaUpdated(exec.RootID, updated)
+		}
+	}()
 }
 
 func (s *AppContext) RunAgentStage(ctx context.Context, exec kanban.AgentStageExecution) error {

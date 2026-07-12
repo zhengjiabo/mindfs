@@ -35,6 +35,34 @@ func TestManagerUsesSessionDBLink(t *testing.T) {
 	}
 }
 
+func TestManagerRenameIfCurrent(t *testing.T) {
+	root := rootfs.NewRootInfo("mindfs", "mindfs", t.TempDir())
+	manager := NewManager(root)
+	created, err := manager.Create(context.Background(), CreateInput{Type: TypeChat, Name: "#14 · 初始摘要"})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	renamed, changed, err := manager.RenameIfCurrent(context.Background(), created.Key, "#14 · 初始摘要", "#14 · 安装技能")
+	if err != nil {
+		t.Fatalf("rename matching session: %v", err)
+	}
+	if !changed || renamed.Name != "#14 · 安装技能" {
+		t.Fatalf("rename result = %#v, changed=%t", renamed, changed)
+	}
+
+	if _, err := manager.Rename(context.Background(), created.Key, "用户自定义标题"); err != nil {
+		t.Fatalf("manual rename: %v", err)
+	}
+	current, changed, err := manager.RenameIfCurrent(context.Background(), created.Key, "#14 · 安装技能", "#14 · 自动标题")
+	if err != nil {
+		t.Fatalf("rename stale session: %v", err)
+	}
+	if changed || current.Name != "用户自定义标题" {
+		t.Fatalf("stale rename result = %#v, changed=%t", current, changed)
+	}
+}
+
 func TestManagerRecordRelatedWorktreeDoesNotOverwriteExisting(t *testing.T) {
 	rootDir := t.TempDir()
 	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
