@@ -1,5 +1,6 @@
 import React from "react";
 import type { SessionItem } from "./SessionList";
+import { useI18n, type Locale } from "../i18n";
 
 type ExternalSessionListProps = {
   sessions: SessionItem[];
@@ -44,6 +45,7 @@ export function ExternalSessionList({
   confirmingImport = false,
   hasMore = false,
 }: ExternalSessionListProps) {
+  const { locale, t } = useI18n();
   const selectedCount = selectedImportKeys?.size || 0;
   const busy = confirmingImport || Boolean(importingKey) || Boolean(importingKeys?.size);
   const importableKeys = sessions.map(externalSessionKey).filter(Boolean);
@@ -88,7 +90,7 @@ export function ExternalSessionList({
         <button
           type="button"
           onClick={onBack}
-          aria-label="退出导入模式"
+          aria-label={t("externalSession.exitImportMode")}
           style={iconButtonStyle(false)}
         >
           <ChevronLeftIcon />
@@ -102,16 +104,16 @@ export function ExternalSessionList({
 
       <div style={{ flex: 1, minHeight: 0, overflow: "auto", padding: "8px" }}>
         {loading ? (
-          <div style={emptyStyle}>正在加载可导入会话...</div>
+          <div style={emptyStyle}>{t("externalSession.loading")}</div>
         ) : !selectedAgent ? (
-          <div style={emptyStyle}>选择一个 Agent 查看可导入会话</div>
+          <div style={emptyStyle}>{t("externalSession.selectAgent")}</div>
         ) : error && !sessions.length ? (
           <div style={errorStyle}>{error}</div>
         ) : !sessions.length ? (
           <div style={emptyStyle}>
             {filterBound
-              ? "没有找到可导入会话，或当前结果都已导入"
-              : "没有找到可导入会话"}
+              ? t("externalSession.emptyImported")
+              : t("externalSession.empty")}
           </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
@@ -127,6 +129,7 @@ export function ExternalSessionList({
                   Boolean(importingKeys?.has(externalSessionKey(session)))
                 }
                 importDisabled={busy}
+                locale={locale}
                 onSelect={onSelect}
                 onToggleImport={onToggleImport}
               />
@@ -147,7 +150,7 @@ export function ExternalSessionList({
                   fontSize: "12px",
                 }}
               >
-                {loadingOlder ? "加载中..." : "加载更多"}
+                {loadingOlder ? t("sessionList.loading") : t("sessionList.loadMore")}
               </button>
             ) : null}
           </div>
@@ -197,7 +200,7 @@ export function ExternalSessionList({
                 cursor: busy ? "not-allowed" : "pointer",
               }}
             />
-            全选
+            {t("externalSession.selectAll")}
           </label>
           <button
             type="button"
@@ -222,7 +225,7 @@ export function ExternalSessionList({
               whiteSpace: "nowrap",
             }}
           >
-            {busy ? "导入中..." : `确认导入 ${selectedCount} 项`}
+            {busy ? t("externalSession.importing") : t("externalSession.confirmImport", { count: selectedCount })}
           </button>
         </div>
       ) : null}
@@ -236,6 +239,7 @@ function ExternalSessionCard({
   checked,
   importing,
   importDisabled,
+  locale,
   onSelect,
   onToggleImport,
 }: {
@@ -244,11 +248,12 @@ function ExternalSessionCard({
   checked: boolean;
   importing: boolean;
   importDisabled: boolean;
+  locale: Locale;
   onSelect?: (session: SessionItem) => void;
   onToggleImport?: (session: SessionItem) => void;
 }) {
   const displayName = session.name || session.key || "External Session";
-  const subtitle = formatTime(session.updated_at || session.created_at || "");
+  const subtitle = formatTime(session.updated_at || session.created_at || "", locale);
 
   return (
     <div
@@ -346,11 +351,11 @@ function externalSessionKey(session: SessionItem): string {
   return String((session as any)?.agent_session_id || session.key || "").trim();
 }
 
-function formatTime(value?: string) {
+function formatTime(value: string | undefined, locale: Locale) {
   if (!value) return "";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
-  return new Intl.DateTimeFormat("zh-CN", {
+  return new Intl.DateTimeFormat(locale, {
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",

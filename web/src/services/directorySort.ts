@@ -18,13 +18,13 @@ export type DirectorySortMode =
 
 export const DEFAULT_DIRECTORY_SORT_MODE: DirectorySortMode = "name-asc";
 
-export const DIRECTORY_SORT_OPTIONS: Array<{ value: DirectorySortMode; label: string }> = [
-  { value: "name-asc", label: "名称 ↑" },
-  { value: "name-desc", label: "名称 ↓" },
-  { value: "mtime-desc", label: "时间 ↓" },
-  { value: "mtime-asc", label: "时间 ↑" },
-  { value: "size-desc", label: "大小 ↓" },
-  { value: "size-asc", label: "大小 ↑" },
+export const DIRECTORY_SORT_OPTIONS: Array<{ value: DirectorySortMode }> = [
+  { value: "name-asc" },
+  { value: "name-desc" },
+  { value: "mtime-desc" },
+  { value: "mtime-asc" },
+  { value: "size-desc" },
+  { value: "size-asc" },
 ];
 
 export function sortDirectoryEntries(entries: FileEntry[], mode: DirectorySortMode): FileEntry[] {

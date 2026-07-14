@@ -13,6 +13,7 @@ import {
 } from "../services/tasks";
 import type { AgentStatus } from "../services/agents";
 import { reportError } from "../services/error";
+import { useI18n, type I18nContextValue } from "../i18n";
 
 type TaskTemplateDialogProps = {
   open: boolean;
@@ -44,15 +45,15 @@ const blankAgentStage = (): StageTemplate => ({
   agent_can_control_stage: false,
 });
 
-const newTaskTemplate = (): TaskTemplate => ({
+const newTaskTemplate = (t?: I18nContextValue["t"]): TaskTemplate => ({
   name: "",
   description: "",
   max_concurrency: 2,
-  stages: [{ position: 0, snapshot: { ...blankUserStage(), name: defaultStageName(0) } }],
+  stages: [{ position: 0, snapshot: { ...blankUserStage(), name: defaultStageName(0, t) } }],
 });
 
-function defaultStageName(index: number): string {
-  return `阶段${index + 1}`;
+function defaultStageName(index: number, t?: I18nContextValue["t"]): string {
+  return t ? t("taskTemplate.defaultStageName", { index: index + 1 }) : `Stage ${index + 1}`;
 }
 
 function normalizeStages(stages: TaskTemplateStage[]): TaskTemplateStage[] {
@@ -66,11 +67,11 @@ function normalizeStages(stages: TaskTemplateStage[]): TaskTemplateStage[] {
   }));
 }
 
-function cloneTemplate(template?: TaskTemplate | null): TaskTemplate {
-  const base = template ? { ...template } : newTaskTemplate();
+function cloneTemplate(template?: TaskTemplate | null, t?: I18nContextValue["t"]): TaskTemplate {
+  const base = template ? { ...template } : newTaskTemplate(t);
   return {
     ...base,
-    stages: normalizeStages(base.stages?.length ? base.stages : newTaskTemplate().stages),
+    stages: normalizeStages(base.stages?.length ? base.stages : newTaskTemplate(t).stages),
   };
 }
 
@@ -108,8 +109,9 @@ function agentDefaults(agent?: AgentStatus | null) {
 }
 
 export function TaskTemplateDialog({ open, agents, template, onClose, onSaved }: TaskTemplateDialogProps) {
+  const { t } = useI18n();
   const [stageTemplates, setStageTemplates] = useState<StageTemplate[]>([]);
-  const [draft, setDraft] = useState<TaskTemplate>(() => cloneTemplate(template));
+  const [draft, setDraft] = useState<TaskTemplate>(() => cloneTemplate(template, t));
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
   const [openHelpKey, setOpenHelpKey] = useState("");
@@ -117,7 +119,7 @@ export function TaskTemplateDialog({ open, agents, template, onClose, onSaved }:
 
   useEffect(() => {
     if (!open) return;
-    setDraft(cloneTemplate(template));
+    setDraft(cloneTemplate(template, t));
     setSavedStageKeys({});
     setSaveError("");
     let cancelled = false;
@@ -125,13 +127,13 @@ export function TaskTemplateDialog({ open, agents, template, onClose, onSaved }:
       .then((stages) => {
         if (!cancelled) setStageTemplates(stages);
       })
-      .catch((err) => reportError("file.write_failed", String((err as Error)?.message || "阶段模板加载失败")));
+      .catch((err) => reportError("file.write_failed", String((err as Error)?.message || t("taskTemplate.stageTemplateLoadFailed"))));
     return () => {
       cancelled = true;
     };
-  }, [open, template]);
+  }, [open, template, t]);
 
-  const title = useMemo(() => (template?.id ? "编辑任务模板" : "创建任务模板"), [template?.id]);
+  const title = useMemo(() => (template?.id ? t("taskTemplate.editTitle") : t("taskTemplate.createTitle")), [template?.id, t]);
 
   if (!open) return null;
 
@@ -186,14 +188,14 @@ export function TaskTemplateDialog({ open, agents, template, onClose, onSaved }:
         ))),
       }));
     } catch (err) {
-      reportError("file.write_failed", String((err as Error)?.message || "阶段模板删除失败"));
+      reportError("file.write_failed", String((err as Error)?.message || t("taskTemplate.stageTemplateDeleteFailed")));
     }
   };
 
   const addStage = () => {
     setDraft((prev) => ({
       ...prev,
-      stages: normalizeStages([...prev.stages, { position: prev.stages.length, snapshot: { ...blankAgentStage(), name: defaultStageName(prev.stages.length) } }]),
+      stages: normalizeStages([...prev.stages, { position: prev.stages.length, snapshot: { ...blankAgentStage(), name: defaultStageName(prev.stages.length, t) } }]),
     }));
   };
 
@@ -206,9 +208,9 @@ export function TaskTemplateDialog({ open, agents, template, onClose, onSaved }:
   };
 
   const confirmSaveStageAsTemplate = async (index: number) => {
-    const name = (draft.stages[index]?.snapshot.name || defaultStageName(index)).trim();
+    const name = (draft.stages[index]?.snapshot.name || defaultStageName(index, t)).trim();
     if (!name) {
-      reportError("file.write_failed", "阶段模板名称不能为空");
+      reportError("file.write_failed", t("taskTemplate.stageTemplateNameRequired"));
       return;
     }
     try {
@@ -232,17 +234,17 @@ export function TaskTemplateDialog({ open, agents, template, onClose, onSaved }:
         });
       }, 1200);
     } catch (err) {
-      reportError("file.write_failed", String((err as Error)?.message || "阶段模板保存失败"));
+      reportError("file.write_failed", String((err as Error)?.message || t("taskTemplate.stageTemplateSaveFailed")));
     }
   };
 
   const saveTask = async () => {
     if (!draft.name.trim()) {
-      reportError("file.write_failed", "任务模板名称不能为空");
+      reportError("file.write_failed", t("taskTemplate.taskTemplateNameRequired"));
       return;
     }
     if (!draft.stages[0] || draft.stages[0].snapshot.role !== "user") {
-      reportError("file.write_failed", "第一阶段必须是用户阶段");
+      reportError("file.write_failed", t("taskTemplate.firstStageMustBeUser"));
       return;
     }
     setSaving(true);
@@ -252,11 +254,11 @@ export function TaskTemplateDialog({ open, agents, template, onClose, onSaved }:
         ...draft,
         stages: normalizeStages(draft.stages),
       });
-      setDraft(cloneTemplate(saved));
+      setDraft(cloneTemplate(saved, t));
       onSaved?.(saved);
       onClose();
     } catch (err) {
-      const message = String((err as Error)?.message || "任务模板保存失败");
+      const message = String((err as Error)?.message || t("taskTemplate.taskTemplateSaveFailed"));
       setSaveError(message);
       reportError("file.write_failed", message);
     } finally {
@@ -307,8 +309,8 @@ export function TaskTemplateDialog({ open, agents, template, onClose, onSaved }:
         <header style={{ padding: "10px 14px", borderBottom: "1px solid var(--border-color)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px" }}>
           <div style={{ fontSize: "15px", fontWeight: 800, color: "var(--text-color)" }}>{title}</div>
           <div style={{ display: "flex", gap: "8px" }}>
-            <button type="button" onClick={onClose} style={buttonStyle("secondary")}>关闭</button>
-            <button type="button" disabled={saving} onClick={() => void saveTask()} style={buttonStyle("primary")}>{saving ? "保存中" : "保存"}</button>
+            <button type="button" onClick={onClose} style={buttonStyle("secondary")}>{t("taskTemplate.close")}</button>
+            <button type="button" disabled={saving} onClick={() => void saveTask()} style={buttonStyle("primary")}>{saving ? t("common.saving") : t("common.save")}</button>
           </div>
         </header>
         {saveError ? (
@@ -331,7 +333,7 @@ export function TaskTemplateDialog({ open, agents, template, onClose, onSaved }:
         <div className="task-template-dialog-body" style={{ padding: "12px 14px", overflow: "auto", display: "flex", flexDirection: "column", gap: "12px", minHeight: 0 }}>
           <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: "10px", alignItems: "end" }}>
             <label style={fieldStyle}>
-              <input className="task-template-input" value={draft.name} placeholder="请输入模板名称" onChange={(event) => setDraft((prev) => ({ ...prev, name: event.target.value }))} style={inputStyle} />
+              <input className="task-template-input" value={draft.name} placeholder={t("taskTemplate.namePlaceholder")} onChange={(event) => setDraft((prev) => ({ ...prev, name: event.target.value }))} style={inputStyle} />
             </label>
           </div>
 
@@ -351,7 +353,7 @@ export function TaskTemplateDialog({ open, agents, template, onClose, onSaved }:
                   onClick={() => void confirmSaveStageAsTemplate(index)}
                   style={{ ...buttonStyle("secondary"), minWidth: "72px", justifyContent: "center" }}
                 >
-                  {recentlySaved ? <CheckIcon /> : "保存模板"}
+                  {recentlySaved ? <CheckIcon /> : t("taskTemplate.saveTemplate")}
                 </button>
               </div>
             );
@@ -359,8 +361,8 @@ export function TaskTemplateDialog({ open, agents, template, onClose, onSaved }:
               <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: "4px", marginLeft: "auto", flex: "0 0 auto" }}>
                 <button
                   type="button"
-                  aria-label="删除阶段"
-                  title={index === 0 ? "第一阶段不能删除" : "删除阶段"}
+                  aria-label={t("taskTemplate.deleteStage")}
+                  title={index === 0 ? t("taskTemplate.firstStageCannotDelete") : t("taskTemplate.deleteStage")}
                   disabled={index === 0}
                   onClick={() => removeStage(index)}
                   style={{ ...taskIconButtonStyle(index === 0), color: index === 0 ? "var(--text-secondary)" : "#dc2626" }}
@@ -451,8 +453,8 @@ export function TaskTemplateDialog({ open, agents, template, onClose, onSaved }:
                   <div style={fieldStyle}>
                     <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
 	                      <FieldLabelWithInfo
-	                        label="Prompt 模板"
-	                        info="阶段开始时提交给 Agent，可用 {previous_input}、{task_initial_input}、{task_number}。"
+	                        label={t("taskTemplate.promptTemplate")}
+	                        info={t("taskTemplate.promptTemplateInfo")}
 	                        helpKey={`prompt-${index}`}
                         openHelpKey={openHelpKey}
                         setOpenHelpKey={setOpenHelpKey}
@@ -465,8 +467,8 @@ export function TaskTemplateDialog({ open, agents, template, onClose, onSaved }:
                   <div style={fieldStyle}>
                     <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                       <FieldLabelWithInfo
-                        label="用户输入模板"
-                        info="创建任务时预填到输入框。"
+                        label={t("taskTemplate.userInputTemplate")}
+                        info={t("taskTemplate.userInputTemplateInfo")}
                         helpKey={`user-${index}`}
                         openHelpKey={openHelpKey}
                         setOpenHelpKey={setOpenHelpKey}
@@ -479,7 +481,7 @@ export function TaskTemplateDialog({ open, agents, template, onClose, onSaved }:
               </div>
             );
           })}
-          <button type="button" onClick={addStage} style={{ ...buttonStyle("secondary"), flexShrink: 0 }}>添加新阶段</button>
+          <button type="button" onClick={addStage} style={{ ...buttonStyle("secondary"), flexShrink: 0 }}>{t("taskTemplate.addStage")}</button>
         </div>
       </section>
     </div>
@@ -493,13 +495,14 @@ function FieldLabelWithInfo({ label, info, helpKey, openHelpKey, setOpenHelpKey 
   openHelpKey: string;
   setOpenHelpKey: (key: string) => void;
 }) {
+  const { t } = useI18n();
   const open = openHelpKey === helpKey;
   return (
     <span style={{ ...labelStyle, position: "relative", display: "inline-flex", alignItems: "center", gap: "5px", width: "fit-content" }}>
       {label}
       <button
         type="button"
-        aria-label={`${label}说明`}
+        aria-label={t("taskTemplate.fieldInfo", { label })}
         onMouseDown={(event) => {
           event.preventDefault();
           event.stopPropagation();
@@ -546,6 +549,7 @@ function StageTemplateSelect({ value, name, role, templates, onNameChange, onCha
   onChange: (id: string) => void;
   onDelete: (id: string) => void;
 }) {
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
   const visibleTemplates = templates.filter((item) => item.role === role);
@@ -577,7 +581,7 @@ function StageTemplateSelect({ value, name, role, templates, onNameChange, onCha
         <input
           value={name}
           onChange={(event) => onNameChange(event.target.value)}
-          placeholder="阶段名"
+          placeholder={t("taskTemplate.stageNamePlaceholder")}
           style={{
             minWidth: 0,
             height: "100%",
@@ -592,8 +596,8 @@ function StageTemplateSelect({ value, name, role, templates, onNameChange, onCha
         />
         <button
           type="button"
-          aria-label="选择阶段模板"
-          title={selected?.name ? `当前模板：${selected.name}` : "选择阶段模板"}
+          aria-label={t("taskTemplate.selectStageTemplate")}
+          title={selected?.name ? t("taskTemplate.currentStageTemplate", { name: selected.name }) : t("taskTemplate.selectStageTemplate")}
           onClick={() => setOpen((next) => !next)}
           style={{
             width: "28px",
@@ -615,7 +619,7 @@ function StageTemplateSelect({ value, name, role, templates, onNameChange, onCha
       {open ? (
         <div style={{ ...stageMenuStyle, left: 0, right: "auto", minWidth: "188px" }}>
           {visibleTemplates.length === 0 ? (
-            <div style={{ padding: "8px 10px", fontSize: "12px", color: "var(--text-secondary)" }}>暂无阶段模板</div>
+            <div style={{ padding: "8px 10px", fontSize: "12px", color: "var(--text-secondary)" }}>{t("taskTemplate.noStageTemplates")}</div>
           ) : visibleTemplates.map((template) => {
             const active = template.id === value;
             return (
@@ -628,13 +632,13 @@ function StageTemplateSelect({ value, name, role, templates, onNameChange, onCha
                   }}
                   style={{ ...menuRowStyle({ active }), minWidth: 0 }}
                 >
-                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{template.name || "未命名模板"}</span>
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{template.name || t("taskTemplate.unnamedTemplate")}</span>
                   <span style={menuTrailingCheckStyle(active)}>✓</span>
                 </button>
                 <button
                   type="button"
-                  aria-label="删除阶段模板"
-                  title="删除阶段模板"
+                  aria-label={t("taskTemplate.deleteStageTemplate")}
+                  title={t("taskTemplate.deleteStageTemplate")}
                   onClick={(event) => {
                     event.stopPropagation();
                     onDelete(template.id || "");
@@ -671,6 +675,7 @@ function StageOptionsMenu({
   onPlanModeChange: () => void;
   onSessionReusePolicyChange: (policy: "task_main" | "same_stage" | "always_new") => void;
 }) {
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [sessionOpen, setSessionOpen] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
@@ -691,7 +696,7 @@ function StageOptionsMenu({
     <div ref={ref} style={{ position: "relative", width: "32px", height: "30px" }}>
       <button
         type="button"
-        aria-label="阶段选项"
+        aria-label={t("taskTemplate.stageOptions")}
         onClick={() => setOpen((value) => !value)}
         style={menuIconButtonStyle(open)}
       >
@@ -703,8 +708,8 @@ function StageOptionsMenu({
       </button>
       {open ? (
         <div style={stageMenuStyle}>
-          <MenuCheckRow checked={autoAdvance} label="自动进入下一阶段" onClick={onAutoAdvanceChange} />
-          <MenuCheckRow checked={planMode} label="Plan 模式" disabled={!isAgent || planModeDisabled} onClick={onPlanModeChange} />
+          <MenuCheckRow checked={autoAdvance} label={t("taskTemplate.autoAdvance")} onClick={onAutoAdvanceChange} />
+          <MenuCheckRow checked={planMode} label={t("taskTemplate.planMode")} disabled={!isAgent || planModeDisabled} onClick={onPlanModeChange} />
           <div style={menuDividerStyle} />
           <button
             type="button"
@@ -714,15 +719,15 @@ function StageOptionsMenu({
             }}
             style={menuRowStyle({ disabled: !isAgent })}
           >
-            <span style={{ flex: 1 }}>会话复用</span>
-            <span style={{ color: "var(--text-secondary)", fontSize: "11px" }}>{sessionReuseLabel(sessionReusePolicy)}</span>
+            <span style={{ flex: 1 }}>{t("taskTemplate.sessionReuse")}</span>
+            <span style={{ color: "var(--text-secondary)", fontSize: "11px" }}>{sessionReuseLabel(sessionReusePolicy, t)}</span>
             <ChevronRight isOpen={sessionOpen} />
           </button>
           {sessionOpen && isAgent ? (
             <>
-              <MenuRadioRow checked={sessionReusePolicy === "task_main"} label="任务主会话" onClick={() => onSessionReusePolicyChange("task_main")} />
-              <MenuRadioRow checked={sessionReusePolicy === "same_stage"} label="同阶段会话" onClick={() => onSessionReusePolicyChange("same_stage")} />
-              <MenuRadioRow checked={sessionReusePolicy === "always_new"} label="每次新建" onClick={() => onSessionReusePolicyChange("always_new")} />
+              <MenuRadioRow checked={sessionReusePolicy === "task_main"} label={t("taskTemplate.sessionReuseTaskMain")} onClick={() => onSessionReusePolicyChange("task_main")} />
+              <MenuRadioRow checked={sessionReusePolicy === "same_stage"} label={t("taskTemplate.sessionReuseSameStage")} onClick={() => onSessionReusePolicyChange("same_stage")} />
+              <MenuRadioRow checked={sessionReusePolicy === "always_new"} label={t("taskTemplate.sessionReuseAlwaysNew")} onClick={() => onSessionReusePolicyChange("always_new")} />
             </>
           ) : null}
           <div style={menuDividerStyle} />
@@ -751,10 +756,10 @@ function AgentDropdownChevron() {
   );
 }
 
-function sessionReuseLabel(policy: "task_main" | "same_stage" | "always_new"): string {
-  if (policy === "same_stage") return "同阶段会话";
-  if (policy === "always_new") return "每次新建";
-  return "任务主会话";
+function sessionReuseLabel(policy: "task_main" | "same_stage" | "always_new", t: I18nContextValue["t"]): string {
+  if (policy === "same_stage") return t("taskTemplate.sessionReuseSameStage");
+  if (policy === "always_new") return t("taskTemplate.sessionReuseAlwaysNew");
+  return t("taskTemplate.sessionReuseTaskMain");
 }
 
 function MenuCheckRow({ checked, label, disabled, onClick }: {
@@ -839,6 +844,7 @@ function RoleAgentSwitch({
   onEffortChange: (effort?: string) => void;
   onFastServiceChange: (fastService?: "" | "on" | "off") => void;
 }) {
+  const { t } = useI18n();
   const userActive = role === "user";
   return (
     <div
@@ -898,8 +904,8 @@ function RoleAgentSwitch({
           disabled={disabled}
           onClick={onAgentActivate}
           style={roleSegmentStyle(false, disabled)}
-          aria-label="切换到 Agent 阶段"
-          title="切换到 Agent 阶段"
+          aria-label={t("taskTemplate.switchToAgentStage")}
+          title={t("taskTemplate.switchToAgentStage")}
         >
           <AgentIcon agentName={agent || "codex"} style={{ width: "15px", height: "15px" }} />
         </button>

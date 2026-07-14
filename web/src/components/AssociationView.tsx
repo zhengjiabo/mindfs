@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { useI18n } from "../i18n";
 
 export type RelatedFile = {
   path: string;
@@ -16,12 +17,14 @@ type AssociationViewProps = {
 };
 
 export function AssociationView({
-  title = "关联文件",
+  title,
   files,
   onFileClick,
   onSessionClick,
 }: AssociationViewProps) {
+  const { t } = useI18n();
   const [filter, setFilter] = useState("");
+  const displayTitle = title ?? t("association.title");
 
   const filteredFiles = files.filter(
     (f) =>
@@ -32,16 +35,16 @@ export function AssociationView({
   return (
     <div style={{ padding: "24px", display: "flex", flexDirection: "column", gap: "20px" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <h2 style={{ margin: 0, fontSize: "18px", fontWeight: 600 }}>{title}</h2>
+        <h2 style={{ margin: 0, fontSize: "18px", fontWeight: 600 }}>{displayTitle}</h2>
         <div style={{ fontSize: "13px", color: "var(--text-secondary)" }}>
-          共 {files.length} 个关联项
+          {t("association.count", { count: files.length })}
         </div>
       </div>
 
       {/* 简单的搜索/过滤 */}
       <input
         type="text"
-        placeholder="搜索关联文件..."
+        placeholder={t("association.searchPlaceholder")}
         value={filter}
         onChange={(e) => setFilter(e.target.value)}
         style={{
@@ -113,14 +116,14 @@ export function AssociationView({
                     cursor: "pointer",
                   }}
                 >
-                  来源: {file.session_name || "查看会话"}
+                  {t("association.source", { name: file.session_name || t("association.viewSession") })}
                 </button>
               )}
             </div>
           ))
         ) : (
           <div style={{ padding: "40px", textAlign: "center", color: "var(--text-secondary)" }}>
-            未找到匹配的关联文件
+            {t("association.noMatches")}
           </div>
         )}
       </div>

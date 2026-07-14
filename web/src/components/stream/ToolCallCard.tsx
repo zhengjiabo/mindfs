@@ -1,6 +1,7 @@
 import React, { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { sessionService, type ToolCall, type ToolCallContentItem, type ToolCallLocation } from "../../services/session";
 import { MarkdownViewer } from "../MarkdownViewer";
+import { useI18n } from "../../i18n";
 
 type ToolCallCardProps = {
   kind?: string;
@@ -451,6 +452,7 @@ export const ToolCallCard = memo(function ToolCallCard({
   sessionKey,
   defaultExpanded = false,
 }: ToolCallCardProps) {
+  const { t } = useI18n();
   const [expanded, setExpanded] = useState(defaultExpanded);
   const [loadedToolCall, setLoadedToolCall] = useState<ToolCall | null>(null);
   const [loadingDetails, setLoadingDetails] = useState(false);
@@ -730,9 +732,9 @@ export const ToolCallCard = memo(function ToolCallCard({
               onOutputRendered={scrollUserShellDetailsToBottom}
             />
           ) : loadingDetails ? (
-            <div style={{ marginTop: "10px", fontSize: "12px", color: "var(--text-secondary)" }}>加载中...</div>
+            <div style={{ marginTop: "10px", fontSize: "12px", color: "var(--text-secondary)" }}>{t("common.loading")}</div>
           ) : detailLoadFailed && !hasContent && !hasLocations && !hasResult && !hasCollabDetails ? (
-            <div style={{ marginTop: "10px", fontSize: "12px", color: "var(--text-secondary)" }}>加载失败</div>
+            <div style={{ marginTop: "10px", fontSize: "12px", color: "var(--text-secondary)" }}>{t("common.loadingFailed")}</div>
           ) : isCollabTool ? (
             <CollabToolDetails meta={effectiveMeta} rootId={rootId} />
           ) : hasStructuredDetails ? (
@@ -781,7 +783,7 @@ export const ToolCallCard = memo(function ToolCallCard({
                   {typeof loc.line === "number" ? `:${loc.line}` : ""}
                 </div>
               ))}
-              {effectiveLocations!.length > 3 && <div>... +{effectiveLocations!.length - 3} 处</div>}
+              {effectiveLocations!.length > 3 && <div>{t("common.moreLocations", { count: effectiveLocations!.length - 3 })}</div>}
             </div>
           ) : null}
           {!hasStructuredDetails && hasResult && <MarkdownViewer content={result || ""} root={rootId || undefined} />}

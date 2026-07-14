@@ -6,6 +6,7 @@ import { registerServiceWorker } from "./registerServiceWorker";
 import { applyAppearanceMode, getAppearanceMode } from "./services/appearance";
 import { isHarmonyRuntime, isNativeShellRuntime } from "./services/runtime";
 import { Login } from "./components/Login";
+import { I18nProvider, translateNow } from "./i18n";
 
 applyAppearanceMode();
 if (typeof window !== "undefined" && typeof window.matchMedia === "function") {
@@ -73,7 +74,7 @@ function showFrontendAssetMissingNotice(rawPath: string): void {
   if (existing) {
     const message = existing.querySelector("[data-message]");
     if (message) {
-      message.textContent = `前端资源缺失或无法加载：${path}`;
+      message.textContent = translateNow("asset.missing", { path });
     }
     return;
   }
@@ -104,11 +105,11 @@ function showFrontendAssetMissingNotice(rawPath: string): void {
   message.dataset.message = "1";
   message.style.minWidth = "0";
   message.style.overflowWrap = "anywhere";
-  message.textContent = `前端资源缺失或无法加载：${path}`;
+  message.textContent = translateNow("asset.missing", { path });
 
   const reload = document.createElement("button");
   reload.type = "button";
-  reload.textContent = "刷新";
+  reload.textContent = translateNow("common.refresh");
   reload.style.border = "1px solid rgba(127, 29, 29, 0.3)";
   reload.style.borderRadius = "6px";
   reload.style.background = "#ffffff";
@@ -610,7 +611,11 @@ function AppRoot() {
 
 const container = document.getElementById("root");
 if (container) {
-  createRoot(container).render(<AppRoot />);
+  createRoot(container).render(
+    <I18nProvider>
+      <AppRoot />
+    </I18nProvider>,
+  );
 }
 
 registerServiceWorker();

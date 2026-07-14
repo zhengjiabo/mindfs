@@ -4,6 +4,7 @@ import {
   type GitHistoryItem,
   type GitStatusItem,
 } from "../services/git";
+import { useI18n } from "../i18n";
 
 type GitHistoryPanelProps = {
   rootId: string;
@@ -42,14 +43,14 @@ function renderLineStat(value: number, prefix: "+" | "-"): React.ReactNode {
   );
 }
 
-function formatCommitTime(value: string): string {
+function formatCommitTime(value: string, justNow: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
     return "";
   }
   const now = new Date();
   const diff = now.getTime() - date.getTime();
-  if (diff < 60000) return "刚刚";
+  if (diff < 60000) return justNow;
   if (diff < 3600000) return `${Math.floor(diff / 60000)}m`;
   if (diff < 86400000) return `${Math.floor(diff / 3600000)}h`;
   if (now.getFullYear() === date.getFullYear()) {
@@ -70,6 +71,7 @@ export function GitHistoryPanel({
   onLoadMore,
   onSelectFile,
 }: GitHistoryPanelProps) {
+  const { t } = useI18n();
   const [filesByCommit, setFilesByCommit] = useState<Record<string, GitStatusItem[]>>({});
   const [loadingFiles, setLoadingFiles] = useState<Record<string, boolean>>({});
 
@@ -113,7 +115,7 @@ export function GitHistoryPanel({
   return (
     <section style={{ padding: 0, flexShrink: 0, minWidth: 0 }}>
       {loading ? (
-        <div style={{ fontSize: "12px", color: "var(--text-secondary)", padding: "6px 10px 6px 14px" }}>正在加载 git 历史...</div>
+        <div style={{ fontSize: "12px", color: "var(--text-secondary)", padding: "6px 10px 6px 14px" }}>{t("git.historyLoading")}</div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: "2px", paddingLeft: compact ? 0 : "4px", minWidth: 0 }}>
           {items.map((commit, index) => {
@@ -137,8 +139,8 @@ export function GitHistoryPanel({
                 ) : null}
                 <span style={{ height: "30px", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1 }}>
                   <span
-                    title={commit.remote === true ? "远端 commit" : "本地 commit"}
-                    aria-label={commit.remote === true ? "远端 commit" : "本地 commit"}
+                    title={commit.remote === true ? t("git.remoteCommit") : t("git.localCommit")}
+                    aria-label={commit.remote === true ? t("git.remoteCommit") : t("git.localCommit")}
                     style={{
                       width: "7px",
                       height: "7px",
@@ -171,15 +173,15 @@ export function GitHistoryPanel({
                       {commit.message || commit.hash.slice(0, 8)}
                     </span>
                     <span title={commit.commit_time} style={{ fontSize: "11px", color: "var(--text-secondary)", fontVariantNumeric: "tabular-nums", flexShrink: 0 }}>
-                      {formatCommitTime(commit.commit_time)}
+                      {formatCommitTime(commit.commit_time, t("time.justNow"))}
                     </span>
                   </button>
                 {isExpanded ? (
                   <div style={{ display: "flex", flexDirection: "column", gap: "4px", marginLeft: 0, minWidth: 0 }}>
                     {loadingFiles[commit.hash] ? (
-                      <div style={{ fontSize: "12px", color: "var(--text-secondary)", padding: "4px 10px" }}>正在加载文件...</div>
+                      <div style={{ fontSize: "12px", color: "var(--text-secondary)", padding: "4px 10px" }}>{t("git.filesLoading")}</div>
                     ) : files.length === 0 ? (
-                      <div style={{ fontSize: "12px", color: "var(--text-secondary)", padding: "4px 10px" }}>无文件变更</div>
+                      <div style={{ fontSize: "12px", color: "var(--text-secondary)", padding: "4px 10px" }}>{t("git.noFileChanges")}</div>
                     ) : files.map((file) => (
                       <button
                         key={`${commit.hash}:${file.status}:${file.path}`}
@@ -235,8 +237,8 @@ export function GitHistoryPanel({
               </span>
               <button
                 type="button"
-                aria-label={loadingMore ? "加载中" : "加载更多 git 历史"}
-                title={loadingMore ? "加载中" : "加载更多"}
+                aria-label={loadingMore ? t("common.loading") : t("git.loadMoreHistory")}
+                title={loadingMore ? t("common.loading") : t("sessionList.loadMore")}
                 disabled={loadingMore}
                 onClick={onLoadMore}
                 style={{

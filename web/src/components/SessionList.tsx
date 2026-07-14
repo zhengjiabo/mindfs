@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AgentIcon } from "./AgentIcon";
 import { ModeIcon } from "./ModeIcon";
 import { rootBadgeButtonStyle, rootBadgeStyle } from "./rootBadgeStyle";
+import { useI18n, type Locale } from "../i18n";
 
 export type SessionType = "chat" | "plugin" | "command";
 
@@ -118,6 +119,7 @@ function ToggleRowButton({
   onClick: () => void;
   onCollapse?: () => void;
 }) {
+  const { t } = useI18n();
   const icon = (rotate = false) => (
     <svg
       xmlns="http://www.w3.org/2000/svg"
@@ -170,8 +172,8 @@ function ToggleRowButton({
           <span
             role="button"
             tabIndex={0}
-            aria-label="收起"
-            title="收起"
+            aria-label={t("common.collapse")}
+            title={t("common.collapse")}
             onClick={(event) => {
               event.stopPropagation();
               onCollapse?.();
@@ -295,7 +297,7 @@ export function SessionList({
   searchResultsMode = false,
   searchQuery = "",
   searchLoading = false,
-  emptyText = "暂无会话记录",
+  emptyText = "",
   onSearchToggle,
   onSearchBack,
   onSearchQueryChange,
@@ -311,6 +313,8 @@ export function SessionList({
   loadingOlder = false,
   hasMore = false,
 }: SessionListProps) {
+  const { t } = useI18n();
+  const effectiveEmptyText = emptyText || t("sessionList.empty");
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const searchBlurTimerRef = useRef<number | null>(null);
   const [expandedChildren, setExpandedChildren] = useState<Record<string, boolean>>({});
@@ -467,7 +471,7 @@ export function SessionList({
           <button
             type="button"
             onClick={onSearchBack}
-            aria-label="返回会话列表"
+            aria-label={t("sessionList.back")}
             style={iconButtonStyle(false)}
           >
             <ChevronLeftIcon />
@@ -477,8 +481,8 @@ export function SessionList({
             {onSearchToggle ? (
               <button
                 type="button"
-                aria-label={searchOpen ? "关闭会话搜索" : "搜索会话"}
-                title={searchOpen ? "关闭会话搜索" : "搜索会话"}
+                aria-label={searchOpen ? t("sessionList.closeSearch") : t("sessionList.search")}
+                title={searchOpen ? t("sessionList.closeSearch") : t("sessionList.search")}
                 onClick={onSearchToggle}
                 style={{
                   width: "34px",
@@ -533,7 +537,7 @@ export function SessionList({
         >
             {searchLoading ? (
               <span
-                aria-label="搜索中"
+                aria-label={t("sessionList.searching")}
                 style={{
                   width: "14px",
                   height: "14px",
@@ -554,7 +558,7 @@ export function SessionList({
               ref={searchInputRef}
               type="text"
               value={searchQuery}
-              placeholder="搜索标题或对话内容"
+              placeholder={t("sessionList.searchPlaceholder")}
               onChange={(e) => onSearchQueryChange?.(e.target.value)}
               onBlur={() => {
                 if (searchResultsMode) {
@@ -588,7 +592,7 @@ export function SessionList({
                 type="button"
                 onClick={() => onSearchQueryChange?.("")}
                 onMouseDown={(e) => e.preventDefault()}
-                aria-label="清空搜索"
+                aria-label={t("sessionList.clearSearch")}
                 style={{
                   width: "18px",
                   height: "18px",
@@ -630,7 +634,7 @@ export function SessionList({
                 lineHeight: 1.6,
               }}
             >
-              {emptyText}
+              {effectiveEmptyText}
             </div>
           ) : null
         ) : (
@@ -640,14 +644,14 @@ export function SessionList({
                 const loading = !!loadingChildren[row.parent.key];
                 const hasMoreChildren = !!childrenHasMore[row.parent.key];
                 const label = loading
-                  ? "加载中..."
+                  ? t("sessionList.loading")
                   : row.expanded
                     ? hasMoreChildren
-                      ? "加载更多子会话"
-                      : "收起"
+                      ? t("sessionList.loadMoreChildren")
+                      : t("common.collapse")
                     : row.hiddenCount > 0
-                      ? `还有 ${row.hiddenCount} 个子会话`
-                      : "展开子会话";
+                      ? t("sessionList.remainingChildren", { count: row.hiddenCount })
+                      : t("sessionList.expandChildren");
                 return (
                   <ToggleRowButton
                     key={`children-toggle-${row.parent.key}`}
@@ -700,7 +704,7 @@ export function SessionList({
                   fontSize: "12px",
                 }}
               >
-                {loadingOlder ? "加载中..." : "加载更多"}
+                {loadingOlder ? t("sessionList.loading") : t("sessionList.loadMore")}
               </button>
             ) : null}
           </div>
@@ -726,7 +730,7 @@ export function MultiProjectSessionList({
   selectedRootId = "",
   headerAction,
   loading = false,
-  emptyText = "暂无会话记录",
+  emptyText = "",
   syncingSessionKeys,
   onSearchToggle,
   onSelect,
@@ -737,6 +741,8 @@ export function MultiProjectSessionList({
   onLoadMoreProject,
   onLoadChildren,
 }: ProjectSessionListProps) {
+  const { t } = useI18n();
+  const effectiveEmptyText = emptyText || t("sessionList.empty");
   const [expandedProjects, setExpandedProjects] = useState<Record<string, boolean>>({});
   const [loadingProjects, setLoadingProjects] = useState<Record<string, boolean>>({});
   const [expandedChildren, setExpandedChildren] = useState<Record<string, boolean>>({});
@@ -963,8 +969,8 @@ export function MultiProjectSessionList({
           {onSearchToggle ? (
             <button
               type="button"
-              aria-label="搜索当前项目会话"
-              title="搜索当前项目会话"
+              aria-label={t("sessionList.searchCurrentProject")}
+              title={t("sessionList.searchCurrentProject")}
               onClick={onSearchToggle}
               style={{
                 width: "34px",
@@ -992,10 +998,10 @@ export function MultiProjectSessionList({
       </div>
       <div style={{ flex: 1, minHeight: 0, overflow: "auto", padding: "8px" }}>
         {loading && groups.length === 0 ? (
-          <div style={{ fontSize: "12px", color: "var(--text-secondary)", padding: "18px", textAlign: "center" }}>加载中...</div>
+          <div style={{ fontSize: "12px", color: "var(--text-secondary)", padding: "18px", textAlign: "center" }}>{t("sessionList.loading")}</div>
         ) : groups.length === 0 ? (
           <div style={{ fontSize: "12px", color: "var(--text-secondary)", minHeight: "100%", padding: "12px 18px", display: "flex", alignItems: "center", justifyContent: "center", textAlign: "center", lineHeight: 1.6 }}>
-            {emptyText}
+            {effectiveEmptyText}
           </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: "9px" }}>
@@ -1068,8 +1074,8 @@ export function MultiProjectSessionList({
                     />
                     <button
                       type="button"
-                      aria-label={pinned ? "取消置顶项目" : "置顶项目"}
-                      title={pinned ? "取消置顶" : "置顶"}
+                      aria-label={pinned ? t("sessionList.unpinProject") : t("sessionList.pinProject")}
+                      title={pinned ? t("sessionList.unpin") : t("sessionList.pin")}
                       onClick={() => togglePinnedProject(group.rootId)}
                       style={{
                         position: "absolute",
@@ -1108,14 +1114,14 @@ export function MultiProjectSessionList({
                         const loadingChild = !!loadingChildren[stateKey];
                         const hasMoreChildren = !!childrenHasMore[stateKey];
                         const label = loadingChild
-                          ? "加载中..."
+                          ? t("sessionList.loading")
                           : row.expanded
                             ? hasMoreChildren
-                              ? "加载更多子会话"
-                              : "收起"
+                              ? t("sessionList.loadMoreChildren")
+                              : t("common.collapse")
                             : row.hiddenCount > 0
-                              ? `还有 ${row.hiddenCount} 个子会话`
-                              : "展开子会话";
+                              ? t("sessionList.remainingChildren", { count: row.hiddenCount })
+                              : t("sessionList.expandChildren");
                         return (
                           <ToggleRowButton
                             key={`children-toggle-${group.rootId}-${row.parent.key}`}
@@ -1158,12 +1164,12 @@ export function MultiProjectSessionList({
                         loading={projectLoading}
                         label={
                           projectLoading
-                            ? "加载中..."
+                            ? t("sessionList.loading")
                             : expanded
                               ? remaining > 0
-                                ? `还有 ${remaining} 个会话`
-                                : "收起"
-                              : `还有 ${Math.max(0, group.totalCount - MULTI_PROJECT_VISIBLE_LIMIT)} 个会话`
+                                ? t("sessionList.remainingSessions", { count: remaining })
+                                : t("common.collapse")
+                              : t("sessionList.remainingSessions", { count: Math.max(0, group.totalCount - MULTI_PROJECT_VISIBLE_LIMIT) })
                         }
                         showExpandIcon={!projectLoading && (!expanded || remaining > 0)}
                         showCollapseIcon={!projectLoading && expanded}
@@ -1218,6 +1224,7 @@ function SessionCard({
   onRename?: (session: SessionItem, nextName: string) => Promise<boolean> | boolean;
   onDelete?: (session: SessionItem) => void;
 }) {
+  const { locale, t } = useI18n();
   const isClosed = !!session.closed_at;
   const isSubagent = !!session.parent_session_key;
   const forkSource = parseForkSessionSource(session.source);
@@ -1419,7 +1426,7 @@ function SessionCard({
             ) : null}
             {!isSubagent && childCount > 0 ? (
               <span
-                title={`${childCount} 个子会话`}
+                title={t("sessionList.childCount", { count: childCount })}
                 style={{
                   position: "absolute",
                   right: "-7px",
@@ -1578,7 +1585,7 @@ function SessionCard({
                 cancelEditing();
               }}
               disabled={saving}
-              aria-label="取消重命名"
+              aria-label={t("sessionList.cancelRename")}
               style={{
                 ...inlineActionStyle,
                 opacity: saving ? 0.6 : 1,
@@ -1618,8 +1625,8 @@ function SessionCard({
         >
           {syncing ? (
             <span
-              aria-label="同步中"
-              title="同步中"
+              aria-label={t("sessionList.syncing")}
+              title={t("sessionList.syncing")}
               style={{
                 width: "12px",
                 height: "12px",
@@ -1633,8 +1640,8 @@ function SessionCard({
             />
           ) : session.pending ? (
             <span
-              aria-label="正在回复"
-              title="正在回复"
+              aria-label={t("sessionList.replying")}
+              title={t("sessionList.replying")}
               style={{
                 width: "8px",
                 height: "8px",
@@ -1661,6 +1668,8 @@ function SessionCard({
                 isClosed && session.closed_at
                   ? session.closed_at
                   : session.updated_at || "",
+                locale,
+                t("time.justNow"),
               )}
             </span>
           )}
@@ -1673,7 +1682,7 @@ function SessionCard({
       >
         <button
           type="button"
-          aria-label="会话菜单"
+          aria-label={t("sessionList.menu")}
           onClick={(e) => {
             e.stopPropagation();
             setMenuOpen((open) => !open);
@@ -1746,7 +1755,7 @@ function SessionCard({
                   d="M19.91 15.51h-4.53a1 1 0 0 0 0 2h2.4A8 8 0 0 1 4 12a1 1 0 0 0-2 0a10 10 0 0 0 16.88 7.23V21a1 1 0 0 0 2 0v-4.5a1 1 0 0 0-.97-.99M12 2a10 10 0 0 0-6.88 2.77V3a1 1 0 0 0-2 0v4.5a1 1 0 0 0 1 1h4.5a1 1 0 0 0 0-2h-2.4A8 8 0 0 1 20 12a1 1 0 0 0 2 0A10 10 0 0 0 12 2"
                 />
               </svg>
-              同步
+              {t("sessionList.sync")}
             </button>
             <button
               type="button"
@@ -1775,7 +1784,7 @@ function SessionCard({
                 <path d="M12 20h9" />
                 <path d="M16.5 3.5a2.12 2.12 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
               </svg>
-              重命名
+              {t("sessionList.rename")}
             </button>
             <button
               type="button"
@@ -1806,7 +1815,7 @@ function SessionCard({
                 <path d="M14 11v6" />
                 <path d="M9 6V4h6v2" />
               </svg>
-              删除
+              {t("common.delete")}
             </button>
           </div>
         ) : null}
@@ -1815,17 +1824,20 @@ function SessionCard({
   );
 }
 
-function formatTime(isoString: string): string {
+function formatTime(isoString: string, locale: Locale, justNow: string): string {
   const date = new Date(isoString);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
   const now = new Date();
   const diff = now.getTime() - date.getTime();
-  if (diff < 60000) return "刚刚";
+  if (diff < 60000) return justNow;
   if (diff < 3600000) return `${Math.floor(diff / 60000)}m`;
   if (diff < 86400000) return `${Math.floor(diff / 3600000)}h`;
   if (now.getFullYear() === date.getFullYear()) {
-    return `${date.getMonth() + 1}/${date.getDate()}`;
+    return new Intl.DateTimeFormat(locale, { month: "numeric", day: "numeric" }).format(date);
   }
-  return `${date.getFullYear() % 100}/${date.getMonth() + 1}`;
+  return new Intl.DateTimeFormat(locale, { year: "2-digit", month: "numeric" }).format(date);
 }
 
 function renderHighlightedText(

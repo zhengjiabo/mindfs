@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { ModeIcon } from "./ModeIcon";
+import { useI18n, type MessageKey } from "../i18n";
 
 export type SessionMode = "chat" | "plugin" | "command";
 
@@ -10,10 +11,10 @@ type ModeSelectorProps = {
   disabled?: boolean;
 };
 
-const modeLabels: Record<SessionMode, string> = {
-  chat: "agent 对话",
-  plugin: "视图插件",
-  command: "命令执行",
+const modeLabelKeys: Record<SessionMode, MessageKey> = {
+  chat: "mode.chat",
+  plugin: "mode.plugin",
+  command: "mode.command",
 };
 
 export function ModeSelector({
@@ -22,6 +23,7 @@ export function ModeSelector({
   compact = false,
   disabled = false,
 }: ModeSelectorProps) {
+  const { t } = useI18n();
   const [isOpen, setIsOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
@@ -113,7 +115,7 @@ export function ModeSelector({
               textTransform: "uppercase",
             }}
           >
-            模式
+            {t("mode.title")}
           </div>
           {(["chat", "plugin", "command"] as SessionMode[]).map((m) => (
             <button
@@ -141,7 +143,7 @@ export function ModeSelector({
                 size={18}
                 style={m === "chat" && m !== mode ? { color: "#64748b" } : undefined}
               />
-              <span>{modeLabels[m]}</span>
+              <span>{t(modeLabelKeys[m])}</span>
             </button>
           ))}
         </div>

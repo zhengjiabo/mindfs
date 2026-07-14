@@ -1,6 +1,7 @@
 import { appPath } from "./base";
 import { protectedJSON } from "./api";
 import { isNativeShellRuntime } from "./runtime";
+import { translateNow } from "../i18n";
 
 export type WebPushStatus = {
   supported: boolean;
@@ -157,7 +158,7 @@ function serviceWorkerURL(): URL {
 
 async function ensureServiceWorkerRegistration(): Promise<ServiceWorkerRegistration> {
   if (!("serviceWorker" in navigator)) {
-    throw new Error("当前浏览器不支持 Service Worker");
+    throw new Error(translateNow("webPush.serviceWorkerUnsupported"));
   }
   const existing = await navigator.serviceWorker.getRegistration("./").catch(() => undefined);
   if (existing) {
@@ -169,7 +170,7 @@ async function ensureServiceWorkerRegistration(): Promise<ServiceWorkerRegistrat
   let timeoutID = 0;
   const timeout = new Promise<never>((_, reject) => {
     timeoutID = window.setTimeout(() => {
-      reject(new Error("通知服务启动超时，请刷新页面后重试；如果仍失败，请检查浏览器是否允许 Service Worker。"));
+      reject(new Error(translateNow("webPush.serviceWorkerTimeout")));
     }, serviceWorkerReadyTimeoutMs);
   });
   try {
@@ -237,13 +238,13 @@ export async function subscribeWebPush(): Promise<WebPushStatus> {
           applicationServerKey,
         }),
         pushSubscribeTimeoutMs,
-        "Chrome 通知订阅超时，请检查浏览器推送服务、网络代理/VPN，或清除站点数据后重试。",
+        translateNow("webPush.subscribeTimeout"),
       ).catch((error) => {
         const message = error instanceof Error ? error.message : String(error || "");
         if (/denied|notallowed|permission/i.test(message)) {
           throw new Error(isIOSLike()
-            ? "iOS 已拒绝此主屏幕 App 的通知权限，请在系统设置的通知里允许 MindFS；如果找不到该项，请删除主屏幕图标后重新添加。"
-            : "浏览器或系统已拒绝通知权限，请在浏览器/系统通知设置里允许 MindFS。");
+            ? translateNow("webPush.permissionDeniedIOS")
+            : translateNow("webPush.permissionDenied"));
         }
         throw error;
       });
@@ -271,7 +272,7 @@ export async function sendWebPushTest(): Promise<void> {
   const subscription = await currentSubscription();
   const endpoint = subscription?.endpoint || "";
   if (!endpoint) {
-    throw new Error("当前设备还没有 PWA 通知订阅，请先开启通知");
+    throw new Error(translateNow("webPush.noSubscription"));
   }
   await protectedJSON(appPath("/api/web-push/test"), {
     method: "POST",
@@ -283,17 +284,17 @@ export async function sendWebPushTest(): Promise<void> {
 export function webPushReasonLabel(reason?: string): string {
   switch (reason) {
     case "ios_requires_home_screen":
-      return "请先添加到主屏幕后再开启通知";
+      return translateNow("webPush.reason.iosHomeScreen");
     case "insecure_context":
-      return "需要 HTTPS 或 localhost";
+      return translateNow("webPush.reason.insecureContext");
     case "server_disabled":
-      return "服务端未配置 Web Push";
+      return translateNow("webPush.reason.serverDisabled");
     case "permission_denied":
-      return "通知权限已被拒绝，请到浏览器/系统设置中允许";
+      return translateNow("webPush.reason.permissionDenied");
     case "native_shell":
-      return "原生壳使用系统通知";
+      return translateNow("webPush.reason.nativeShell");
     case "unsupported":
-      return "当前浏览器不支持 Web Push";
+      return translateNow("webPush.reason.unsupported");
     default:
       return "";
   }

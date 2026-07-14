@@ -6,6 +6,7 @@ import { BinaryViewer } from "./BinaryViewer";
 import { rootBadgeStyle } from "./rootBadgeStyle";
 import { downloadFile } from "../services/download";
 import { isNativeShellRuntime } from "../services/runtime";
+import { useI18n } from "../i18n";
 
 type FilePayload = {
   name: string;
@@ -129,6 +130,7 @@ function Breadcrumbs({ root, path, onPathClick }: { root?: string; path: string;
 }
 
 export function FileViewer({ file, onSessionClick, onPathClick, onFileClick, onSelectionChange, initialScrollTop = 0, onScrollTopChange, isVisible = true }: FileViewerProps) {
+  const { t } = useI18n();
   const [isDownloading, setIsDownloading] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const restoredScrollKeyRef = useRef("");
@@ -325,14 +327,14 @@ export function FileViewer({ file, onSessionClick, onPathClick, onFileClick, onS
         path: file.path,
         name: file.name,
       });
-      showToast(isNativeShellRuntime() ? "已保存到系统下载目录" : "下载已开始，请查看浏览器下载栏", true);
+      showToast(isNativeShellRuntime() ? t("fileViewer.downloadSavedNative") : t("fileViewer.downloadStarted"), true);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "下载失败";
+      const message = error instanceof Error ? error.message : t("fileViewer.downloadFailed");
       showToast(message, false);
     } finally {
       setIsDownloading(false);
     }
-  }, [file, isDownloading, showToast]);
+  }, [file, isDownloading, showToast, t]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, background: "transparent" }}>
@@ -435,8 +437,8 @@ export function FileViewer({ file, onSessionClick, onPathClick, onFileClick, onS
               type="button"
               onClick={() => { void handleDownload(); }}
               disabled={!file.root || isDownloading}
-              title={isDownloading ? "下载中..." : "下载文件"}
-              aria-label={isDownloading ? "下载中..." : "下载文件"}
+              title={isDownloading ? t("fileViewer.downloading") : t("fileViewer.downloadFile")}
+              aria-label={isDownloading ? t("fileViewer.downloading") : t("fileViewer.downloadFile")}
               style={{
                 border: "none",
                 background: "transparent",

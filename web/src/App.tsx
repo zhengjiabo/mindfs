@@ -144,6 +144,7 @@ import {
   type StageTemplate,
   type TaskTemplate,
 } from "./services/tasks";
+import { useI18n, type MessageKey, type MessageParams } from "./i18n";
 
 // 类型定义
 type SessionMode = "chat" | "plugin" | "command";
@@ -208,20 +209,20 @@ function parseTaskSessionErrorDetails(error?: string): string[] {
   }
 }
 
-function taskStatusLabel(status: string): string {
-  const labels: Record<string, string> = {
-    pending: "待开始",
-    queued: "待调度",
-    running: "运行中",
-    waiting_user: "待确认",
-    paused: "已暂停",
-    success: "已完成",
-    fail: "失败",
-    cancelled: "已取消",
-    approved: "已通过",
-    rejected: "已退回",
+function taskStatusLabel(status: string, t: (key: MessageKey, params?: MessageParams) => string): string {
+  const labels: Record<string, MessageKey> = {
+    pending: "task.status.pending",
+    queued: "task.status.queued",
+    running: "task.status.running",
+    waiting_user: "task.status.waitingUser",
+    paused: "task.status.paused",
+    success: "task.status.success",
+    fail: "task.status.fail",
+    cancelled: "task.status.cancelled",
+    approved: "task.status.approved",
+    rejected: "task.status.rejected",
   };
-  return labels[status] || status || "-";
+  return labels[status] ? t(labels[status]) : status || "-";
 }
 
 function firstTaskInputFromDetail(detail: TaskDetail): string {
@@ -243,7 +244,7 @@ function currentTaskInputFromDetail(detail: TaskDetail): string {
   return latestTaskStageRun(detail, detail.task.current_stage_index)?.input || "";
 }
 
-function previousTaskInputsFromDetail(detail: TaskDetail): Array<{ id: string; label: string; input: string }> {
+function previousTaskInputsFromDetail(detail: TaskDetail, t: (key: MessageKey, params?: MessageParams) => string): Array<{ id: string; label: string; input: string }> {
   const items: Array<{ id: string; label: string; input: string }> = [];
   for (let index = 0; index < detail.task.current_stage_index; index += 1) {
     const run = latestTaskStageRun(detail, index);
@@ -251,7 +252,7 @@ function previousTaskInputsFromDetail(detail: TaskDetail): Array<{ id: string; l
     if (!run || !input.trim()) continue;
     items.push({
       id: run.id,
-      label: run.stage_name || `阶段${index + 1}`,
+      label: run.stage_name || t("task.stageLabel", { index: index + 1 }),
       input,
     });
   }
@@ -587,10 +588,10 @@ type LocalDirsPayload = {
   items?: LocalDirItemPayload[];
 };
 
-function managedDirAddErrorMessage(error: unknown, fallback: string): string {
+function managedDirAddErrorMessage(error: unknown, fallback: string, t: (key: MessageKey, params?: MessageParams) => string): string {
   const message = error instanceof Error ? error.message : String(error || "");
   if (message.includes("root name already exists")) {
-    return "已有同名项目目录，请先重命名后再加入。";
+    return t("root.nameAlreadyExists");
   }
   return message || fallback;
 }
@@ -626,28 +627,28 @@ function normalizeUpdateState(
   };
 }
 
-function updateButtonLabel(state: UpdateState): string {
+function updateButtonLabel(state: UpdateState, t: (key: MessageKey, params?: MessageParams) => string): string {
   const status = (state.status || "idle").toLowerCase();
   switch (status) {
     case "available":
       if (state.current_version && state.latest_version) {
-        return `更新 ${state.current_version} → ${state.latest_version}`;
+        return t("update.available", { current: state.current_version, latest: state.latest_version });
       }
-      return state.latest_version ? `更新到 ${state.latest_version}` : "新版本";
+      return state.latest_version ? t("update.toVersion", { version: state.latest_version }) : t("update.newVersion");
     case "downloading":
-      return "下载中...";
+      return t("update.downloading");
     case "installing":
-      return "安装中...";
+      return t("update.installing");
     case "restarting":
-      return "重启中...";
+      return t("update.restarting");
     case "failed":
-      return "更新失败";
+      return t("update.failed");
     default:
-      return "已是最新";
+      return t("update.latest");
   }
 }
 
-function updateSummaryText(state: UpdateState): string {
+function updateSummaryText(state: UpdateState, t: (key: MessageKey, params?: MessageParams) => string): string {
   const body = String(state.release_body || "").trim();
   if (body) {
     return body;
@@ -657,7 +658,7 @@ function updateSummaryText(state: UpdateState): string {
     return name;
   }
   if (state.latest_version) {
-    return `发现 v${state.latest_version} 新版本`;
+    return t("update.foundVersion", { version: state.latest_version });
   }
   return "";
 }
@@ -1426,6 +1427,7 @@ function saveTaskCreateWorktreePreference(rootId: string, pref: TaskCreateWorktr
 }
 
 export function App({ onGoHome }: AppProps) {
+  const { t } = useI18n();
   const pluginManagerRef = useRef<PluginManager>(new PluginManager());
   const completionAudioContextRef = useRef<AudioContext | null>(null);
   const completionAudioUnlockedRef = useRef(false);
@@ -1543,7 +1545,7 @@ export function App({ onGoHome }: AppProps) {
 	  const [taskRelatedFilesById, setTaskRelatedFilesById] = useState<Record<string, RelatedFile[]>>({});
 	  const [selectedKanbanTaskId, setSelectedKanbanTaskId] = useState("");
 	  const [expandedTaskInputIds, setExpandedTaskInputIds] = useState<Set<string>>(() => new Set());
-  const [collapsedTaskCompletionGroups, setCollapsedTaskCompletionGroups] = useState<Set<string>>(() => new Set(["已完成", "失败", "已取消"]));
+  const [collapsedTaskCompletionGroups, setCollapsedTaskCompletionGroups] = useState<Set<string>>(() => new Set(["success", "fail", "cancelled"]));
   const [taskInlineEdit, setTaskInlineEdit] = useState<TaskInlineEditState | null>(null);
   const [taskSessionErrorDialog, setTaskSessionErrorDialog] = useState<{ title: string; message: string; details: string[] } | null>(null);
   const [taskInlineActiveToken, setTaskInlineActiveToken] = useState<{ type: "file" | "slash" | "prompt" | "command"; query: string } | null>(null);
@@ -1602,9 +1604,9 @@ export function App({ onGoHome }: AppProps) {
     try {
       setTaskTemplates(await fetchTaskTemplates());
     } catch (err) {
-      reportError("file.write_failed", String((err as Error)?.message || "任务模板加载失败"));
+      reportError("file.write_failed", String((err as Error)?.message || t("taskTemplate.loadFailed")));
     }
-  }, []);
+  }, [t]);
 
   const openTaskTemplateEditor = useCallback((template: TaskTemplate | null) => {
     setTaskTemplateDialogTemplate(template);
@@ -1627,16 +1629,16 @@ export function App({ onGoHome }: AppProps) {
   const handleDeleteTaskTemplate = useCallback(async (template: TaskTemplate) => {
     const id = template.id || "";
     if (!id) return;
-    if (!window.confirm(`删除任务模板「${template.name || id}」？`)) return;
+    if (!window.confirm(t("taskTemplate.deleteConfirm", { name: template.name || id }))) return;
     try {
       await deleteTaskTemplate(id);
       setTaskTemplates((prev) => prev.filter((item) => item.id !== id));
       setTaskTemplateDialogTemplate((prev) => prev?.id === id ? null : prev);
       setTaskTemplateFilter((prev) => prev === id ? "" : prev);
     } catch (err) {
-      reportError("file.write_failed", String((err as Error)?.message || "任务模板删除失败"));
+      reportError("file.write_failed", String((err as Error)?.message || t("taskTemplate.deleteFailed")));
     }
-  }, []);
+  }, [t]);
 
   const handleTaskTemplateConcurrencyChange = useCallback(async (templateId: string, value: number) => {
     const template = taskTemplates.find((item) => item.id === templateId);
@@ -1650,9 +1652,9 @@ export function App({ onGoHome }: AppProps) {
       setTaskTemplateDialogTemplate((prev) => prev?.id === templateId ? saved : prev);
     } catch (err) {
       setTaskTemplates((prev) => prev.map((item) => item.id === templateId ? template : item));
-      reportError("file.write_failed", String((err as Error)?.message || "最大并发保存失败"));
+      reportError("file.write_failed", String((err as Error)?.message || t("taskTemplate.concurrencySaveFailed")));
     }
-  }, [taskTemplates]);
+  }, [taskTemplates, t]);
 
   useEffect(() => {
     void loadTaskTemplates();
@@ -1829,11 +1831,11 @@ export function App({ onGoHome }: AppProps) {
       const details = await fetchTaskDetails(targetRoot, force ? undefined : { after: meta?.newestUpdatedAt || "" });
       applyTaskDetails(targetRoot, details);
     } catch (err) {
-      reportError("file.write_failed", String((err as Error)?.message || "任务加载失败"));
+      reportError("file.write_failed", String((err as Error)?.message || t("task.loadFailed")));
     } finally {
       setKanbanTasksLoading(false);
     }
-  }, [applyTaskDetails]);
+  }, [applyTaskDetails, t]);
 
 	  useEffect(() => {
 	    void loadKanbanTasks(currentRootId);
@@ -1864,8 +1866,8 @@ export function App({ onGoHome }: AppProps) {
     if (!rootId) return;
     let reason = "";
     if (action === "prev" || action === "pause") {
-      const label = action === "prev" ? "退回上一阶段" : "暂停任务";
-      const input = window.prompt(`${label}原因（可留空）`, "");
+      const label = action === "prev" ? t("task.actionPrevious") : t("task.actionPause");
+      const input = window.prompt(t("task.reasonPrompt", { action: label }), "");
       if (input === null) {
         return;
       }
@@ -1878,9 +1880,9 @@ export function App({ onGoHome }: AppProps) {
         void refreshTaskWorktree(rootId, detail.task.worktree_path);
       }
     } catch (err) {
-      reportError("file.write_failed", String((err as Error)?.message || "任务操作失败"));
+      reportError("file.write_failed", String((err as Error)?.message || t("task.actionFailed")));
     }
-  }, [applyTaskDetails]);
+  }, [applyTaskDetails, t]);
 
   const openTaskEditDialog = useCallback(async (task: KanbanTask, openAttachmentPicker = false) => {
     const rootId = task.root_id || currentRootIdRef.current;
@@ -1888,7 +1890,7 @@ export function App({ onGoHome }: AppProps) {
     try {
       const detail = taskDetailsById[task.id];
       if (!detail) {
-        reportError("file.write_failed", "任务详情尚未同步，请刷新后重试");
+        reportError("file.write_failed", t("task.detailNotSynced"));
         return;
       }
       const firstInput = firstTaskInputFromDetail(detail);
@@ -1896,9 +1898,9 @@ export function App({ onGoHome }: AppProps) {
 	      setTaskInlineEdit({
 	        taskId: task.id,
 	        templateId: task.task_template_id,
-	        templateName: task.task_template_name || "任务",
+	        templateName: task.task_template_name || t("task.defaultTitle"),
 	        text: currentInput,
-	        previousInputs: previousTaskInputsFromDetail(detail),
+	        previousInputs: previousTaskInputsFromDetail(detail, t),
 	        createWorktree: detail.task.create_worktree === true,
 	        worktreeBranchMode: detail.task.worktree_branch_mode === "existing" ? "existing" : "new",
 	        worktreeBranch: detail.task.worktree_branch || "",
@@ -1915,9 +1917,9 @@ export function App({ onGoHome }: AppProps) {
         }
       }, 0);
     } catch (err) {
-      reportError("file.write_failed", String((err as Error)?.message || "任务编辑失败"));
+      reportError("file.write_failed", String((err as Error)?.message || t("task.editFailed")));
     }
-  }, [taskDetailsById]);
+  }, [taskDetailsById, t]);
 
   const loadTaskWorktreeBranches = useCallback(async (rootId: string) => {
     if (!rootId) return;
@@ -1927,11 +1929,11 @@ export function App({ onGoHome }: AppProps) {
       setTaskWorktreeBranches(await fetchGitBranches(rootId));
     } catch (error) {
       setTaskWorktreeBranches({ branches: [] });
-      setTaskWorktreeBranchError(error instanceof Error ? error.message : "加载分支失败");
+      setTaskWorktreeBranchError(error instanceof Error ? error.message : t("worktree.loadBranchFailed"));
     } finally {
       setTaskWorktreeBranchesLoading(false);
     }
-  }, []);
+  }, [t]);
 
 	  useEffect(() => {
 	    if (
@@ -1972,7 +1974,7 @@ export function App({ onGoHome }: AppProps) {
 	    const worktreePref = loadTaskCreateWorktreePreference(rootId);
 	    setTaskInlineEdit({
 	      templateId,
-	      templateName: template?.name || "任务",
+	      templateName: template?.name || t("task.defaultTitle"),
 	      text: initialText,
 	      previousInputs: [],
 	      createWorktree: taskCanCreateWorktree && worktreePref.createWorktree,
@@ -1984,7 +1986,7 @@ export function App({ onGoHome }: AppProps) {
     setTaskInlineActiveToken(null);
     setTaskInlineCandidates([]);
     setTaskInlineCandidateIndex(0);
-  }, []);
+  }, [t]);
 
   const closeTaskEditDialog = useCallback(() => {
     setTaskInlineEdit((prev) => {
@@ -2086,7 +2088,7 @@ export function App({ onGoHome }: AppProps) {
       knownTaskWorktreePathsRef.current.delete(normalizedWorktreePath);
       setWorktreeErrorByRoot((prev) => ({
         ...prev,
-        [normalizedRootId]: error instanceof Error ? error.message : "加载 worktree 失败",
+        [normalizedRootId]: error instanceof Error ? error.message : t("worktree.loadFailed"),
       }));
     } finally {
       setWorktreeLoadingByRoot((prev) => ({ ...prev, [normalizedRootId]: false }));
@@ -2135,10 +2137,10 @@ export function App({ onGoHome }: AppProps) {
       }
       closeTaskEditDialog();
     } catch (err) {
-      reportError("file.write_failed", String((err as Error)?.message || "任务保存失败"));
+      reportError("file.write_failed", String((err as Error)?.message || t("task.saveFailed")));
       setTaskInlineSaving(false);
     }
-  }, [applyTaskDetails, closeTaskEditDialog, taskInlineEdit]);
+  }, [applyTaskDetails, closeTaskEditDialog, taskInlineEdit, t]);
 
   useEffect(() => {
     try {
@@ -3523,7 +3525,7 @@ export function App({ onGoHome }: AppProps) {
       const session = currentSessionRef.current || drawerSessionByRootRef.current[activeRoot || ""];
       const sessionKey = targetSessionKey || session?.key || (session as any)?.session_key;
       if (!activeRoot) {
-        reportError("session.sync_failed", "请先选择一个会话再切换 Plan 模式");
+        reportError("session.sync_failed", t("session.planModeSelectFirst"));
         return;
       }
       if (!sessionKey || String(sessionKey).startsWith("pending-")) {
@@ -3557,10 +3559,10 @@ export function App({ onGoHome }: AppProps) {
       bumpCacheVersion();
       const sent = await sessionService.setPlanMode(activeRoot, sessionKey, enabled);
       if (!sent) {
-        reportError("network.disconnected", "Plan 模式切换失败：连接未就绪，请稍后重试");
+        reportError("network.disconnected", t("session.planModeSwitchFailedNotReady"));
       }
     },
-    [rootSessionKey, setDrawerSessionForRoot, bumpCacheVersion],
+    [rootSessionKey, setDrawerSessionForRoot, bumpCacheVersion, t],
   );
 
   const promotePendingSessionForRoot = useCallback(
@@ -3597,7 +3599,7 @@ export function App({ onGoHome }: AppProps) {
         typeof selected?.name === "string"
           ? selected.name
           : "") ||
-        "新会话";
+        t("session.new");
       const latestReal =
         realCached || pendingCached || fallback || drawer;
       let cacheChanged = false;
@@ -4232,7 +4234,7 @@ export function App({ onGoHome }: AppProps) {
   const formatDirectoryLoadError = useCallback((message?: string | null) => {
     const text = String(message || "").trim();
     if (!text) {
-      return "无法读取这个目录。";
+      return t("directory.readFailed");
     }
     const lower = text.toLowerCase();
     if (
@@ -4242,10 +4244,10 @@ export function App({ onGoHome }: AppProps) {
       lower.includes("拒绝访问") ||
       lower.includes("权限")
     ) {
-      return "当前进程没有权限读取这个目录或其中的部分系统项。";
+      return t("directory.permissionDenied");
     }
     return text;
-  }, []);
+  }, [t]);
 
   const treeCacheKey = useCallback(
     (rootID: string, dirPath: string) => `${rootID}:${dirPath || "."}`,
@@ -4825,7 +4827,7 @@ export function App({ onGoHome }: AppProps) {
           await refreshTreeDir(rootID, selectedDirRef.current || ".", true);
         }
       } catch (err) {
-        const message = err instanceof Error ? err.message : "切换分支失败";
+        const message = err instanceof Error ? err.message : t("git.checkoutFailed");
         console.error("[git.checkout] failed", {
           rootID,
           branch,
@@ -4845,7 +4847,7 @@ export function App({ onGoHome }: AppProps) {
         throw err;
       }
     },
-    [refreshGitHistory, refreshTreeDir],
+    [refreshGitHistory, refreshTreeDir, t],
   );
 
   const applyGitActionResult = useCallback(
@@ -4881,7 +4883,7 @@ export function App({ onGoHome }: AppProps) {
         const result = await run();
         await applyGitActionResult(rootID, result.status, options);
       } catch (err) {
-        const message = err instanceof Error ? err.message : `${action} 失败`;
+        const message = err instanceof Error ? err.message : t("common.actionFailed", { action });
         console.error(`[git.${action}] failed`, {
           rootID,
           message,
@@ -4892,7 +4894,7 @@ export function App({ onGoHome }: AppProps) {
         throw err;
       }
     },
-    [applyGitActionResult],
+    [applyGitActionResult, t],
   );
 
   const handleGitPull = useCallback(
@@ -4979,11 +4981,11 @@ export function App({ onGoHome }: AppProps) {
       } catch (err) {
         reportError(
           "file.write_failed",
-          String((err as Error)?.message || "上传文件失败"),
+          String((err as Error)?.message || t("file.uploadFailed")),
         );
       }
     },
-    [refreshTreeDir],
+    [refreshTreeDir, t],
   );
 
   const handleSelectSession = useCallback(
@@ -5213,7 +5215,7 @@ export function App({ onGoHome }: AppProps) {
 
       const deleted = await sessionService.deleteSession(rootID, sessionKey);
       if (!deleted) {
-        reportError("session.delete_failed", "删除会话失败");
+        reportError("session.delete_failed", t("session.deleteFailed"));
         return;
       }
 
@@ -5324,7 +5326,7 @@ export function App({ onGoHome }: AppProps) {
         trimmedName,
       );
       if (!renamed) {
-        reportError("session.rename_failed", "重命名会话失败");
+        reportError("session.rename_failed", t("session.renameFailed"));
         return false;
       }
 
@@ -5414,7 +5416,7 @@ export function App({ onGoHome }: AppProps) {
         const result = await syncSession(rootID, sessionKey, { full: true });
         const synced = result.session;
         if (!synced) {
-          reportError("session.sync_failed", "同步会话失败");
+          reportError("session.sync_failed", t("session.syncFailed"));
           return;
         }
         const normalized = {
@@ -5452,7 +5454,7 @@ export function App({ onGoHome }: AppProps) {
 
         bumpCacheVersion();
       } catch {
-        reportError("session.sync_failed", "同步会话失败");
+        reportError("session.sync_failed", t("session.syncFailed"));
       } finally {
         setSyncingSessionKeys((prev) => {
           const next = new Set(prev);
@@ -5480,14 +5482,14 @@ export function App({ onGoHome }: AppProps) {
       const resolvedRoot = String(rootID || currentRootIdRef.current || "").trim();
       const resolvedKey = String(sessionKey || "").trim();
       if (!resolvedRoot || !resolvedKey || seq <= 0) {
-        reportError("session.sync_failed", "无法 fork：缺少会话或消息位置");
+        reportError("session.sync_failed", t("session.forkMissing"));
         return;
       }
       const result = await sessionService.forkSession(resolvedRoot, resolvedKey, seq);
       const forked = result?.session;
       const forkedKey = String(result?.session_key || forked?.key || "").trim();
       if (!forkedKey) {
-        reportError("session.sync_failed", "fork 会话失败");
+        reportError("session.sync_failed", t("session.forkFailed"));
         return;
       }
       if (forked) {
@@ -5561,8 +5563,8 @@ export function App({ onGoHome }: AppProps) {
         setExternalSessions((prev) => mergeSessionItems(prev, next));
       } catch (err) {
         const message =
-          err instanceof Error ? err.message : String(err || "加载可导入会话失败");
-        setExternalSessionsError(message || "加载可导入会话失败");
+          err instanceof Error ? err.message : String(err || t("session.importLoadFailed"));
+        setExternalSessionsError(message || t("session.importLoadFailed"));
         if (options?.replace || (!options?.beforeTime && !options?.afterTime)) {
           setExternalSessions([]);
           setHasMoreExternalSessions(false);
@@ -5687,7 +5689,7 @@ export function App({ onGoHome }: AppProps) {
         const firstError = results.find((item) => !item.success)?.error;
         reportError(
           "session.import_failed",
-          firstError ? `导入会话失败：${firstError}` : "导入会话失败",
+          firstError ? t("session.importFailedWithReason", { reason: firstError }) : t("session.importFailed"),
         );
         return;
       }
@@ -5702,8 +5704,8 @@ export function App({ onGoHome }: AppProps) {
       if (failedKeys.size > 0) {
         const firstError = results.find((item) => !item.success)?.error;
         const message = firstError
-          ? `部分会话导入失败：${failedKeys.size} 项。${firstError}`
-          : `部分会话导入失败：${failedKeys.size} 项`;
+          ? t("session.importPartialFailedWithReason", { count: failedKeys.size, reason: firstError })
+          : t("session.importPartialFailed", { count: failedKeys.size });
         reportError(
           "session.import_failed",
           message,
@@ -5899,7 +5901,7 @@ export function App({ onGoHome }: AppProps) {
             fast_service: effectiveFastService,
             shell: effectiveShell,
             plan_mode: pendingPlanMode || messageRequestsPlanMode,
-            name: "新会话",
+            name: t("session.new"),
             pending: true,
           } as any;
           setBoundSessionForRoot(activeRoot, tempKey);
@@ -5910,7 +5912,7 @@ export function App({ onGoHome }: AppProps) {
         if (effectiveAgent !== "codex") {
           reportError(
             "session.slash_command_failed",
-            `/${transientSlashCommand} 目前只支持 codex`,
+            t("session.slashCommandCodexOnly", { command: transientSlashCommand }),
           );
           return;
         }
@@ -5998,13 +6000,13 @@ export function App({ onGoHome }: AppProps) {
               command: transientSlashCommand,
               content: "",
               status: "failed",
-              error: "连接未就绪，请稍后重试",
+              error: t("session.connectionNotReady"),
               createdAt: Date.now(),
             },
           }));
           reportError(
             "network.disconnected",
-            "命令发送失败：连接未就绪，请稍后重试",
+            t("session.commandSendFailedNotReady"),
           );
         }
         return;
@@ -6223,7 +6225,7 @@ export function App({ onGoHome }: AppProps) {
       console.info("[session/send] dispatched", { requestId, rootId: activeRoot, sessionKey: sendSessionKey || null, tempKey: tempKey || null, sent });
       if (!sent) {
         console.warn("[session/send] dispatch_failed", { requestId, rootId: activeRoot, sessionKey: sendSessionKey || null });
-        reportError("network.disconnected", "消息发送失败：连接未就绪，请稍后重试", {
+        reportError("network.disconnected", t("session.messageSendFailedNotReady"), {
           details: {
             requestId,
             rootId: activeRoot,
@@ -6291,11 +6293,11 @@ export function App({ onGoHome }: AppProps) {
     async (agentName: string, action: "install" | "update", commands: string[]) => {
       const activeRoot = currentRootIdRef.current;
       if (!activeRoot) {
-        throw new Error("当前未选择项目，无法执行命令");
+        throw new Error(t("root.noProjectForCommand"));
       }
       const script = commands.map((command) => command.trim()).filter(Boolean).join("\n");
       if (!script) {
-        throw new Error("agents.json 未配置命令");
+        throw new Error(t("agentConfig.noCommand"));
       }
       const previousBoundKey = boundSessionByRootRef.current[activeRoot];
       if (previousBoundKey && !previousBoundKey.startsWith("pending-")) {
@@ -6321,6 +6323,7 @@ export function App({ onGoHome }: AppProps) {
       setBoundSessionForRoot,
       setDrawerOpenForRoot,
       setDrawerSessionForRoot,
+      t,
     ],
   );
 
@@ -6925,7 +6928,7 @@ export function App({ onGoHome }: AppProps) {
               reportError("file.read_failed", message);
               return;
             }
-            const message = "目录加载失败，请稍后重试。";
+            const message = t("directory.loadFailedRetry");
             setSelectedDir(targetPath);
             setSelectedDirKey(
               buildDirectorySelectionKey(root, targetPath, targetIsRoot),
@@ -7048,7 +7051,7 @@ export function App({ onGoHome }: AppProps) {
         }
       } catch (err) {
         const message =
-          err instanceof Error ? err.message : "关联文件 diff 不可用";
+      err instanceof Error ? err.message : t("git.relatedFileDiffFailed");
         console.error("[git.related-file.diff] failed", {
           rootID,
           path,
@@ -7383,11 +7386,11 @@ export function App({ onGoHome }: AppProps) {
       setWorktreeBranches(payload);
     } catch (error) {
       setWorktreeBranches({ branches: [] });
-      setWorktreeBranchError(error instanceof Error ? error.message : "加载分支失败");
+      setWorktreeBranchError(error instanceof Error ? error.message : t("worktree.loadBranchFailed"));
     } finally {
       setWorktreeBranchesLoading(false);
     }
-  }, []);
+  }, [t]);
 
   const loadWorktreeList = useCallback(async (rootID: string) => {
     setWorktreeSwitchLoading(true);
@@ -7397,11 +7400,11 @@ export function App({ onGoHome }: AppProps) {
       setWorktreeSwitchItems(payload.items || []);
     } catch (error) {
       setWorktreeSwitchItems([]);
-      setWorktreeSwitchError(error instanceof Error ? error.message : "加载 worktree 失败");
+      setWorktreeSwitchError(error instanceof Error ? error.message : t("worktree.loadFailed"));
     } finally {
       setWorktreeSwitchLoading(false);
     }
-  }, []);
+  }, [t]);
 
   const loadProjectTreeWorktrees = useCallback(async (rootID: string) => {
     if (!rootID) {
@@ -7424,12 +7427,12 @@ export function App({ onGoHome }: AppProps) {
       setWorktreeItemsByRoot((prev) => ({ ...prev, [rootID]: [] }));
       setWorktreeErrorByRoot((prev) => ({
         ...prev,
-        [rootID]: error instanceof Error ? error.message : "加载 worktree 失败",
+        [rootID]: error instanceof Error ? error.message : t("worktree.loadFailed"),
       }));
     } finally {
       setWorktreeLoadingByRoot((prev) => ({ ...prev, [rootID]: false }));
     }
-  }, []);
+  }, [t]);
 
   const loadProjectTreeWorktreeStatus = useCallback(async (worktreePath: string) => {
     if (!worktreePath) {
@@ -7529,13 +7532,13 @@ export function App({ onGoHome }: AppProps) {
     } catch (error) {
       reportError(
         "git.worktree_switch_failed",
-        managedDirAddErrorMessage(error, "切换 worktree 失败"),
+        managedDirAddErrorMessage(error, t("root.switchWorktreeFailed"), t),
       );
     } finally {
       setSwitchingWorktreePath("");
     }
     return undefined;
-  }, [findManagedRootByPath, refreshManagedRoots, switchingWorktreePath]);
+  }, [findManagedRootByPath, refreshManagedRoots, switchingWorktreePath, t]);
 
   const handleOpenProjectAdd = useCallback(() => {
     if (creatingRootBusy) {
@@ -7605,10 +7608,10 @@ export function App({ onGoHome }: AppProps) {
       setLocalDirState((prev) => ({
         ...prev,
         loading: false,
-        error: error instanceof Error ? error.message : "加载目录失败",
+        error: error instanceof Error ? error.message : t("directory.loadFailed"),
       }));
     }
-  }, []);
+  }, [t]);
 
   const openDirectoryPicker = useCallback((nextMode: ProjectAddMode) => {
     const rootID = currentRootIdRef.current;
@@ -7630,12 +7633,12 @@ export function App({ onGoHome }: AppProps) {
         loading: false,
         selectedPath: "",
         adding: false,
-        error: "当前项目缺少可浏览的父目录",
+        error: t("directory.noBrowsableParent"),
       }));
       return;
     }
     void loadLocalDirs(initialPath);
-  }, [inferParentPath, loadLocalDirs]);
+  }, [inferParentPath, loadLocalDirs, t]);
 
   const handleOpenLocalProjectAdd = useCallback(() => {
     void openDirectoryPicker("local");
@@ -7727,7 +7730,7 @@ export function App({ onGoHome }: AppProps) {
         const rootID = currentRootIdRef.current;
         const parentPath = String(creatingRootParentPath || "").trim();
         if (!rootID || !parentPath) {
-          throw new Error("缺少 worktree 创建位置");
+          throw new Error(t("worktree.createLocationMissing"));
         }
         const created = await createGitWorktree({
           rootId: rootID,
@@ -7774,7 +7777,7 @@ export function App({ onGoHome }: AppProps) {
     } catch (err) {
       reportError(
         "root.create_failed",
-        managedDirAddErrorMessage(err, "新建项目失败"),
+        managedDirAddErrorMessage(err, t("root.createProjectFailed"), t),
       );
     } finally {
       setCreatingRootBusy(false);
@@ -7785,6 +7788,7 @@ export function App({ onGoHome }: AppProps) {
     creatingRootName,
     creatingRootParentPath,
     refreshManagedRoots,
+    t,
     worktreeBranch,
     worktreeBranchMode,
   ]);
@@ -7821,12 +7825,12 @@ export function App({ onGoHome }: AppProps) {
       } catch (err) {
         reportError(
           "root.rename_failed",
-          managedDirAddErrorMessage(err, "项目重命名失败"),
+          managedDirAddErrorMessage(err, t("root.renameProjectFailed"), t),
         );
         return false;
       }
     },
-    [applyManagedRootRename],
+    [applyManagedRootRename, t],
   );
 
   const handleLocalDirSelect = useCallback((path: string) => {
@@ -7902,10 +7906,10 @@ export function App({ onGoHome }: AppProps) {
       setLocalDirState((prev) => ({
         ...prev,
         adding: false,
-        error: managedDirAddErrorMessage(error, "添加目录失败"),
+        error: managedDirAddErrorMessage(error, t("root.addDirectoryFailed"), t),
       }));
     }
-  }, [handleCreateRootStart, handleCreateWorktreeStart, loadLocalDirs, localDirState.adding, localDirState.path, localDirState.selectedPath, projectAddMode, refreshManagedRoots]);
+  }, [handleCreateRootStart, handleCreateWorktreeStart, loadLocalDirs, localDirState.adding, localDirState.path, localDirState.selectedPath, projectAddMode, refreshManagedRoots, t]);
 
   const handleGitHubImportStart = useCallback(async () => {
     const url = String(githubImportState.url || "").trim();
@@ -7937,7 +7941,7 @@ export function App({ onGoHome }: AppProps) {
         ...prev,
         taskId: String(payload?.task_id || ""),
         status: "pending",
-        message: "克隆中",
+        message: t("projectAdd.cloning"),
         submitting: false,
         running: true,
         done: false,
@@ -7949,10 +7953,10 @@ export function App({ onGoHome }: AppProps) {
         submitting: false,
         running: false,
         done: false,
-        error: error instanceof Error ? error.message : "GitHub 导入失败",
+        error: error instanceof Error ? error.message : t("root.githubImportFailed"),
       }));
     }
-  }, [githubImportState.parentPath, githubImportState.running, githubImportState.submitting, githubImportState.url]);
+  }, [githubImportState.parentPath, githubImportState.running, githubImportState.submitting, githubImportState.url, t]);
 
   const projectAddOverlay = projectAddMode ? (
     <div ref={projectAddPopoverRef}>
@@ -7973,7 +7977,7 @@ export function App({ onGoHome }: AppProps) {
           void handleLocalDirAdd();
         }}
         localActionLabel={
-          projectAddMode === "local" ? "添加" : "放置于此目录"
+          projectAddMode === "local" ? t("projectAdd.add") : t("projectAdd.placeHere")
         }
         localDisabledAddedRoot={projectAddMode === "local"}
         localBrowseOnly={
@@ -8005,10 +8009,10 @@ export function App({ onGoHome }: AppProps) {
     const rootInfo = managedRootByIdRef.current[rootID];
     const rootPath = rootInfo?.root_path || "";
     if (!rootPath) {
-      reportError("root.delete_failed", "当前项目缺少路径信息，无法移除");
+      reportError("root.delete_failed", t("root.missingPathRemove"));
       return;
     }
-    if (!window.confirm(`确认移除项目“${rootID}”？`)) {
+    if (!window.confirm(t("root.confirmRemove", { name: rootID }))) {
       return;
     }
     try {
@@ -8023,17 +8027,17 @@ export function App({ onGoHome }: AppProps) {
     } catch (err) {
       reportError(
         "root.delete_failed",
-        String((err as Error)?.message || "移除项目失败"),
+        String((err as Error)?.message || t("root.removeFailed")),
       );
     }
-  }, [clearRootScopedClientState, refreshManagedRoots]);
+  }, [clearRootScopedClientState, refreshManagedRoots, t]);
 
   const handleRemoveCurrentWorktree = useCallback(async () => {
     const rootID = currentRootIdRef.current;
     if (!rootID) {
       return;
     }
-    if (!window.confirm(`确认移除 worktree“${rootID}”？\n这会删除该 worktree 目录，并从 MindFS 项目列表中移除。`)) {
+    if (!window.confirm(t("worktree.confirmRemove", { name: rootID }))) {
       return;
     }
     try {
@@ -8043,10 +8047,10 @@ export function App({ onGoHome }: AppProps) {
     } catch (err) {
       reportError(
         "git.worktree_remove_failed",
-        String((err as Error)?.message || "移除 worktree 失败"),
+        String((err as Error)?.message || t("worktree.removeFailed")),
       );
     }
-  }, [clearRootScopedClientState, refreshManagedRoots]);
+  }, [clearRootScopedClientState, refreshManagedRoots, t]);
 
   const ensurePluginsLoaded = useCallback(async (rootId: string) => {
     if (!rootId || pluginsLoadedByRootRef.current[rootId]) {
@@ -8678,7 +8682,7 @@ export function App({ onGoHome }: AppProps) {
             typeof selectedSessionRef.current?.name === "string"
               ? selectedSessionRef.current.name
               : "") ||
-            "新会话";
+            t("session.new");
           const userEx = {
             role: "user",
             content: pending.message,
@@ -8835,7 +8839,7 @@ export function App({ onGoHome }: AppProps) {
         case "error":
           reportError(
             "session.resume_failed",
-            event.data?.message || "会话处理失败，请稍后重试",
+            event.data?.message || t("session.resumeFailed"),
             {
               details: {
                 rootId: activeRoot,
@@ -8956,7 +8960,7 @@ export function App({ onGoHome }: AppProps) {
           };
         });
         if (failed) {
-          reportError("session.slash_command_failed", notice.error || "登录失败", {
+          reportError("session.slash_command_failed", notice.error || t("session.loginFailed"), {
             details: { rootId: rootID, sessionKey, command },
           });
         }
@@ -8966,7 +8970,7 @@ export function App({ onGoHome }: AppProps) {
         const message =
           typeof event.data?.message === "string"
             ? event.data.message
-            : "命令执行失败";
+            : t("session.commandFailed");
         setSlashCommandResults((prev) => {
           const current = prev[resultKey];
           if (!current && sessionKey.startsWith("transient-")) {
@@ -9516,7 +9520,7 @@ export function App({ onGoHome }: AppProps) {
 	                  typeof sessionMeta?.plan_mode === "boolean"
 	                    ? sessionMeta.plan_mode
 	                    : false,
-                name: sessionMeta?.name || "新会话",
+                name: sessionMeta?.name || t("session.new"),
                 created_at:
                   sessionMeta?.created_at ||
                   exchange?.timestamp ||
@@ -9839,7 +9843,7 @@ export function App({ onGoHome }: AppProps) {
               running: !done && !failed,
               submitting: false,
               done,
-              error: failed ? String(status?.message || "GitHub 导入失败") : "",
+              error: failed ? String(status?.message || t("root.githubImportFailed")) : "",
             };
           });
           if (String(status?.status || "") === "done") {
@@ -9897,6 +9901,7 @@ export function App({ onGoHome }: AppProps) {
     updateSessionRelatedFilesForKey,
     updateSessionAgentForKey,
     treeCacheKey,
+    t,
   ]);
 
   useEffect(() => {
@@ -10015,7 +10020,7 @@ export function App({ onGoHome }: AppProps) {
         }
         reportError(
           "app.init_failed",
-          String((err as Error)?.message || err || "初始化失败"),
+          String((err as Error)?.message || err || t("app.initFailed")),
         );
       } finally {
         settled = true;
@@ -10090,26 +10095,26 @@ export function App({ onGoHome }: AppProps) {
     const code = err instanceof Error ? String(err.message || "").trim() : "";
     switch (code) {
       case "e2ee_proof_invalid":
-        return "端到端配对码无效，或当前节点标识已变化";
+        return t("e2ee.invalidProof");
       case "e2ee_secure_context_required":
       case "e2ee_webcrypto_unavailable":
-        return "当前连接不是安全上下文，局域网配对请改用 HTTPS 或 localhost";
+        return t("e2ee.secureContextRequired");
       case "e2ee_secret_missing":
-        return "配对初始化失败，请刷新页面后重试";
+        return t("e2ee.secretMissing");
       case "e2ee_open_invalid_response":
-        return "握手响应无效，请稍后重试";
+        return t("e2ee.invalidResponse");
       default:
         if (code.startsWith("e2ee_open_failed_")) {
-          return "握手请求失败，请检查当前节点连接状态";
+          return t("e2ee.openFailed");
         }
-        return "端到端握手失败，请重试";
+        return t("e2ee.failed");
     }
-  }, []);
+  }, [t]);
 
   const submitE2EESecret = useCallback(async () => {
     const trimmed = e2eeSecretInput.trim();
     if (!trimmed) {
-      setE2eePromptError("请输入端到端配对码");
+      setE2eePromptError(t("e2ee.codeRequired"));
       return;
     }
     setE2eePromptBusy(true);
@@ -10123,7 +10128,7 @@ export function App({ onGoHome }: AppProps) {
     } finally {
       setE2eePromptBusy(false);
     }
-  }, [describeE2EEPromptError, e2eeSecretInput]);
+  }, [describeE2EEPromptError, e2eeSecretInput, t]);
 
   useEffect(() => {
     if (!isRelayPWAContext()) {
@@ -10663,8 +10668,8 @@ export function App({ onGoHome }: AppProps) {
     const fallback =
       result.status === "running"
         ? isLogin
-          ? "等待登录完成..."
-          : "正在获取状态..."
+          ? t("session.loginWaiting")
+          : t("session.statusFetching")
         : "";
     const content = result.error || loginNotice?.error || result.content || fallback;
     const loginCodeCopyKey = loginNotice?.loginId
@@ -10698,7 +10703,7 @@ export function App({ onGoHome }: AppProps) {
           <span style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" }}>
             {commandLabel}
           </span>
-          <span>{result.status === "running" ? "运行中" : result.status === "failed" ? "失败" : "完成"}</span>
+          <span>{result.status === "running" ? t("session.statusRunning") : result.status === "failed" ? t("session.statusFailed") : t("session.statusComplete")}</span>
         </div>
         {isLogin && loginNotice?.userCode ? (
           <div style={{ display: "flex", flexDirection: "column", gap: "8px", fontSize: "13px", lineHeight: 1.5 }}>
@@ -10727,7 +10732,7 @@ export function App({ onGoHome }: AppProps) {
                 onClick={() => {
                   const userCode = loginNotice.userCode || "";
                   if (!userCode) {
-                    reportError("clipboard.write_failed", "验证码为空，无法复制");
+                    reportError("clipboard.write_failed", t("session.emptyCodeCannotCopy"));
                     return;
                   }
                   void copyText(userCode)
@@ -10756,7 +10761,7 @@ export function App({ onGoHome }: AppProps) {
                     .catch((err) => {
                       reportError(
                         "clipboard.write_failed",
-                        String((err as Error)?.message || "复制失败"),
+                        String((err as Error)?.message || t("session.copyFailed")),
                       );
                     });
                 }}
@@ -10773,8 +10778,8 @@ export function App({ onGoHome }: AppProps) {
                   padding: 0,
                   cursor: "pointer",
                 }}
-                aria-label={loginCodeCopied ? "已复制验证码" : "复制验证码"}
-                title={loginCodeCopied ? "已复制" : "复制验证码"}
+                aria-label={loginCodeCopied ? t("session.codeCopied") : t("session.copyCode")}
+                title={loginCodeCopied ? t("session.copied") : t("session.copyCode")}
               >
                 {loginCodeCopied ? (
                   <span
@@ -10805,7 +10810,7 @@ export function App({ onGoHome }: AppProps) {
             </div>
             {result.status === "complete" ? (
               <div style={{ color: "var(--text-secondary)" }}>
-                登录完成{loginNotice.planType ? ` · ${loginNotice.planType}` : ""}
+                {t("session.loginComplete")}{loginNotice.planType ? ` · ${loginNotice.planType}` : ""}
               </div>
             ) : null}
           </div>
@@ -10902,15 +10907,15 @@ export function App({ onGoHome }: AppProps) {
             outline: "none",
           }}
         >
-          <option value="__new__">创建新分支</option>
+          <option value="__new__">{t("worktree.createBranch")}</option>
           {worktreeBranches.branches.map((branch) => (
             <option key={branch.name} value={branch.name}>
-              {branch.current ? `${branch.name} 当前` : branch.name}
+              {branch.current ? `${branch.name} ${t("worktree.current")}` : branch.name}
             </option>
           ))}
         </select>
         {worktreeBranchesLoading ? (
-          <span style={{ fontSize: "11px", color: "var(--text-secondary)" }}>加载分支中...</span>
+          <span style={{ fontSize: "11px", color: "var(--text-secondary)" }}>{t("worktree.loadingBranches")}</span>
         ) : worktreeBranchError ? (
           <span style={{ fontSize: "11px", color: "#b45309" }}>{worktreeBranchError}</span>
         ) : null}
@@ -10987,7 +10992,7 @@ export function App({ onGoHome }: AppProps) {
                 : "pointer",
             }}
           >
-            {creatingRootBusy ? "处理中..." : "创建"}
+            {creatingRootBusy ? t("worktree.processing") : t("worktree.create")}
           </button>
         </div>
       </div>
@@ -11013,14 +11018,14 @@ export function App({ onGoHome }: AppProps) {
         }}
       >
         <div style={{ padding: "4px 6px 6px", fontSize: "12px", fontWeight: 600, color: "var(--text-primary)" }}>
-          切换 worktree
+          {t("worktree.switchTitle")}
         </div>
         {worktreeSwitchLoading ? (
-          <div style={{ padding: "8px 6px", fontSize: "12px", color: "var(--text-secondary)" }}>加载中...</div>
+          <div style={{ padding: "8px 6px", fontSize: "12px", color: "var(--text-secondary)" }}>{t("common.loading")}</div>
         ) : worktreeSwitchError ? (
           <div style={{ padding: "8px 6px", fontSize: "12px", color: "#b45309" }}>{worktreeSwitchError}</div>
         ) : worktreeSwitchItems.length === 0 ? (
-          <div style={{ padding: "8px 6px", fontSize: "12px", color: "var(--text-secondary)" }}>没有可切换的 worktree</div>
+          <div style={{ padding: "8px 6px", fontSize: "12px", color: "var(--text-secondary)" }}>{t("worktree.noSwitchable")}</div>
         ) : worktreeSwitchItems.map((item) => {
           const managed = findManagedRootByPath(item.path);
           const active = item.current || managed?.id === currentRootId;
@@ -11059,7 +11064,7 @@ export function App({ onGoHome }: AppProps) {
                 </span>
               </span>
               <span style={{ fontSize: "11px", color: active ? "var(--accent-color)" : "var(--text-secondary)", flexShrink: 0 }}>
-                {busy ? "..." : active ? "当前" : managed ? "切换" : "加入"}
+                {busy ? "..." : active ? t("worktree.current") : managed ? t("worktree.switch") : t("worktree.join")}
               </span>
             </button>
           );
@@ -11136,7 +11141,7 @@ export function App({ onGoHome }: AppProps) {
     if (loading) {
       return (
         <div style={{ padding: "8px 4px", fontSize: "12px", color: "var(--text-secondary)" }}>
-          加载 worktree 中...
+          {t("worktree.loading")}
         </div>
       );
     }
@@ -11150,7 +11155,7 @@ export function App({ onGoHome }: AppProps) {
     if (items.length === 0) {
       return (
         <div style={{ padding: "8px 4px", fontSize: "12px", color: "var(--text-secondary)" }}>
-          没有 worktree
+          {t("worktree.empty")}
         </div>
       );
     }
@@ -11194,8 +11199,8 @@ export function App({ onGoHome }: AppProps) {
               >
                 <span style={{ minWidth: 0, display: "inline-flex", alignItems: "center", gap: "8px" }}>
                   <span
-                    title="Git 变更"
-                    aria-label="Git 变更"
+                    title={t("git.changes")}
+                    aria-label={t("git.changes")}
                     style={{
                       width: "18px",
                       height: "18px",
@@ -11268,7 +11273,7 @@ export function App({ onGoHome }: AppProps) {
                     />
                   ) : (
                     <div style={{ padding: "6px 4px", fontSize: "12px", color: "var(--text-secondary)" }}>
-                      加载 git status 中...
+                      {t("git.loadingStatusInline")}
                     </div>
                   )}
                 </div>
@@ -11332,7 +11337,7 @@ export function App({ onGoHome }: AppProps) {
         const rawRepoPath = file.repo_path || "";
         const isCurrentRepoRecord =
           !rawRepoPath ||
-          file.repo_name === "当前项目" ||
+          file.repo_name === t("session.currentProject") ||
           (currentRootPath && normalizePath(rawRepoPath) === currentRootPath);
         const repoPath = isCurrentRepoRecord ? "" : rawRepoPath;
         const rawRepoKind = file.repo_kind || "";
@@ -11344,8 +11349,8 @@ export function App({ onGoHome }: AppProps) {
             key: repoKey,
             repoPath,
             repoName: isCurrentRepoRecord
-              ? "当前项目"
-              : file.repo_name || repoPath.split(/[\\/]/).filter(Boolean).pop() || "当前项目",
+              ? t("session.currentProject")
+              : file.repo_name || repoPath.split(/[\\/]/).filter(Boolean).pop() || t("session.currentProject"),
             repoKind,
             headGroups: [],
           };
@@ -11384,14 +11389,14 @@ export function App({ onGoHome }: AppProps) {
     if (!relatedSessionSnapshot && !selectedKanbanTask) {
       return (
         <div style={{ padding: "8px 4px", fontSize: "12px", color: "var(--text-secondary)" }}>
-          主视图未选择 session
+          {t("session.empty")}
         </div>
       );
     }
     if (selectedSessionRelatedFiles.length === 0) {
       return (
         <div style={{ padding: "8px 4px", fontSize: "12px", color: "var(--text-secondary)" }}>
-          当前 session 没有关联文件
+          {t("session.relatedFiles", { count: 0 })}
         </div>
       );
     }
@@ -11407,7 +11412,7 @@ export function App({ onGoHome }: AppProps) {
             <div key={group.key} style={{ display: "flex", flexDirection: "column", gap: "4px", minWidth: 0 }}>
               {showGroupHeader ? (
                 <div
-                  title={[group.repoPath, group.head].filter(Boolean).join(" · ") || group.repoName || "当前项目"}
+                  title={[group.repoPath, group.head].filter(Boolean).join(" · ") || group.repoName || t("session.currentProject")}
                   style={{
                     padding: "3px 6px 0",
                     fontSize: "11px",
@@ -11416,12 +11421,12 @@ export function App({ onGoHome }: AppProps) {
                   }}
                 >
                   {group.repoKind === "plain"
-                    ? `${group.repoName || "当前项目"} · 非 Git`
+                    ? `${group.repoName || t("session.currentProject")} · ${t("session.nonGit")}`
                     : group.head
                       ? isCurrentRepo
                         ? `HEAD ${group.head.slice(0, 8)}`
-                        : `${group.repoName || "当前项目"} · HEAD ${group.head.slice(0, 8)}`
-                      : group.repoName || "当前项目"}
+                        : `${group.repoName || t("session.currentProject")} · HEAD ${group.head.slice(0, 8)}`
+                      : group.repoName || t("session.currentProject")}
                 </div>
               ) : null}
               {group.files.map((file) => {
@@ -11473,8 +11478,8 @@ export function App({ onGoHome }: AppProps) {
               </button>
               <button
                 type="button"
-                aria-label={`移除关联文件 ${file.name}`}
-                title="移除关联文件"
+                aria-label={t("session.removeRelatedFile", { name: file.name || file.path })}
+                title={t("session.removeRelatedFile", { name: file.name || file.path })}
                 onClick={(event) => {
                   event.stopPropagation();
                   void handleRemoveSessionRelatedFile(
@@ -11530,7 +11535,7 @@ export function App({ onGoHome }: AppProps) {
     if (managedRootByIdRef.current[root]?.is_git_repo !== true) {
       return (
         <div style={{ padding: "8px 4px", fontSize: "12px", color: "var(--text-secondary)" }}>
-          不是 Git 仓库
+          {t("git.notRepository")}
         </div>
       );
     }
@@ -11554,14 +11559,14 @@ export function App({ onGoHome }: AppProps) {
             width: "100%",
           }}
         >
-          加载 Git 状态
+          {t("git.loadingStatus")}
         </button>
       );
     }
     if (!rootGitStatusLoading && !rootGitHistoryLoading && !rootShouldRenderGitPanel && !rootShouldRenderGitHistoryPanel) {
       return (
         <div style={{ padding: "8px 4px", fontSize: "12px", color: "var(--text-secondary)" }}>
-          暂无 Git 变更或历史
+          {t("git.emptyChangesOrHistory")}
         </div>
       );
     }
@@ -11691,29 +11696,32 @@ export function App({ onGoHome }: AppProps) {
   const kanbanStageColumns = isAllTaskTemplateFilter
     ? [{
         index: 0,
-        name: "待开始",
+        name: t("task.column.pending"),
         role: "user" as const,
         tasks: kanbanTasks.filter((task) => task.current_stage_index === 0 && !isTerminalKanbanTask(task)),
       }, {
         index: 1,
-        name: "处理中",
+        name: t("task.column.running"),
         role: "agent" as const,
         tasks: kanbanTasks.filter((task) => task.current_stage_index !== 0 && !isTerminalKanbanTask(task)),
       }, {
         index: 2,
-        name: "完成",
+        name: t("task.column.done"),
         role: "user" as const,
         tasks: kanbanTasks.filter(isTerminalKanbanTask),
         groups: [{
-          name: "已完成",
+          key: "success",
+          name: t("task.group.completed"),
           tone: "success" as const,
           tasks: kanbanTasks.filter((task) => task.status === "success"),
         }, {
-          name: "失败",
+          key: "fail",
+          name: t("task.group.failed"),
           tone: "danger" as const,
           tasks: kanbanTasks.filter((task) => task.status === "fail"),
         }, {
-          name: "已取消",
+          key: "cancelled",
+          name: t("task.group.cancelled"),
           tone: "muted" as const,
           tasks: kanbanTasks.filter((task) => task.status === "cancelled"),
         }].filter((group) => group.tasks.length > 0),
@@ -11721,7 +11729,7 @@ export function App({ onGoHome }: AppProps) {
     : selectedTaskTemplateForFilter
       ? selectedTaskTemplateForFilter.stages.map((stage, index) => ({
         index,
-        name: stage.snapshot.name || (stage.snapshot.role === "agent" ? "Agent 执行" : "用户输入"),
+        name: stage.snapshot.name || (stage.snapshot.role === "agent" ? t("task.stage.agent") : t("task.stage.user")),
         role: stage.snapshot.role,
         tasks: kanbanTasks.filter((task) => task.current_stage_index === index),
       }))
@@ -11735,7 +11743,7 @@ export function App({ onGoHome }: AppProps) {
         } else {
           kanbanStageColumns.push({
             index: task.current_stage_index,
-            name: task.current_stage_name || `阶段 ${task.current_stage_index + 1}`,
+            name: task.current_stage_name || t("task.stageLabel", { index: task.current_stage_index + 1 }),
             role: "user",
             tasks: [task],
           });
@@ -11775,7 +11783,7 @@ export function App({ onGoHome }: AppProps) {
         >
           <div
             role="tablist"
-            aria-label="任务模板"
+            aria-label={t("task.templates")}
             style={{
               display: "flex",
               alignItems: "center",
@@ -11814,7 +11822,7 @@ export function App({ onGoHome }: AppProps) {
                     boxShadow: active ? "0 1px 3px rgba(37, 99, 235, 0.28)" : "none",
                   }}
                 >
-                  全部
+                  {t("task.all")}
                 </button>
               );
             })()}
@@ -11869,7 +11877,7 @@ export function App({ onGoHome }: AppProps) {
                       boxShadow: active ? "0 1px 3px rgba(37, 99, 235, 0.28)" : "none",
                   }}
                 >
-                  <span>{template.name || "未命名模板"}</span>
+                  <span>{template.name || t("task.unnamedTemplate")}</span>
                 </button>
                 </React.Fragment>
               );
@@ -11878,8 +11886,8 @@ export function App({ onGoHome }: AppProps) {
           <div ref={taskTemplateActionMenuRef} style={{ position: "relative", flexShrink: 0 }}>
             <button
               type="button"
-              aria-label="任务模板菜单"
-              title="任务模板菜单"
+              aria-label={t("task.templateMenu")}
+              title={t("task.templateMenu")}
               onClick={() => setTaskTemplateActionMenuOpen((open) => !open)}
               style={{
                 width: "28px",
@@ -11923,7 +11931,7 @@ export function App({ onGoHome }: AppProps) {
                   style={taskTemplateMenuItemStyle()}
                 >
                   <PlusSmallIcon />
-                  <span>创建任务模板</span>
+                  <span>{t("task.createTemplate")}</span>
                 </button>
                 <button
                   type="button"
@@ -11936,12 +11944,12 @@ export function App({ onGoHome }: AppProps) {
                   style={taskTemplateMenuItemStyle(!selectedTaskTemplateForFilter)}
                 >
                   <EditPencilIcon />
-                  <span>编辑模板</span>
+                  <span>{t("task.editTemplate")}</span>
                 </button>
                 <button
                   type="button"
                   disabled={!selectedTaskTemplateForFilter || selectedTaskTemplateUnfinishedCount > 0}
-                  title={!selectedTaskTemplateForFilter ? "请选择具体模板" : selectedTaskTemplateUnfinishedCount > 0 ? "模板下有未完成任务，不能删除" : "删除模板"}
+                  title={!selectedTaskTemplateForFilter ? t("task.selectTemplate") : selectedTaskTemplateUnfinishedCount > 0 ? t("task.deleteBlocked") : t("task.deleteTemplate")}
                   onClick={() => {
                     if (!selectedTaskTemplateForFilter || selectedTaskTemplateUnfinishedCount > 0) return;
                     setTaskTemplateActionMenuOpen(false);
@@ -11950,7 +11958,7 @@ export function App({ onGoHome }: AppProps) {
                   style={taskTemplateMenuItemStyle(!selectedTaskTemplateForFilter || selectedTaskTemplateUnfinishedCount > 0)}
                 >
                   <DeleteIcon />
-                  <span>删除模板</span>
+                  <span>{t("task.deleteTemplate")}</span>
                 </button>
                 <div style={{ height: "1px", background: "var(--border-color)", margin: "6px 2px" }} />
                 <button
@@ -11959,7 +11967,7 @@ export function App({ onGoHome }: AppProps) {
                   onClick={() => setTaskTemplateConcurrencyOpen((open) => !open)}
                   style={taskTemplateMenuItemStyle(!selectedTaskTemplateForFilter)}
                 >
-                  <span style={{ flex: 1 }}>任务并发数</span>
+                  <span style={{ flex: 1 }}>{t("task.concurrency")}</span>
                   <span style={{ fontSize: "12px", fontWeight: 800, color: "var(--text-primary)" }}>
                     {selectedTaskTemplateForFilter?.max_concurrency || 1}
                   </span>
@@ -12005,8 +12013,8 @@ export function App({ onGoHome }: AppProps) {
         </div>
         <button
           type="button"
-          title="刷新任务"
-          aria-label="刷新任务"
+          title={t("task.refresh")}
+          aria-label={t("task.refresh")}
           onClick={() => void loadKanbanTasks(currentRootId)}
           style={{
             width: "28px",
@@ -12028,8 +12036,8 @@ export function App({ onGoHome }: AppProps) {
         <div ref={taskCreateTemplateMenuRef} style={{ position: "relative", flexShrink: 0 }}>
           <button
             type="button"
-            title="创建任务"
-            aria-label="创建任务"
+            title={t("task.create")}
+            aria-label={t("task.create")}
             disabled={!isAllTaskTemplateFilter && !selectedTaskTemplateForFilter}
             onClick={() => {
               if (isAllTaskTemplateFilter) {
@@ -12076,7 +12084,7 @@ export function App({ onGoHome }: AppProps) {
               }}
             >
               {taskTemplates.length === 0 ? (
-                <div style={{ padding: "8px", fontSize: "12px", color: "var(--text-secondary)", whiteSpace: "nowrap" }}>暂无模板</div>
+                <div style={{ padding: "8px", fontSize: "12px", color: "var(--text-secondary)", whiteSpace: "nowrap" }}>{t("task.noTemplates")}</div>
               ) : taskTemplates.map((template) => (
                 <button
                   key={template.id || template.name}
@@ -12102,7 +12110,7 @@ export function App({ onGoHome }: AppProps) {
                     textAlign: "left",
                   }}
                 >
-                  <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{template.name || "未命名模板"}</span>
+                  <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{template.name || t("task.unnamedTemplate")}</span>
                 </button>
               ))}
             </div>
@@ -12110,9 +12118,9 @@ export function App({ onGoHome }: AppProps) {
         </div>
       </div>
       {kanbanTasksLoading ? (
-        <div style={{ padding: "12px", fontSize: "12px", color: "var(--text-secondary)" }}>任务加载中</div>
+        <div style={{ padding: "12px", fontSize: "12px", color: "var(--text-secondary)" }}>{t("task.loading")}</div>
       ) : !isAllTaskTemplateFilter && !selectedTaskTemplateForFilter ? (
-        <div style={{ padding: "12px", fontSize: "12px", color: "var(--text-secondary)" }}>请先创建任务模板</div>
+        <div style={{ padding: "12px", fontSize: "12px", color: "var(--text-secondary)" }}>{t("task.createTemplateFirst")}</div>
       ) : (
 	        <div style={{ overflowX: "auto", overflowY: "hidden", padding: "0 0 12px 1px", minHeight: 0 }}>
 	          <div
@@ -12128,7 +12136,7 @@ export function App({ onGoHome }: AppProps) {
 	            {kanbanStageColumns.map((column) => {
 	              const taskSections = "groups" in column && Array.isArray(column.groups) && column.groups.length > 0
 	                ? column.groups
-	                : [{ name: "", tone: "default" as const, tasks: column.tasks }];
+	                : [{ key: "tasks", name: "", tone: "default" as const, tasks: column.tasks }];
 	              return (
 	              <section
 	                key={column.index}
@@ -12164,22 +12172,22 @@ export function App({ onGoHome }: AppProps) {
                 </div>
 	                <div style={{ padding: "8px", display: "flex", flexDirection: "column", gap: "8px", overflowY: "auto", minHeight: 0 }}>
 	                  {column.tasks.length === 0 ? (
-	                    <div style={{ padding: "10px 4px", fontSize: "12px", color: "var(--text-secondary)", textAlign: "center" }}>暂无任务</div>
+	                    <div style={{ padding: "10px 4px", fontSize: "12px", color: "var(--text-secondary)", textAlign: "center" }}>{t("task.empty")}</div>
 	                      ) : taskSections.map((section) => {
-                      const sectionCollapsed = Boolean(section.name && collapsedTaskCompletionGroups.has(section.name));
+                      const sectionCollapsed = Boolean(section.name && collapsedTaskCompletionGroups.has(section.key));
                       const sectionColor = section.tone === "danger" ? "#dc2626" : section.tone === "success" ? "#16a34a" : "var(--text-secondary)";
                       return (
-	                    <React.Fragment key={section.name || "tasks"}>
+	                    <React.Fragment key={section.key}>
 	                      {section.name ? (
 	                        <button
                             type="button"
                             onClick={() => {
                               setCollapsedTaskCompletionGroups((prev) => {
                                 const next = new Set(prev);
-                                if (next.has(section.name)) {
-                                  next.delete(section.name);
+                                if (next.has(section.key)) {
+                                  next.delete(section.key);
                                 } else {
-                                  next.add(section.name);
+                                  next.add(section.key);
                                 }
                                 return next;
                               });
@@ -12220,10 +12228,10 @@ export function App({ onGoHome }: AppProps) {
                     const taskSessionError = parseTaskSessionErrorMessage(auxFlags.session_error);
                     const taskSessionErrorDetails = parseTaskSessionErrorDetails(auxFlags.session_error);
                     const taskAuxBadges = [
-                      auxFlags.ask_user_waiting ? { key: "ask_user", label: "等待用户回答", icon: renderToolIcon("ask_user"), attention: true } : null,
-                      auxFlags.has_plan ? { key: "plan", label: "包含 Plan", icon: <TaskPlanAuxIcon />, attention: false } : null,
-                      auxFlags.has_todos ? { key: "todos", label: "包含 Todos", icon: renderToolIcon("todo"), attention: false } : null,
-                      auxFlags.has_task ? { key: "task", label: "包含 Task", icon: renderToolIcon("task"), attention: false } : null,
+                      auxFlags.ask_user_waiting ? { key: "ask_user", label: t("task.waitingUser"), icon: renderToolIcon("ask_user"), attention: true } : null,
+                      auxFlags.has_plan ? { key: "plan", label: t("task.hasPlan"), icon: <TaskPlanAuxIcon />, attention: false } : null,
+                      auxFlags.has_todos ? { key: "todos", label: t("task.hasTodos"), icon: renderToolIcon("todo"), attention: false } : null,
+                      auxFlags.has_task ? { key: "task", label: t("task.hasTask"), icon: renderToolIcon("task"), attention: false } : null,
                     ].filter((item): item is { key: string; label: string; icon: React.ReactNode; attention: boolean } => Boolean(item));
                     const inputExpanded = expandedTaskInputIds.has(task.id);
                     const inputNeedsToggle = firstInput.length > 120 || firstInput.split(/\r?\n/).length > 3;
@@ -12231,11 +12239,11 @@ export function App({ onGoHome }: AppProps) {
                     const taskStageRunning = task.current_stage_status === "running";
                     const taskCanComplete = !taskTerminal && task.status === "waiting_user" && isTaskAtLastKnownStage(task);
                     const showTaskAdvanceButton = !taskTerminal && !taskStageRunning;
-                    const taskStatusText = taskStatusLabel(task.status || "");
+                    const taskStatusText = taskStatusLabel(task.status || "", t);
 	                    const taskNumberLabel = task.task_number ? `#${task.task_number}` : "";
-	                    const taskStageName = task.current_stage_name || (task.current_stage_index >= 0 ? `阶段 ${task.current_stage_index + 1}` : "");
-	                    const showStageName = isAllTaskTemplateFilter ? column.name === "处理中" : Boolean(taskStageName);
-	                    const showTaskStatus = isAllTaskTemplateFilter && column.name === "完成";
+	                    const taskStageName = task.current_stage_name || (task.current_stage_index >= 0 ? t("task.stageLabel", { index: task.current_stage_index + 1 }) : "");
+	                    const showStageName = isAllTaskTemplateFilter ? column.name === t("task.column.running") : Boolean(taskStageName);
+	                    const showTaskStatus = isAllTaskTemplateFilter && column.name === t("task.column.done");
 	                    const taskSelected = selectedKanbanTaskId === task.id;
 	                    return (
 	                      <article
@@ -12253,8 +12261,8 @@ export function App({ onGoHome }: AppProps) {
 	                      >
                         {taskSessionPending ? (
                           <span
-                            aria-label="任务会话正在回复"
-                            title="任务会话正在回复"
+                            aria-label={t("task.replying")}
+                            title={t("task.replying")}
                             style={taskReplyPulseStyle()}
                           />
                         ) : null}
@@ -12275,7 +12283,7 @@ export function App({ onGoHome }: AppProps) {
                               <span style={{ flex: "0 0 auto", color: "#0ea5e9", fontWeight: 800 }}>{taskNumberLabel}</span>
                             ) : null}
                             <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                              {task.task_template_name || selectedTaskTemplateForFilter?.name || "未命名模板"}
+                              {task.task_template_name || selectedTaskTemplateForFilter?.name || t("task.unnamedTemplate")}
                             </span>
                             {showStageName ? (
                               <>
@@ -12292,12 +12300,12 @@ export function App({ onGoHome }: AppProps) {
 	                                {task.status === "fail" && taskSessionError ? (
 	                                  <button
 	                                    type="button"
-	                                    title="查看错误信息"
-	                                    aria-label="查看任务错误信息"
+	                                    title={t("task.viewError")}
+	                                    aria-label={t("task.viewTaskError")}
 		                                    onClick={(event) => {
 		                                      event.stopPropagation();
 		                                      setTaskSessionErrorDialog({
-		                                        title: task.task_template_name || selectedTaskTemplateForFilter?.name || "任务",
+		                                        title: task.task_template_name || selectedTaskTemplateForFilter?.name || t("task.defaultTitle"),
 		                                        message: taskSessionError,
 		                                        details: taskSessionErrorDetails,
 		                                      });
@@ -12337,7 +12345,7 @@ export function App({ onGoHome }: AppProps) {
                             {!isAllTaskTemplateFilter && taskNumberLabel ? (
                               <span style={{ color: "#0ea5e9", fontWeight: 800, marginRight: "6px" }}>{taskNumberLabel}</span>
                             ) : null}
-                            <span>{firstInput || "无输入"}</span>
+                            <span>{firstInput || t("task.noInput")}</span>
                           </div>
                         </div>
                         <div style={{ marginTop: "8px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "4px" }}>
@@ -12349,8 +12357,8 @@ export function App({ onGoHome }: AppProps) {
                                   <button
                                     key={`${task.id}-${sessionKey}`}
                                     type="button"
-                                    title={taskSession?.name || `打开任务会话 ${sessionIndex + 1}`}
-                                    aria-label={`打开任务会话 ${sessionIndex + 1}`}
+                                    title={taskSession?.name || t("task.openSession", { index: sessionIndex + 1 })}
+                                    aria-label={t("task.openSession", { index: sessionIndex + 1 })}
 	                                    onClick={(event) => {
 	                                      event.stopPropagation();
 	                                      handleTaskSessionDrawerOpen(sessionKey, task.root_id || currentRootIdRef.current, task.id);
@@ -12395,8 +12403,8 @@ export function App({ onGoHome }: AppProps) {
                               })
                             ) : taskQueued ? (
                               <span
-                                title="等待调度"
-                                aria-label="等待调度"
+                                title={t("task.waitingSchedule")}
+                                aria-label={t("task.waitingSchedule")}
                                 style={{
                                   ...taskCardIconButtonStyle(),
                                   cursor: "default",
@@ -12409,12 +12417,12 @@ export function App({ onGoHome }: AppProps) {
 	                            {taskSessionError && !(showTaskStatus && task.status === "fail") ? (
                               <button
                                 type="button"
-                                title="查看错误信息"
-                                aria-label="查看任务会话错误信息"
+                                title={t("task.viewError")}
+                                aria-label={t("task.viewTaskSessionError")}
 	                                onClick={(event) => {
 	                                  event.stopPropagation();
 	                                  setTaskSessionErrorDialog({
-	                                    title: task.task_template_name || selectedTaskTemplateForFilter?.name || "任务会话",
+	                                    title: task.task_template_name || selectedTaskTemplateForFilter?.name || t("task.sessionTitle"),
 	                                    message: taskSessionError,
 	                                    details: taskSessionErrorDetails,
 	                                  });
@@ -12441,8 +12449,8 @@ export function App({ onGoHome }: AppProps) {
                             {inputNeedsToggle ? (
                               <button
                                 type="button"
-                                title={inputExpanded ? "收起" : "展开"}
-                                aria-label={inputExpanded ? "收起任务内容" : "展开任务内容"}
+                                title={inputExpanded ? t("common.collapse") : t("common.expand")}
+                                aria-label={inputExpanded ? t("task.collapseContent") : t("task.expandContent")}
 	                                onClick={(event) => {
 	                                  event.stopPropagation();
 	                                  setExpandedTaskInputIds((prev) => {
@@ -12466,8 +12474,8 @@ export function App({ onGoHome }: AppProps) {
                               {showTaskAdvanceButton ? (
                                 <button
                                   type="button"
-                                  title={taskCanComplete ? "完成" : "下一阶段"}
-                                  aria-label={taskCanComplete ? "完成任务" : "下一阶段"}
+                                  title={taskCanComplete ? t("task.completeShort") : t("task.nextStage")}
+                                  aria-label={taskCanComplete ? t("task.complete") : t("task.nextStage")}
 	                                  onClick={(event) => {
 	                                    event.stopPropagation();
 	                                    void handleMoveKanbanTask(task, taskCanComplete ? "complete" : "next");
@@ -12477,13 +12485,13 @@ export function App({ onGoHome }: AppProps) {
                                   {taskCanComplete ? <TaskCompleteIcon /> : <RunNowIcon />}
                                 </button>
                               ) : null}
-	                              <button type="button" title="编辑" aria-label="编辑任务" onClick={(event) => {
+	                              <button type="button" title={t("common.edit")} aria-label={t("task.edit")} onClick={(event) => {
 	                                event.stopPropagation();
 	                                void openTaskEditDialog(task);
 	                              }} style={taskCardIconButtonStyle()}>
                                 {renderToolIcon("edit")}
                               </button>
-	                              <button type="button" title="删除" aria-label="删除任务" onClick={(event) => {
+	                              <button type="button" title={t("common.delete")} aria-label={t("task.delete")} onClick={(event) => {
 	                                event.stopPropagation();
 	                                void handleMoveKanbanTask(task, "cancel");
 	                              }} style={taskCardIconButtonStyle("danger")}>
@@ -12548,7 +12556,7 @@ export function App({ onGoHome }: AppProps) {
               <ModeIcon type="plugin" size={16} />
               <span>{pluginRender.plugin.name}</span>
               {pluginLoading ? (
-                <span style={{ opacity: 0.7 }}>加载中...</span>
+                <span style={{ opacity: 0.7 }}>{t("plugin.loading")}</span>
               ) : null}
             </div>
             <button
@@ -12566,7 +12574,7 @@ export function App({ onGoHome }: AppProps) {
                 color: "var(--text-secondary)",
               }}
             >
-              原始文件
+              {t("plugin.rawFile")}
             </button>
           </div>
           <div
@@ -12613,7 +12621,7 @@ export function App({ onGoHome }: AppProps) {
                 alignItems: "center",
               }}
             >
-              <span>已切换为原始文件视图（插件：{matchedPlugin.name}）</span>
+              <span>{t("plugin.rawViewActive", { name: matchedPlugin.name })}</span>
               <button
                 type="button"
                 onClick={() => {
@@ -12629,7 +12637,7 @@ export function App({ onGoHome }: AppProps) {
                   color: "var(--text-secondary)",
                 }}
               >
-                使用插件
+                {t("plugin.usePlugin")}
               </button>
             </div>
           ) : null}
@@ -12646,7 +12654,7 @@ export function App({ onGoHome }: AppProps) {
               }}
             >
               <span>
-                插件 {pluginRender.plugin.name} 执行失败，已回退原始视图
+                {t("plugin.renderFailedFallback", { name: pluginRender.plugin.name })}
               </span>
               <button
                 type="button"
@@ -12661,7 +12669,7 @@ export function App({ onGoHome }: AppProps) {
                   color: "var(--text-secondary)",
                 }}
               >
-                忽略插件
+                {t("plugin.ignorePlugin")}
               </button>
             </div>
           ) : null}
@@ -12933,7 +12941,7 @@ export function App({ onGoHome }: AppProps) {
       if (!info.success) {
         setTokenStationInfo({
           ...info,
-          message: info.message || "Token 加油站配置读取失败",
+          message: info.message || t("tokenStation.loadFailed"),
         });
         setTokenStationErrorOpen(true);
         return;
@@ -12955,7 +12963,7 @@ export function App({ onGoHome }: AppProps) {
         setTokenStationInfo({
           ...info,
           success: false,
-          message: "Token 加油站没有可同步的 API Key",
+          message: t("tokenStation.noAPIKey"),
         });
         setTokenStationErrorOpen(true);
         return;
@@ -12968,13 +12976,13 @@ export function App({ onGoHome }: AppProps) {
     } catch (error) {
       setTokenStationInfo({
         success: false,
-        message: error instanceof Error ? error.message : "Token 加油站配置生效失败",
+        message: error instanceof Error ? error.message : t("tokenStation.applyFailed"),
       });
       setTokenStationErrorOpen(true);
     } finally {
       setTokenStationApplyBusy(false);
     }
-  }, [tokenStationInfo]);
+  }, [tokenStationInfo, t]);
 
   const relayActionLabel = useMemo(() => {
     if (isRelayNodePage()) {
@@ -12983,8 +12991,8 @@ export function App({ onGoHome }: AppProps) {
     if (relayStatus?.no_relayer) {
       return null;
     }
-    return "从公网访问";
-  }, [relayStatus]);
+    return t("relay.publicAccess");
+  }, [relayStatus, t]);
 
   const relayActionDisabled =
     !currentRootId ||
@@ -12996,15 +13004,15 @@ export function App({ onGoHome }: AppProps) {
     ["downloading", "installing", "restarting"].includes(
       (updateState.status || "").toLowerCase(),
     );
-  const updateLabel = updateButtonLabel(updateState);
-  const updateHelp = updateState.message || updateSummaryText(updateState);
-  const updateSummary = updateSummaryText(updateState);
+  const updateLabel = updateButtonLabel(updateState, t);
+  const updateHelp = updateState.message || updateSummaryText(updateState, t);
+  const updateSummary = updateSummaryText(updateState, t);
   const sessionImportMenu = (
     <div ref={importMenuRef} style={{ position: "relative" }}>
       <button
         type="button"
         onClick={() => setImportMenuOpen((open) => !open)}
-        aria-label="导入外部会话"
+        aria-label={t("externalImport.open")}
         style={{
           border: "none",
           background: "transparent",
@@ -13060,7 +13068,7 @@ export function App({ onGoHome }: AppProps) {
               color: "var(--text-primary)",
             }}
           >
-            选择要导入会话的 agent
+            {t("externalImport.chooseAgent")}
           </div>
           <AgentMenuList
             agents={availableAgents}
@@ -13088,7 +13096,7 @@ export function App({ onGoHome }: AppProps) {
               checked={externalFilterBound}
               onChange={(e) => setExternalFilterBound(e.target.checked)}
             />
-            <span>隐藏已导入会话</span>
+            <span>{t("externalImport.hideImported")}</span>
           </label>
         </div>
       ) : null}
@@ -13131,7 +13139,7 @@ export function App({ onGoHome }: AppProps) {
         selectedRootId={(selectedSession?.root_id as string | undefined) || currentRootId || ""}
         headerAction={sessionImportMenu}
         loading={multiProjectSessionsLoading}
-        emptyText="暂无会话记录"
+        emptyText={t("externalImport.empty")}
         syncingSessionKeys={syncingSessionKeys}
         onSearchToggle={() => {
           setSessionSearchOpen(true);
@@ -13176,14 +13184,14 @@ export function App({ onGoHome }: AppProps) {
         syncingSessionKeys={syncingSessionKeys}
         emptyText={
           sessionSearchResultsMode
-            ? "未找到匹配会话"
+            ? t("externalImport.noSearchMatch")
             : sessionSearchOpen
               ? ""
             : (
               <span>
-                这里是空的，
+                {t("externalImport.emptyHintPrefix")}
                 <strong style={{ color: "var(--text-primary)", fontWeight: 800 }}>
-                  如果项目中已有会话，请点击上方导入按钮，导入后会话可以继续
+                  {t("externalImport.emptyHintAction")}
                 </strong>
               </span>
             )
@@ -13256,13 +13264,13 @@ export function App({ onGoHome }: AppProps) {
       />
     );
   const tokenStationBalanceText = tokenStationLoading
-    ? "读取中"
+    ? t("tokenStation.reading")
     : formatTokenStationBalance(tokenStationInfo);
   const canApplyTokenStationConfig =
     tokenStationInfo?.success === true && parseTokenStationBalance(tokenStationInfo) > 0;
   const tokenStationCard = (
       <section
-        aria-label="Token 加油站"
+        aria-label={t("tokenStation.title")}
         style={{
           position: "relative",
           width: "100%",
@@ -13300,7 +13308,7 @@ export function App({ onGoHome }: AppProps) {
               wordBreak: "break-word",
             }}
           >
-            {tokenStationInfo.message || "未绑定账户"}
+            {tokenStationInfo.message || t("tokenStation.unbound")}
           </div>
         ) : null}
         <div
@@ -13309,7 +13317,8 @@ export function App({ onGoHome }: AppProps) {
             height: 28,
             display: "flex",
             alignItems: "center",
-            gap: 6,
+            gap: 5,
+            minWidth: 0,
           }}
         >
           <svg
@@ -13319,8 +13328,8 @@ export function App({ onGoHome }: AppProps) {
             viewBox="0 0 24 24"
             style={{
               flex: "0 0 auto",
-              width: 25,
-              height: 25,
+              width: 21,
+              height: 21,
               color: "#f97316",
             }}
           >
@@ -13334,23 +13343,21 @@ export function App({ onGoHome }: AppProps) {
             title={
               tokenStationInfo?.success
                 ? tokenStationBalanceText
-                : tokenStationInfo?.message || "未绑定账户"
+                : tokenStationInfo?.message || t("tokenStation.unbound")
             }
             style={{
-              minWidth: 0,
-              flex: "0 1 auto",
-              maxWidth: isTablet ? 68 : 104,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
+              minWidth: "max-content",
+              flex: "1 0 auto",
+              overflow: "visible",
               whiteSpace: "nowrap",
-              fontSize: 13,
+              fontSize: tokenStationBalanceText.length > 9 ? 11 : 12,
               fontWeight: 700,
               lineHeight: "18px",
+              fontVariantNumeric: "tabular-nums",
             }}
           >
             {tokenStationBalanceText}
           </span>
-          <span style={{ flex: "1 1 auto", minWidth: 4 }} />
           {canApplyTokenStationConfig ? (
             <button
               type="button"
@@ -13367,7 +13374,7 @@ export function App({ onGoHome }: AppProps) {
                 fontWeight: 650,
                 cursor: tokenStationApplyBusy ? "default" : "pointer",
                 opacity: tokenStationApplyBusy ? 0.65 : 1,
-                padding: "0 7px",
+                padding: "0 4px",
                 whiteSpace: "nowrap",
                 display: "inline-flex",
                 alignItems: "center",
@@ -13389,7 +13396,7 @@ export function App({ onGoHome }: AppProps) {
                   <path d="M21 12a9 9 0 1 1-6.219-8.56" />
                 </svg>
               ) : null}
-              <span>配置生效</span>
+              <span style={{ fontSize: isTablet ? 10 : 11 }}>{t("tokenStation.apply")}</span>
             </button>
           ) : null}
           <button
@@ -13407,11 +13414,11 @@ export function App({ onGoHome }: AppProps) {
               fontWeight: 650,
               cursor: tokenStationBusy ? "default" : "pointer",
               opacity: tokenStationBusy ? 0.65 : 1,
-              padding: "0 7px",
+              padding: "0 5px",
               whiteSpace: "nowrap",
             }}
           >
-            {tokenStationBusy ? "处理中" : "去加油"}
+            {tokenStationBusy ? t("tokenStation.processing") : t("tokenStation.topUp")}
           </button>
         </div>
       </section>
@@ -13689,7 +13696,7 @@ export function App({ onGoHome }: AppProps) {
               />
             ) : (
               <div style={{ padding: "40px", textAlign: "center" }}>
-                点击蓝点或发消息开始
+                {t("task.startHint")}
               </div>
             )}
           </BottomSheet>
@@ -13723,7 +13730,7 @@ export function App({ onGoHome }: AppProps) {
             }}
 	          >
 	            <div style={{ fontSize: "20px", fontWeight: 700, color: "#0f172a" }}>
-	              端到端配对码
+	              {t("e2ee.title")}
 	            </div>
 	            <input
 	              type="text"
@@ -13739,7 +13746,7 @@ export function App({ onGoHome }: AppProps) {
                   void submitE2EESecret();
                 }
               }}
-	              placeholder="输入终端中显示的端到端配对码"
+	              placeholder={t("e2ee.placeholder")}
               autoFocus
               spellCheck={false}
               style={{
@@ -13771,7 +13778,7 @@ export function App({ onGoHome }: AppProps) {
                   cursor: "pointer",
                 }}
               >
-                清空
+                {t("e2ee.clear")}
               </button>
               <button
                 type="button"
@@ -13787,7 +13794,7 @@ export function App({ onGoHome }: AppProps) {
                   fontWeight: 600,
                 }}
               >
-                {e2eePromptBusy ? "验证中..." : "继续"}
+                {e2eePromptBusy ? t("e2ee.verifying") : t("e2ee.continue")}
               </button>
             </div>
           </div>
@@ -13842,7 +13849,9 @@ export function App({ onGoHome }: AppProps) {
             >
               <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: "8px", minWidth: 0 }}>
                 <div style={{ fontSize: "13px", fontWeight: 800, color: "var(--text-color)", whiteSpace: "nowrap" }}>
-                  {taskInlineEdit.taskId ? `编辑${taskInlineEdit.templateName || "任务"}任务` : `创建${taskInlineEdit.templateName || "任务"}任务`}
+                  {t(taskInlineEdit.taskId ? "task.editDialogTitle" : "task.createDialogTitle", {
+                    name: taskInlineEdit.templateName || t("task.defaultTitle"),
+                  })}
                 </div>
 	                {showTaskWorktreeControls ? (
 	                  <>
@@ -13867,7 +13876,7 @@ export function App({ onGoHome }: AppProps) {
 	                        opacity: taskInlineSaving || !taskWorktreeControlsEditable ? 0.72 : 1,
                       }}
                     >
-                      {taskInlineEdit.createWorktree ? "新开 worktree" : "不开启 worktree"}
+                      {taskInlineEdit.createWorktree ? t("worktree.enableNew") : t("worktree.disableNew")}
                     </button>
                     {taskInlineEdit.createWorktree ? (
                       <div style={{ display: "flex", alignItems: "center", gap: "6px", minWidth: 0 }}>
@@ -13899,20 +13908,20 @@ export function App({ onGoHome }: AppProps) {
                             outline: "none",
 	                          }}
 	                        >
-	                          <option value="__new__">创建新分支</option>
+	                          <option value="__new__">{t("worktree.createBranch")}</option>
 	                          {!taskWorktreeControlsEditable && taskInlineEdit.worktreeBranchMode === "existing" && taskInlineEdit.worktreeBranch ? (
 	                            <option value={taskInlineEdit.worktreeBranch}>{taskInlineEdit.worktreeBranch}</option>
 	                          ) : null}
 	                          {taskWorktreeBranches.branches.map((branch) => (
 	                            <option key={branch.name} value={branch.name}>
-                              {branch.current ? `${branch.name} 当前` : branch.name}
+                              {branch.current ? `${branch.name} ${t("worktree.current")}` : branch.name}
                             </option>
                           ))}
                         </select>
                         {taskWorktreeBranchesLoading ? (
-                          <span style={{ fontSize: "11px", color: "var(--text-secondary)", whiteSpace: "nowrap" }}>加载中</span>
+                          <span style={{ fontSize: "11px", color: "var(--text-secondary)", whiteSpace: "nowrap" }}>{t("common.loading")}</span>
                         ) : taskWorktreeBranchError ? (
-                          <span title={taskWorktreeBranchError} style={{ fontSize: "11px", color: "#b45309", whiteSpace: "nowrap" }}>加载失败</span>
+                          <span title={taskWorktreeBranchError} style={{ fontSize: "11px", color: "#b45309", whiteSpace: "nowrap" }}>{t("common.loadingFailed")}</span>
                         ) : null}
                       </div>
                     ) : null}
@@ -14030,7 +14039,7 @@ export function App({ onGoHome }: AppProps) {
                 >
                   <TokenEditor
                     ref={taskInlineEditorRef}
-                    placeholder="编辑任务输入，可输入 @ 文件或 / 命令"
+                    placeholder={t("task.editPlaceholder")}
                     disabled={taskInlineSaving}
                     isDark={false}
                     rightInset={42}
@@ -14058,8 +14067,8 @@ export function App({ onGoHome }: AppProps) {
                 </div>
                 <button
                   type="button"
-                  title="添加附件"
-                  aria-label="添加附件"
+                  title={t("task.addAttachment")}
+                  aria-label={t("task.addAttachment")}
 	                  disabled={taskInlineSaving}
 	                  onClick={() => {
 	                    taskInlineAttachmentInputRef.current?.click();
@@ -14106,7 +14115,7 @@ export function App({ onGoHome }: AppProps) {
                         type="button"
                         onClick={() => removeTaskInlineAttachment(attachment.id)}
                         disabled={taskInlineSaving}
-                        aria-label={`移除附件 ${attachment.file.name}`}
+                        aria-label={t("task.removeAttachment", { name: attachment.file.name })}
                         style={{
                           position: "absolute",
                           top: "2px",
@@ -14186,7 +14195,7 @@ export function App({ onGoHome }: AppProps) {
                   disabled={taskInlineSaving}
                   style={{ height: "30px", borderRadius: "6px", border: "1px solid var(--border-color)", background: "transparent", color: "var(--text-color)", padding: "0 12px", cursor: taskInlineSaving ? "not-allowed" : "pointer" }}
                 >
-                  取消
+                  {t("common.cancel")}
                 </button>
                 <button
                   type="button"
@@ -14194,7 +14203,7 @@ export function App({ onGoHome }: AppProps) {
                   disabled={taskInlineSaving}
                   style={{ height: "30px", borderRadius: "6px", border: "1px solid var(--accent-color)", background: "var(--accent-color)", color: "#fff", padding: "0 14px", fontWeight: 800, cursor: taskInlineSaving ? "not-allowed" : "pointer", opacity: taskInlineSaving ? 0.7 : 1 }}
                 >
-                  {taskInlineSaving ? "保存中" : "保存"}
+                  {taskInlineSaving ? t("common.saving") : t("common.save")}
                 </button>
               </div>
             </div>
@@ -14235,7 +14244,7 @@ export function App({ onGoHome }: AppProps) {
               <div style={{ minWidth: 0, fontSize: "13px", fontWeight: 800, color: "var(--text-color)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 {taskSessionErrorDialog.title}
               </div>
-              <button type="button" aria-label="关闭错误信息" onClick={() => setTaskSessionErrorDialog(null)} style={taskCardIconButtonStyle()}>
+              <button type="button" aria-label={t("task.closeErrorInfo")} onClick={() => setTaskSessionErrorDialog(null)} style={taskCardIconButtonStyle()}>
                 ×
               </button>
             </div>

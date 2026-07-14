@@ -1,10 +1,12 @@
 import React from "react";
+import { useI18n } from "../i18n";
 
 type RightSidebarProps = {
   children?: React.ReactNode;
 };
 
 export function RightSidebar({ children }: RightSidebarProps) {
+  const { t } = useI18n();
   return (
     <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
       <div
@@ -31,7 +33,7 @@ export function RightSidebar({ children }: RightSidebarProps) {
             textTransform: "uppercase",
           }}
         >
-          会话
+          {t("sidebar.session")}
         </div>
       </div>
       <div style={{ flex: 1, minHeight: 0, overflow: "auto", padding: "12px 12px 16px" }}>{children}</div>

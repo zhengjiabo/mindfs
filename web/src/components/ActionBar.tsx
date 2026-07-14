@@ -15,6 +15,7 @@ import TokenEditor, {
   type TokenEditorHandle,
 } from "./editor/TokenEditor";
 import { renderToolIcon } from "./stream/ToolCallCard";
+import { useI18n, type MessageKey } from "../i18n";
 
 type SessionInfo = {
   key: string;
@@ -107,7 +108,7 @@ type ActionBarProps = {
   sidebarsSwapped?: boolean;
 };
 
-function wsStatusMeta(status: WSStatus): {
+function wsStatusMeta(status: WSStatus, t: (key: MessageKey) => string): {
   color: string;
   shadow: string;
   label: string;
@@ -117,39 +118,39 @@ function wsStatusMeta(status: WSStatus): {
       return {
         color: "#22c55e",
         shadow: "none",
-        label: "WebSocket 连接正常",
+        label: t("action.ws.connected"),
       };
     case "connecting":
       return {
         color: "#f59e0b",
         shadow: "none",
-        label: "WebSocket 正在连接",
+        label: t("action.ws.connecting"),
       };
     case "reconnecting":
       return {
         color: "#ef4444",
         shadow: "none",
-        label: "WebSocket 已断开，正在重连",
+        label: t("action.ws.reconnecting"),
       };
     case "disconnected":
     default:
       return {
         color: "#94a3b8",
         shadow: "none",
-        label: "WebSocket 未连接",
+        label: t("action.ws.disconnected"),
       };
   }
 }
 
-const modePlaceholders: Record<SessionMode, string> = {
-  chat: "给 agent 发消息...",
-  plugin: "描述要生成的视图插件...",
-  command: "输入命令...",
+const modePlaceholderKeys: Record<SessionMode, MessageKey> = {
+  chat: "action.placeholder.chat",
+  plugin: "action.placeholder.plugin",
+  command: "action.placeholder.command",
 };
 
-const chatBlurPlaceholders = [
-  "给 agent 发消息...",
-  "试试输入/ @ #，更快捷",
+const chatBlurPlaceholderKeys: MessageKey[] = [
+  "action.placeholder.chat",
+  "action.placeholder.tip",
 ];
 
 const MOBILE_BREAKPOINT = 768;
@@ -409,6 +410,7 @@ export function ActionBar({
   mobileEnterKeySends = false,
   sidebarsSwapped = false,
 }: ActionBarProps) {
+  const { t } = useI18n();
   const [mode, setMode] = useState<SessionMode>("chat");
   const [agent, setAgent] = useState("");
   const [model, setModel] = useState("");
@@ -429,8 +431,8 @@ export function ActionBar({
   const [isMultiLine, setIsMultiLine] = useState(false);
   const [isFocused, setIsFocused] = useState(false);
   const [isDark, setIsDark] = useState(() => getEffectiveAppearanceMode() === "dark");
-  const [blurPlaceholder, setBlurPlaceholder] = useState(
-    () => chatBlurPlaceholders[Math.floor(Math.random() * chatBlurPlaceholders.length)] || modePlaceholders.chat,
+  const [blurPlaceholderKey, setBlurPlaceholderKey] = useState<MessageKey>(
+    () => chatBlurPlaceholderKeys[Math.floor(Math.random() * chatBlurPlaceholderKeys.length)] || "action.placeholder.chat",
   );
   const [candidates, setCandidates] = useState<CandidateItem[]>([]);
   const [activeCandidateIndex, setActiveCandidateIndex] = useState(0);
@@ -446,7 +448,7 @@ export function ActionBar({
   const compositionGuardUntilRef = useRef(0);
   const { isMobile } = useResponsive();
   const isConnected = status === "connected";
-  const connectionMeta = wsStatusMeta(status);
+  const connectionMeta = wsStatusMeta(status, t);
   const DRAG_THRESHOLD = -40;
   const boundRingColor = detachedBoundSession ? "#f59e0b" : "#2563eb";
   const boundRingShadow = detachedBoundSession
@@ -796,7 +798,7 @@ export function ActionBar({
       let attachmentTokens = "";
       if (pendingAttachments.length > 0) {
         if (!currentRootId) {
-          reportError("file.write_failed", "当前未选择项目，无法上传附件");
+          reportError("file.write_failed", t("action.uploadNoProject"));
           return;
         }
         const uploaded = await uploadFiles({
@@ -839,14 +841,14 @@ export function ActionBar({
         requestAnimationFrame(() => editorRef.current?.blur());
       }
     } catch (err) {
-      reportError("file.write_failed", String((err as Error)?.message || "附件上传失败"));
+      reportError("file.write_failed", String((err as Error)?.message || t("action.uploadFailed")));
     } finally {
       setSending(false);
       if (!isMobile) {
         requestAnimationFrame(() => editorRef.current?.focus());
       }
     }
-  }, [serializedInput, pendingAttachments, isConnected, sending, mode, agent, currentRootId, planSessionKey, planRootId, onSetPlanMode, isMobile, model, agentMode, onSendMessage, supportsEffort, effort, supportsServiceTier, fastService, shell]);
+  }, [serializedInput, pendingAttachments, isConnected, sending, mode, agent, currentRootId, planSessionKey, planRootId, onSetPlanMode, isMobile, model, agentMode, onSendMessage, supportsEffort, effort, supportsServiceTier, fastService, shell, t]);
 
   const handleCancel = useCallback(async () => {
     const sessionKey = currentSession?.key;
@@ -1044,10 +1046,10 @@ export function ActionBar({
   }, [handleCancel, isCompositionActive, isMobile, showCancel]);
 
   const inputPlaceholder = currentSession && !currentSession.pending
-    ? "左滑蓝环开始新会话..."
+    ? t("action.placeholder.newSessionSwipe")
     : mode === "chat" && !isFocused
-      ? blurPlaceholder
-      : modePlaceholders[mode];
+      ? t(blurPlaceholderKey)
+      : t(modePlaceholderKeys[mode]);
   const editorRightInset = isMultiLine ? 14 : mode === "command" ? (isMobile ? 92 : 116) : isMobile ? 124 : 148;
   const editorBottomInset = isMultiLine ? 44 : 12;
   const editorMinHeight = 44;
@@ -1056,8 +1058,8 @@ export function ActionBar({
       type="button"
       onClick={onToggleLeftSidebar}
       style={{ width: "30px", height: "44px", borderRadius: "0", border: "none", background: "transparent", color: "var(--text-secondary)", display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer", opacity: 0.86, outline: "none", boxShadow: "none", WebkitTapHighlightColor: "transparent" as any, overflow: "hidden" }}
-      aria-label="打开文件侧栏"
-      title="文件侧栏"
+      aria-label={t("sidebar.openFile")}
+      title={t("sidebar.file")}
     >
       <svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 24 24" fill="none">
         <path fill="currentColor" d="M3 3h6v4H3zm12 7h6v4h-6zm0 7h6v4h-6zm-2-4H7v5h6v2H5V9h2v2h6z" style={{ transform: "scale(1.28)", transformOrigin: "12px 12px" }} />
@@ -1069,8 +1071,8 @@ export function ActionBar({
       type="button"
       onClick={onToggleRightSidebar}
       style={{ width: "30px", height: "44px", borderRadius: "0", border: "none", background: "transparent", color: "var(--text-secondary)", display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer", opacity: 0.86, outline: "none", boxShadow: "none", WebkitTapHighlightColor: "transparent" as any, overflow: "hidden" }}
-      aria-label="打开会话侧栏"
-      title="会话侧栏"
+      aria-label={t("sidebar.openSession")}
+      title={t("sidebar.session")}
     >
       <svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.8" strokeLinecap="round">
         <line x1="6" y1="4" x2="18" y2="4" />
@@ -1165,8 +1167,8 @@ export function ActionBar({
                     <>
                       <button
                         type="button"
-                        aria-label="保存排队消息"
-                        title="保存"
+                        aria-label={t("action.queueSave")}
+                        title={t("common.save")}
                         onMouseDown={(event) => event.preventDefault()}
                         onClick={() => void saveEditQueuedMessage()}
                         disabled={!editingQueueText.trim()}
@@ -1178,8 +1180,8 @@ export function ActionBar({
                       </button>
                       <button
                         type="button"
-                        aria-label="取消编辑排队消息"
-                        title="取消"
+                        aria-label={t("action.queueCancelEdit")}
+                        title={t("common.cancel")}
                         onMouseDown={(event) => event.preventDefault()}
                         onClick={cancelEditQueuedMessage}
                         style={{ width: "28px", height: "28px", border: "none", borderRadius: "7px", background: "transparent", color: "var(--text-secondary)", display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}
@@ -1194,8 +1196,8 @@ export function ActionBar({
                     <>
                       <button
                         type="button"
-                        aria-label="删除排队消息"
-                        title="删除"
+                        aria-label={t("action.queueDelete")}
+                        title={t("common.delete")}
                         onMouseDown={(event) => event.preventDefault()}
                         onClick={() => void onRemoveQueuedMessage?.(item.id)}
                         style={{ width: "28px", height: "28px", border: "none", borderRadius: "7px", background: "transparent", color: "#dc2626", display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}
@@ -1210,8 +1212,8 @@ export function ActionBar({
                       </button>
                       <button
                         type="button"
-                        aria-label="编辑排队消息"
-                        title="编辑"
+                        aria-label={t("action.queueEdit")}
+                        title={t("common.edit")}
                         onMouseDown={(event) => event.preventDefault()}
                         onClick={() => startEditQueuedMessage(item)}
                         style={{ width: "28px", height: "28px", border: "none", borderRadius: "7px", background: "transparent", color: "var(--text-secondary)", display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}
@@ -1222,8 +1224,8 @@ export function ActionBar({
                       </button>
                       <button
                         type="button"
-                        aria-label="立即发送排队消息"
-                        title="立即发送"
+                        aria-label={t("action.queueSendNow")}
+                        title={t("action.queueSendNow")}
                         onMouseDown={(event) => event.preventDefault()}
                         onClick={() => void onSendQueuedMessageNow?.(item.id)}
                         style={{ width: "28px", height: "28px", border: "none", borderRadius: "7px", background: "transparent", color: "var(--text-secondary)", display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer" }}
@@ -1275,8 +1277,8 @@ export function ActionBar({
                 <span>Plan</span>
                 <button
                   type="button"
-                  aria-label="关闭 Plan 模式"
-                  title="关闭 Plan 模式"
+                  aria-label={t("action.closePlanMode")}
+                  title={t("action.closePlanMode")}
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={() => void onSetPlanMode?.(false, planSessionKey, planRootId)}
                   style={{
@@ -1336,8 +1338,8 @@ export function ActionBar({
               onFocusChange={(focused) => {
                 setIsFocused(focused);
                 if (!focused && mode === "chat") {
-                  setBlurPlaceholder(
-                    chatBlurPlaceholders[Math.floor(Math.random() * chatBlurPlaceholders.length)] || modePlaceholders.chat,
+                  setBlurPlaceholderKey(
+                    chatBlurPlaceholderKeys[Math.floor(Math.random() * chatBlurPlaceholderKeys.length)] || "action.placeholder.chat",
                   );
                 }
                 if (focused) {
@@ -1390,7 +1392,7 @@ export function ActionBar({
                       lineHeight: 1.5,
                     }}
                   >
-                    {activeToken.type === "command" ? "暂无命令历史，成功执行后会出现在这里" : "收藏用户消息后，可快速插入提示词"}
+                    {activeToken.type === "command" ? t("action.noCommandHistory") : t("action.noPromptFavorites")}
                   </div>
                 ) : (
                   candidates.map((candidate, index) => (
@@ -1480,7 +1482,7 @@ export function ActionBar({
                   justifyContent: "center",
                   touchAction: "none",
                 }}
-                title="左滑新建会话"
+                title={t("action.swipeNewSession")}
               >
                 {!hasBoundSession ? (
                   <div
@@ -1530,7 +1532,7 @@ export function ActionBar({
                 ) : null}
                 {isDragging && dragX < -10 ? (
                   <div style={{ position: "absolute", right: "100%", top: "50%", transform: "translateY(-50%)", marginRight: "8px", fontSize: "10px", fontWeight: 600, color: dragX <= DRAG_THRESHOLD ? "var(--accent-color)" : "#9ca3af", whiteSpace: "nowrap", opacity: Math.min(1, Math.abs(dragX) / 20), pointerEvents: "none" }}>
-                    {dragX <= DRAG_THRESHOLD ? "松开新建" : "左滑新建"}
+                    {dragX <= DRAG_THRESHOLD ? t("action.releaseNewSession") : t("action.swipeNewSession")}
                   </div>
                 ) : null}
               </div>
@@ -1596,8 +1598,8 @@ export function ActionBar({
                   cursor: !currentRootId || sending ? "not-allowed" : "pointer",
                   opacity: !currentRootId || sending ? 0.35 : 1,
                 }}
-                title="添加附件"
-                aria-label="添加附件"
+                title={t("action.addAttachment")}
+                aria-label={t("action.addAttachment")}
               >
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
                   <path d="M12 5v14" />
@@ -1679,8 +1681,8 @@ export function ActionBar({
                   lineHeight: 1,
                   fontSize: "14px",
                 }}
-                aria-label={`移除文件上下文 ${attachedFileContext.fileName}`}
-                title={`移除 ${attachedFileContext.fileName}`}
+                aria-label={t("action.removeFileContext", { name: attachedFileContext.fileName })}
+                title={t("action.removeItem", { name: attachedFileContext.fileName })}
               >
                 ×
               </button>
@@ -1734,8 +1736,8 @@ export function ActionBar({
                           lineHeight: 1,
                           fontSize: "14px",
                         }}
-                        aria-label={`移除附件 ${attachment.file.name}`}
-                        title={`移除 ${attachment.file.name}`}
+                        aria-label={t("action.removeAttachment", { name: attachment.file.name })}
+                        title={t("action.removeItem", { name: attachment.file.name })}
                       >
                         ×
                       </button>
@@ -1782,8 +1784,8 @@ export function ActionBar({
                     lineHeight: 1,
                     fontSize: "14px",
                   }}
-                  aria-label={`移除附件 ${attachment.file.name}`}
-                  title={`移除 ${attachment.file.name}`}
+                  aria-label={t("action.removeAttachment", { name: attachment.file.name })}
+                  title={t("action.removeItem", { name: attachment.file.name })}
                 >
                   ×
                 </button>

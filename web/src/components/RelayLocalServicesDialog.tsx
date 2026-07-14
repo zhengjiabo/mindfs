@@ -6,6 +6,7 @@ import {
   type RelayLocalService,
 } from "../services/relayServices";
 import { copyText } from "../services/clipboard";
+import { useI18n } from "../i18n";
 
 type Props = {
   open: boolean;
@@ -24,6 +25,7 @@ const emptyDraft: RelayLocalService = {
 };
 
 export function RelayLocalServicesDialog({ open, nodeId, relayBaseURL, noRelayer = false, onCancel, onEditingChange }: Props) {
+  const { t } = useI18n();
   const [services, setServices] = React.useState<RelayLocalService[]>([]);
   const [draft, setDraft] = React.useState<RelayLocalService | null>(null);
   const [busy, setBusy] = React.useState(false);
@@ -49,11 +51,11 @@ export function RelayLocalServicesDialog({ open, nodeId, relayBaseURL, noRelayer
     try {
       setServices(await listRelayLocalServices());
     } catch (err) {
-      setError(err instanceof Error ? err.message : "加载失败");
+      setError(err instanceof Error ? err.message : t("relayLocal.loadFailed"));
     } finally {
       setBusy(false);
     }
-  }, [editDraft, noRelayer, open]);
+  }, [editDraft, noRelayer, open, t]);
 
   React.useEffect(() => {
     if (!open) {
@@ -101,7 +103,7 @@ export function RelayLocalServicesDialog({ open, nodeId, relayBaseURL, noRelayer
       editDraft(null);
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "保存失败");
+      setError(err instanceof Error ? err.message : t("relayLocal.saveFailed"));
     } finally {
       setBusy(false);
     }
@@ -114,21 +116,21 @@ export function RelayLocalServicesDialog({ open, nodeId, relayBaseURL, noRelayer
       await saveRelayLocalService({ ...service, enabled });
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "操作失败");
+      setError(err instanceof Error ? err.message : t("relayLocal.actionFailed"));
     } finally {
       setBusy(false);
     }
   };
 
   const remove = async (service: RelayLocalService) => {
-    if (!window.confirm(`删除 ${service.slug}？`)) return;
+    if (!window.confirm(t("relayLocal.confirmDelete", { slug: service.slug }))) return;
     setBusy(true);
     setError("");
     try {
       await deleteRelayLocalService(service.slug);
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "删除失败");
+      setError(err instanceof Error ? err.message : t("relayLocal.deleteFailed"));
     } finally {
       setBusy(false);
     }
@@ -147,7 +149,7 @@ export function RelayLocalServicesDialog({ open, nodeId, relayBaseURL, noRelayer
         copyResetTimerRef.current = null;
       }, 1000);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "复制失败");
+      setError(err instanceof Error ? err.message : t("relayLocal.copyFailed"));
     }
   };
 
@@ -155,17 +157,17 @@ export function RelayLocalServicesDialog({ open, nodeId, relayBaseURL, noRelayer
       <section style={panelStyle}>
         {!draft ? (
           <header style={headerStyle}>
-            <div style={titleStyle}>从公网访问本地节点</div>
+            <div style={titleStyle}>{t("relayLocal.title")}</div>
             {!noRelayer ? (
               <button
                 type="button"
-                aria-label="新建"
-                title="新建"
+                aria-label={t("relayLocal.create")}
+                title={t("relayLocal.create")}
                 onClick={() => editDraft(emptyDraft)}
                 style={addButtonStyle(busy || !nodeId)}
                 disabled={busy || !nodeId}
               >
-                添加
+                {t("relayLocal.add")}
               </button>
             ) : null}
           </header>
@@ -174,30 +176,30 @@ export function RelayLocalServicesDialog({ open, nodeId, relayBaseURL, noRelayer
         {error ? <div style={errorStyle}>{error}</div> : null}
 
         {noRelayer ? (
-          <div style={emptyStyle}>Relay 已禁用，无法配置公网访问本地服务。</div>
+          <div style={emptyStyle}>{t("relayLocal.disabled")}</div>
         ) : draft ? (
           <div style={editorStyle}>
             <label style={labelStyle}>
               <span style={fieldHeaderStyle}>
-                <span>名称</span>
+                <span>{t("relayLocal.name")}</span>
                 <span style={enableInlineStyle}>
                   <input
                     type="checkbox"
                     checked={draft.enabled}
                     onChange={(event) => setDraft({ ...draft, enabled: event.target.checked })}
                   />
-                  <span>启用</span>
+                  <span>{t("relayLocal.enable")}</span>
                 </span>
               </span>
               <input
                 value={draft.name || draft.slug}
                 onChange={(event) => setDraft({ ...draft, name: event.target.value, slug: event.target.value })}
-                placeholder="小写字母、数字、-（不连续，不结尾）"
+                placeholder={t("relayLocal.namePlaceholder")}
                 style={inputStyle}
               />
             </label>
             <label style={labelStyle}>
-              <span>本地服务地址</span>
+              <span>{t("relayLocal.localURL")}</span>
               <input
                 value={draft.local_url}
                 onChange={(event) => setDraft({ ...draft, local_url: event.target.value })}
@@ -206,13 +208,13 @@ export function RelayLocalServicesDialog({ open, nodeId, relayBaseURL, noRelayer
               />
             </label>
             <footer style={actionRowStyle}>
-              <button type="button" onClick={onCancel} style={ghostButtonStyle(false)}>取消</button>
-              <button type="button" onClick={saveDraft} style={primaryButtonStyle(busy)} disabled={busy}>保存</button>
+              <button type="button" onClick={onCancel} style={ghostButtonStyle(false)}>{t("common.cancel")}</button>
+              <button type="button" onClick={saveDraft} style={primaryButtonStyle(busy)} disabled={busy}>{t("common.save")}</button>
             </footer>
           </div>
         ) : (
           <div style={{ display: "grid", gap: 10 }}>
-            {services.length === 0 && !busy ? <div style={emptyStyle}>还没有本地服务</div> : null}
+            {services.length === 0 && !busy ? <div style={emptyStyle}>{t("relayLocal.empty")}</div> : null}
             {services.map((service) => {
               const serviceURL = publicURL(service.slug);
               return (
@@ -222,8 +224,8 @@ export function RelayLocalServicesDialog({ open, nodeId, relayBaseURL, noRelayer
                     <div style={itemActionStyle}>
                       <button
                         type="button"
-                        title={service.enabled ? "停用" : "启用"}
-                        aria-label={service.enabled ? "停用服务" : "启用服务"}
+                        title={service.enabled ? t("relayLocal.stop") : t("relayLocal.enable")}
+                        aria-label={service.enabled ? t("relayLocal.stopService") : t("relayLocal.enableService")}
                         onClick={() => updateEnabled(service, !service.enabled)}
                         style={{
                           ...serviceIconButtonStyle,
@@ -237,8 +239,8 @@ export function RelayLocalServicesDialog({ open, nodeId, relayBaseURL, noRelayer
                       </button>
                       <button
                         type="button"
-                        title="删除"
-                        aria-label="删除服务"
+                        title={t("common.delete")}
+                        aria-label={t("relayLocal.deleteService")}
                         onClick={() => remove(service)}
                         style={{ ...serviceIconButtonStyle, color: "#dc2626", opacity: busy ? 0.5 : 1, cursor: busy ? "not-allowed" : "pointer" }}
                         disabled={busy}
@@ -249,11 +251,11 @@ export function RelayLocalServicesDialog({ open, nodeId, relayBaseURL, noRelayer
                   </div>
                   <div style={monoLineStyle}>{service.local_url}</div>
                   <div style={urlLineStyle}>
-                    <span style={urlTextStyle}>{serviceURL || "当前未绑定relayer"}</span>
+                    <span style={urlTextStyle}>{serviceURL || t("relayLocal.noRelayerBound")}</span>
                     <button
                       type="button"
-                      title={copiedServiceSlug === service.slug ? "已复制" : "复制"}
-                      aria-label={copiedServiceSlug === service.slug ? "已复制公网地址" : "复制公网地址"}
+                      title={copiedServiceSlug === service.slug ? t("relayLocal.copied") : t("relayLocal.copy")}
+                      aria-label={copiedServiceSlug === service.slug ? t("relayLocal.copiedPublicURL") : t("relayLocal.copyPublicURL")}
                       onClick={() => void copyServiceURL(service, serviceURL)}
                       style={{ ...serviceIconButtonStyle, opacity: serviceURL ? 1 : 0.5, cursor: serviceURL ? "pointer" : "not-allowed" }}
                       disabled={!serviceURL}

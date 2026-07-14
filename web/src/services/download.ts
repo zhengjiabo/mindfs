@@ -4,6 +4,7 @@ import { e2eeService } from "./e2ee";
 import { fetchProofProtectedBlob } from "./file";
 import { getNativeBridge } from "./nativeBridge";
 import { getApiBaseURL, isNativeShellRuntime } from "./runtime";
+import { translateNow } from "../i18n";
 
 type DownloadFileParams = {
   rootId: string;
@@ -90,7 +91,7 @@ function triggerBlobDownload(blob: Blob, filename: string): void {
 
 async function downloadWithNativeShell(url: string, filename: string): Promise<void> {
   if (!/^https?:\/\//i.test(url)) {
-    throw new Error("下载地址不是完整的 http/https URL，请先配置移动端 API 地址");
+    throw new Error(translateNow("download.absoluteURLRequired"));
   }
 
   const unifiedBridge = getNativeBridge();
@@ -117,7 +118,7 @@ async function downloadWithNativeShell(url: string, filename: string): Promise<v
 function blobToBase64(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onerror = () => reject(reader.error || new Error("读取下载内容失败"));
+    reader.onerror = () => reject(reader.error || new Error(translateNow("download.readFailed")));
     reader.onload = () => {
       const result = String(reader.result || "");
       const comma = result.indexOf(",");
@@ -182,7 +183,7 @@ export async function downloadFile(params: DownloadFileParams): Promise<void> {
       if (!/not implemented|unimplemented|not available|plugin/i.test(message)) {
         throw error;
       }
-      throw new Error("当前 Android 壳不支持 E2EE 文件保存，请升级到最新版 Android 壳后重试");
+      throw new Error(translateNow("download.e2eeNativeUnsupported"));
     }
     return;
   }
