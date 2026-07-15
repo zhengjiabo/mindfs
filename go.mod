@@ -33,7 +33,7 @@ require (
 	modernc.org/memory v1.8.0 // indirect
 )
 
-replace github.com/fanwenlin/codex-go-sdk => github.com/yandc/codex-go-sdk v0.0.0-20260714084932-6cea8a7fa3f6
+replace github.com/fanwenlin/codex-go-sdk => github.com/yandc/codex-go-sdk v0.0.0-20260715064458-1f8f4e355279
 
 replace github.com/coder/acp-go-sdk => github.com/yandc/acp-go-sdk v0.0.0-20260709074204-a1ec7b200d08
 
