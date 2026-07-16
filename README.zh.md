@@ -23,7 +23,7 @@
 
 ### Agent 会话
 
-- **多 Agent 支持**：Claude Code · OpenAI Codex · Gemini CLI · Cursor · Copilot · Cline · Augment · Kimi · Kiro · Qwen · Qoder · OMP · Pi · Hermes · Reasonix · OpenCode · OpenClaw，自动探测已安装的 Agent。
+- **多 Agent 支持**：Claude Code · OpenAI Codex · Gemini CLI · Grok · Cursor · Copilot · Cline · Augment · Kimi · Kiro · Qwen · Qoder · OMP · Pi · Hermes · Reasonix · OpenCode · OpenClaw，自动探测已安装的 Agent。
 - **实时流式输出**：逐 token 推送，工具调用、思考过程、权限请求均以结构化卡片实时渲染，上下文窗口实时余量。
 - **灵活切换**：会话中随时切换 Agent 或模型，多 Agent 共享同一上下文，无需重新描述背景。
 - **会话搜索**：支持按会话标题或对话内容搜索，并可直接跳转到命中的会话和片段。
@@ -36,6 +36,7 @@
 - **会话 fork**: 可从历史回复 fork 出新的会话。
 - **定时任务**：在指定时间触发 Agent 执行任务。
 - **codex 远程登录**: 通过/login 命令实现 codex 远程登录。
+- **内置 token 加油站**：余额实时展示、一键切换生效。
 
 ### 任务看板
 
