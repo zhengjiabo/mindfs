@@ -14,6 +14,7 @@ const ICON_URLS: Record<string, { src: string; alt: string }> = {
   copilot: { src: appPath('/assets/agents/copilot.svg'), alt: 'Copilot' },
   cursor: { src: appPath('/assets/agents/cursor.svg'), alt: 'Cursor' },
   gemini: { src: appPath('/assets/agents/gemini.svg'), alt: 'Gemini' },
+  grok: { src: appPath('/assets/agents/grok.svg'), alt: 'Grok' },
   hermes: { src: appPath('/assets/agents/hermes.webp'), alt: 'Hermes' },
   kiro: { src: appPath('/assets/agents/kiro.svg'), alt: 'Kiro' },
   kimi: { src: appPath('/assets/agents/kimi.svg'), alt: 'Kimi' },
@@ -146,6 +147,8 @@ export function AgentIcon({ agentName, ...props }: AgentIconProps) {
     icon = ICON_URLS.claude;
   } else if (lowerAgentName.includes('gemini')) {
     icon = ICON_URLS.gemini;
+  } else if (lowerAgentName.includes('grok')) {
+    icon = ICON_URLS.grok;
   } else if (lowerAgentName.includes('hermes')) {
     icon = ICON_URLS.hermes;
   }
