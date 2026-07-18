@@ -11,6 +11,7 @@ import {
   updateScheduledAgentTask,
   type ScheduledAgentTask,
 } from "../services/scheduledTasks";
+import { useI18n, type Locale, type MessageKey } from "../i18n";
 
 type DialogView = "list" | "create" | "edit";
 
@@ -34,7 +35,13 @@ type Props = {
   onClose: () => void;
 };
 
-const CRON_LABELS = ["分", "时", "日", "月", "周"] as const;
+const CRON_LABEL_KEYS: MessageKey[] = [
+  "scheduled.cronMinute",
+  "scheduled.cronHour",
+  "scheduled.cronDay",
+  "scheduled.cronMonth",
+  "scheduled.cronWeek",
+];
 
 const emptyForm = (agent = ""): FormState => ({
   name: "",
@@ -49,11 +56,11 @@ const emptyForm = (agent = ""): FormState => ({
   new_session_cron: "",
 });
 
-function formatTime(value?: string): string {
-  if (!value) return "未执行";
+function formatTime(value: string | undefined, locale: Locale, neverRun: string): string {
+  if (!value) return neverRun;
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString(undefined, {
+  return date.toLocaleString(locale, {
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
@@ -269,6 +276,7 @@ function CronEditor({
   headerRight?: React.ReactNode;
   allowEmpty?: boolean;
 }) {
+  const { t } = useI18n();
   const [parts, setParts] = useState(() => splitCron(value));
   const [touched, setTouched] = useState<boolean[]>(() => [
     false,
@@ -323,7 +331,7 @@ function CronEditor({
                 textOverflow: "ellipsis",
               }}
             >
-              仅支持 *、数字、逗号、- 范围和 / 步长
+              {t("scheduled.cronInvalid")}
             </div>
           ) : null}
         </div>
@@ -340,7 +348,7 @@ function CronEditor({
           gap: 8,
         }}
       >
-        {CRON_LABELS.map((item, index) => (
+        {CRON_LABEL_KEYS.map((item, index) => (
           <div
             key={item}
             style={{
@@ -361,7 +369,7 @@ function CronEditor({
                 pointerEvents: "none",
               }}
             >
-              {item}
+              {t(item)}
             </span>
             <input
               className="scheduled-agent-task-input"
@@ -402,6 +410,7 @@ export function ScheduledAgentTaskDialog({
   agents,
   onClose,
 }: Props) {
+  const { locale, t } = useI18n();
   const [view, setView] = useState<DialogView>("list");
   const [tasks, setTasks] = useState<ScheduledAgentTask[]>([]);
   const [selected, setSelected] = useState<ScheduledAgentTask | null>(null);
@@ -483,7 +492,7 @@ export function ScheduledAgentTaskDialog({
   const save = async () => {
     if (!rootId || saving) return;
     if (!form.name.trim()) {
-      setError("任务名称不能为空");
+      setError(t("scheduled.nameRequired"));
       return;
     }
     setSaving(true);
@@ -518,7 +527,7 @@ export function ScheduledAgentTaskDialog({
   };
 
   const remove = async (task: ScheduledAgentTask) => {
-    if (!rootId || !window.confirm(`删除定时任务「${task.name || task.id}」？`))
+    if (!rootId || !window.confirm(t("scheduled.confirmDelete", { name: task.name || task.id })))
       return;
     setError("");
     try {
@@ -579,7 +588,7 @@ export function ScheduledAgentTaskDialog({
             fontSize: 13,
           }}
         >
-          加载中...
+          {t("common.loading")}
         </div>
       ) : tasks.length === 0 ? (
         <div
@@ -592,7 +601,7 @@ export function ScheduledAgentTaskDialog({
             fontSize: 13,
           }}
         >
-          暂无定时任务
+          {t("scheduled.empty")}
         </div>
       ) : (
         <div
@@ -645,7 +654,7 @@ export function ScheduledAgentTaskDialog({
                       whiteSpace: "nowrap",
                     }}
                   >
-                    {task.name || "未命名任务"}
+                    {task.name || t("scheduled.unnamedTask")}
                   </div>
                 </button>
                 <div
@@ -658,8 +667,8 @@ export function ScheduledAgentTaskDialog({
                 >
                   <button
                     type="button"
-                    title="停止"
-                    aria-label="停止任务"
+                    title={t("scheduled.stop")}
+                    aria-label={t("scheduled.stopTask")}
                     disabled={!task.enabled}
                     onClick={() => {
                       if (task.enabled) void toggleEnabled(task);
@@ -675,8 +684,8 @@ export function ScheduledAgentTaskDialog({
                   </button>
                   <button
                     type="button"
-                    title="立即运行"
-                    aria-label="立即运行任务"
+                    title={t("scheduled.runNow")}
+                    aria-label={t("scheduled.runNowTask")}
                     disabled={runningTaskId === task.id}
                     onClick={() => void runNow(task)}
                     style={{
@@ -689,8 +698,8 @@ export function ScheduledAgentTaskDialog({
                   </button>
                   <button
                     type="button"
-                    title="编辑"
-                    aria-label="编辑任务"
+                    title={t("common.edit")}
+                    aria-label={t("scheduled.editTask")}
                     onClick={() => startEdit(task)}
                     style={taskIconButtonStyle}
                   >
@@ -698,8 +707,8 @@ export function ScheduledAgentTaskDialog({
                   </button>
                   <button
                     type="button"
-                    title="删除"
-                    aria-label="删除任务"
+                    title={t("common.delete")}
+                    aria-label={t("scheduled.deleteTask")}
                     onClick={() => void remove(task)}
                     style={{ ...taskIconButtonStyle, color: "#dc2626" }}
                   >
@@ -727,13 +736,13 @@ export function ScheduledAgentTaskDialog({
                     whiteSpace: "nowrap",
                   }}
                 >
-                  <span>{task.enabled ? "已启用" : "已停用"}</span>
+                  <span>{task.enabled ? t("scheduled.enabled") : t("scheduled.disabled")}</span>
                   <span>{task.task_cron}</span>
                   {task.new_session_cron ? (
-                    <span>新 session: {task.new_session_cron}</span>
+                    <span>{t("scheduled.newSessionCron", { cron: task.new_session_cron })}</span>
                   ) : null}
                   {task.running ? (
-                    <span style={{ color: "var(--accent-color)" }}>运行中</span>
+                    <span style={{ color: "var(--accent-color)" }}>{t("scheduled.running")}</span>
                   ) : null}
                 </span>
                 <span
@@ -760,8 +769,8 @@ export function ScheduledAgentTaskDialog({
                   color: "var(--text-secondary)",
                 }}
               >
-                <span>最近执行：{formatTime(task.last_run_at)}</span>
-                <span>下次执行：{formatTime(task.next_run_at)}</span>
+                <span>{t("scheduled.lastRun", { time: formatTime(task.last_run_at, locale, t("scheduled.neverRun")) })}</span>
+                <span>{t("scheduled.nextRun", { time: formatTime(task.next_run_at, locale, t("scheduled.neverRun")) })}</span>
               </div>
             </div>
           ))}
@@ -781,26 +790,26 @@ export function ScheduledAgentTaskDialog({
           color: "var(--text-secondary)",
         }}
       >
-        任务名称
+        {t("scheduled.taskName")}
         <input
           className="scheduled-agent-task-input"
           value={form.name}
           onChange={(event) =>
             setForm((prev) => ({ ...prev, name: event.target.value }))
           }
-          placeholder="请输入任务名称"
+          placeholder={t("scheduled.taskNamePlaceholder")}
           required
           style={fieldStyle}
         />
       </label>
       <CronEditor
-        label="任务计划（标准 crontab 规则）"
+        label={t("scheduled.taskCron")}
         value={form.task_cron}
         onChange={(value) => setForm((prev) => ({ ...prev, task_cron: value }))}
         placeholder="0 9 * * 1-5"
       />
       <CronEditor
-        label="新会话计划"
+        label={t("scheduled.newSessionPlan")}
         value={form.new_session_cron}
         onChange={(value) =>
           setForm((prev) => ({ ...prev, new_session_cron: value }))
@@ -819,7 +828,7 @@ export function ScheduledAgentTaskDialog({
               }
               style={strategyButtonStyle}
             >
-              总是开启新会话
+              {t("scheduled.alwaysNewSession")}
             </button>
             <button
               type="button"
@@ -828,7 +837,7 @@ export function ScheduledAgentTaskDialog({
               }
               style={strategyButtonStyle}
             >
-              总是复用已有会话
+              {t("scheduled.alwaysReuseSession")}
             </button>
           </>
         }
@@ -842,7 +851,7 @@ export function ScheduledAgentTaskDialog({
           color: "var(--text-secondary)",
         }}
       >
-        任务提示词
+        {t("scheduled.prompt")}
         <textarea
           className="scheduled-agent-task-input"
           value={form.prompt}
@@ -866,7 +875,7 @@ export function ScheduledAgentTaskDialog({
           onClick={() => setView("list")}
           style={menuButtonStyle}
         >
-          取消
+          {t("common.cancel")}
         </button>
         <button
           type="button"
@@ -880,7 +889,7 @@ export function ScheduledAgentTaskDialog({
             opacity: saving ? 0.65 : 1,
           }}
         >
-          {saving ? "保存中..." : "保存"}
+          {saving ? t("common.saving") : t("common.save")}
         </button>
       </div>
     </div>
@@ -905,7 +914,7 @@ export function ScheduledAgentTaskDialog({
         className="scheduled-agent-task-dialog"
         role="dialog"
         aria-modal="true"
-        aria-label="定时任务"
+        aria-label={t("scheduled.title")}
         onMouseDown={(event) => event.stopPropagation()}
         style={{
           width: "min(760px, 100%)",
@@ -952,10 +961,10 @@ export function ScheduledAgentTaskDialog({
         >
           <div style={{ fontSize: 15, fontWeight: 700 }}>
             {view === "list"
-              ? "定时任务"
+              ? t("scheduled.title")
               : view === "create"
-                ? "新建定时任务"
-                : "编辑定时任务"}
+                ? t("scheduled.createTitle")
+                : t("scheduled.editTitle")}
           </div>
           {view === "list" ? (
             <button
@@ -968,7 +977,7 @@ export function ScheduledAgentTaskDialog({
                 borderColor: "var(--accent-color)",
               }}
             >
-              新建
+              {t("scheduled.create")}
             </button>
           ) : (
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -1024,7 +1033,7 @@ export function ScheduledAgentTaskDialog({
                     }))
                   }
                 />
-                启用
+                {t("scheduled.enable")}
               </label>
             </div>
           )}

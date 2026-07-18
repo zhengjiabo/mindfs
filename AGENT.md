@@ -41,7 +41,9 @@ Production must run from the installed binary, not from `./mindfs`.
 Installed paths:
 
 - binary: `~/.local/bin/mindfs`
-- assets: `~/.local/share/mindfs/web`
+- web assets: `~/.local/share/mindfs/web`
+- bundled agent config: `~/.local/share/mindfs/agents.json`
+- bundled task templates: `~/.local/share/mindfs/task_template.json`
 - logs/pid: `~/.local/share/mindfs`
 - config: `~/.config/mindfs`
 
@@ -101,7 +103,8 @@ Important production constraint verified on `2026-07-02`:
 
 - this deployment reads Codex CLI config from `~/.codex/config.toml`
 - current provider config on this server points to `https://muyuan.do/v1`
-- that channel rejected the SDK default identity `codex_sdk_go/...` with HTTP `403 Forbidden`
+- that channel rejected the old SDK default identity `codex_sdk_go/...` with HTTP `403 Forbidden`
+- the SDK used by upstream v0.4.2 defaults to `codex_cli_rs`, but that identity has not been validated against this provider
 - the working default identity for this environment is `codex-tui`, not `codex-cli`
 
 The runtime fix in this repo is therefore:
@@ -115,7 +118,7 @@ Optional override env keys supported by MindFS:
 - `MINDFS_CODEX_CLIENT_NAME`
 - `MINDFS_CODEX_CLIENT_VERSION`
 
-Do not revert those defaults back to `codex-go-sdk` identity unless the target provider is known to allow it.
+Do not revert those defaults to an SDK-provided identity unless the target provider is known to allow it.
 If Codex suddenly starts failing with a channel/client `403`, inspect the detected client string in:
 
 ```bash

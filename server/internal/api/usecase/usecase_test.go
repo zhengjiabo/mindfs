@@ -636,6 +636,73 @@ func TestClaudeSubagentRouterDoesNotCreateChildFromTaskIDOnly(t *testing.T) {
 	}
 }
 
+func TestClaudeSubagentRouterRoutesTaskNotificationSummaryAndKeepsParentUpdate(t *testing.T) {
+	ctx := context.Background()
+	rootDir := t.TempDir()
+	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
+	manager := session.NewManager(root)
+	parent, err := manager.Create(ctx, session.CreateInput{Type: session.TypeChat, Agent: "claude", Name: "parent"})
+	if err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+
+	var created *session.Session
+	var sawDone bool
+	router := newClaudeSubagentRouter(subagentSessionInput{
+		RootID:  root.ID,
+		Parent:  parent,
+		Agent:   "claude",
+		Manager: manager,
+		OnCreated: func(child *session.Session) {
+			created = child
+		},
+		OnUpdate: func(sessionKey string, update agenttypes.Event) {
+			if created != nil && sessionKey == created.Key && update.Type == agenttypes.EventTypeMessageDone {
+				sawDone = true
+			}
+		},
+	})
+
+	if consumed := router.Handle(ctx, agenttypes.Event{
+		Type: agenttypes.EventTypeMessageChunk,
+		Data: agenttypes.MessageChunk{
+			Content:         "working",
+			ParentToolUseID: "tool-1",
+			TaskID:          "task-1",
+		},
+	}); !consumed {
+		t.Fatalf("subagent chunk was not consumed")
+	}
+
+	notification := agenttypes.ToolCall{
+		CallID:  "tool-1",
+		Title:   "done: printed hi",
+		Status:  "complete",
+		Kind:    agenttypes.ToolKindTask,
+		RawType: "claude_task",
+		Meta: map[string]any{
+			"parentToolUseId": "tool-1",
+			"taskId":          "task-1",
+			"subtype":         "task_notification",
+			"summary":         "done: printed hi",
+		},
+	}
+	if consumed := router.Handle(ctx, agenttypes.Event{Type: agenttypes.EventTypeToolUpdate, Data: notification}); consumed {
+		t.Fatalf("terminal task update should still be visible on parent")
+	}
+
+	loaded, err := manager.Get(ctx, created.Key, 0)
+	if err != nil {
+		t.Fatalf("get child: %v", err)
+	}
+	if len(loaded.Exchanges) != 1 || loaded.Exchanges[0].Content != "workingdone: printed hi" {
+		t.Fatalf("child exchanges = %#v", loaded.Exchanges)
+	}
+	if !sawDone {
+		t.Fatalf("sub session done update was not emitted")
+	}
+}
+
 func TestDedupeExchangeAuxBufferMergesDuplicateToolCalls(t *testing.T) {
 	items := []session.ExchangeAux{
 		{

@@ -2,6 +2,7 @@ package kanban
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -63,6 +64,92 @@ func (r *fakeRunner) RunAgentStage(ctx context.Context, exec AgentStageExecution
 }
 
 func (r *fakeRunner) TaskUpdated(rootID string, detail TaskDetail) {}
+
+func TestTaskTemplateStoreSeedsBundledTemplatesWhenUserFileMissing(t *testing.T) {
+	dir := t.TempDir()
+	bundledPath := filepath.Join(t.TempDir(), taskTemplateFile)
+	bundled := []TaskTemplate{{
+		ID:             "tmpl_default",
+		Name:           "Default task",
+		MaxConcurrency: 2,
+		Stages: []TaskTemplateStage{{
+			ID:       "stage_default",
+			Position: 0,
+			Snapshot: StageTemplate{
+				ID:   "stage_user",
+				Name: "Describe",
+				Role: RoleUser,
+			},
+		}},
+	}}
+	data, err := json.MarshalIndent(bundled, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal bundled templates: %v", err)
+	}
+	if err := os.WriteFile(bundledPath, append(data, '\n'), 0o644); err != nil {
+		t.Fatalf("write bundled templates: %v", err)
+	}
+
+	previous := bundledTaskTemplatePaths
+	bundledTaskTemplatePaths = func() []string { return []string{bundledPath} }
+	defer func() { bundledTaskTemplatePaths = previous }()
+
+	store := NewTemplateStoreAt(dir)
+	items, err := store.ListTaskTemplates()
+	if err != nil {
+		t.Fatalf("ListTaskTemplates: %v", err)
+	}
+	if len(items) != 1 || items[0].ID != "tmpl_default" {
+		t.Fatalf("templates = %#v, want bundled default", items)
+	}
+	if _, err := os.Stat(filepath.Join(dir, taskTemplateFile)); err != nil {
+		t.Fatalf("user task template file not seeded: %v", err)
+	}
+}
+
+func TestTaskTemplateStoreDoesNotSeedWhenUserFileExists(t *testing.T) {
+	cases := []struct {
+		name     string
+		contents string
+		wantFile string
+	}{
+		{name: "empty array", contents: "[]\n", wantFile: "[]"},
+		{name: "empty file", contents: "", wantFile: ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, taskTemplateFile), []byte(tc.contents), 0o644); err != nil {
+				t.Fatalf("write user templates: %v", err)
+			}
+			bundledPath := filepath.Join(t.TempDir(), taskTemplateFile)
+			if err := os.WriteFile(bundledPath, []byte(`[{"id":"tmpl_default","name":"Default task","max_concurrency":1,"stages":[{"id":"stage_default","position":0,"snapshot":{"id":"stage_user","name":"Describe","role":"user"}}]}]`), 0o644); err != nil {
+				t.Fatalf("write bundled templates: %v", err)
+			}
+
+			previous := bundledTaskTemplatePaths
+			bundledTaskTemplatePaths = func() []string { return []string{bundledPath} }
+			defer func() { bundledTaskTemplatePaths = previous }()
+
+			store := NewTemplateStoreAt(dir)
+			items, err := store.ListTaskTemplates()
+			if err != nil {
+				t.Fatalf("ListTaskTemplates: %v", err)
+			}
+			if len(items) != 0 {
+				t.Fatalf("templates = %#v, want no seed", items)
+			}
+			data, err := os.ReadFile(filepath.Join(dir, taskTemplateFile))
+			if err != nil {
+				t.Fatalf("read user templates: %v", err)
+			}
+			if got := strings.TrimSpace(string(data)); got != tc.wantFile {
+				t.Fatalf("user file = %q, want %q", got, tc.wantFile)
+			}
+		})
+	}
+}
 
 func TestTemplateStoreJSONAndFirstStageValidation(t *testing.T) {
 	dir := t.TempDir()
@@ -1054,6 +1141,233 @@ func TestCompletingAdmittedTaskSchedulesNextQueuedTask(t *testing.T) {
 	}
 	if second.Task.Status != StatusWaitingUser || !second.Task.SchedulerAdmitted {
 		t.Fatalf("second task status/admitted after complete = %s/%t, want waiting_user/true", second.Task.Status, second.Task.SchedulerAdmitted)
+	}
+}
+
+func TestAgentStageAllowsBlankModel(t *testing.T) {
+	ctx := context.Background()
+	root := fs.NewRootInfo("root", "root", t.TempDir())
+	store := NewTemplateStoreAt(t.TempDir())
+	svc := NewService(store, testRoots{root: root})
+	runner := &fakeRunner{}
+	svc.SetRunner(runner)
+	tmpl, err := store.SaveTaskTemplate(TaskTemplate{
+		Name: "Default Model Flow",
+		Stages: []TaskTemplateStage{{
+			Position: 0,
+			Snapshot: StageTemplate{
+				Name:        "Describe",
+				Role:        RoleUser,
+				AutoAdvance: true,
+			},
+		}, {
+			Position: 1,
+			Snapshot: StageTemplate{
+				Name:               "Fix",
+				Role:               RoleAgent,
+				Agent:              "codex",
+				SessionReusePolicy: SessionReuseTaskMain,
+				PromptTemplate:     "Fix this:\n{previous_input}",
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("SaveTaskTemplate: %v", err)
+	}
+	detail, err := svc.CreateTask(ctx, CreateTaskInput{RootID: root.ID, TaskTemplateID: tmpl.ID, Input: "use defaults"})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		runner.mu.Lock()
+		execCount := len(runner.execs)
+		model := ""
+		if execCount > 0 {
+			model = runner.execs[0].Stage.Model
+		}
+		runner.mu.Unlock()
+		if execCount > 0 {
+			if model != "" {
+				t.Fatalf("execution model = %q, want empty", model)
+			}
+			return
+		}
+		detail, err = svc.GetTask(ctx, root.ID, detail.Task.ID)
+		if err != nil {
+			t.Fatalf("GetTask: %v", err)
+		}
+		if detail.Task.AuxFlags.SessionError != "" {
+			t.Fatalf("session error = %q", detail.Task.AuxFlags.SessionError)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("agent stage did not start")
+}
+
+func TestRunNowBypassesConcurrencySlot(t *testing.T) {
+	ctx := context.Background()
+	root := fs.NewRootInfo("root", "root", t.TempDir())
+	store := NewTemplateStoreAt(t.TempDir())
+	svc := NewService(store, testRoots{root: root})
+	svc.SetRunner(&fakeRunner{})
+	tmpl, err := store.SaveTaskTemplate(TaskTemplate{
+		Name:           "Serial Agent Flow",
+		MaxConcurrency: 1,
+		Stages: []TaskTemplateStage{{
+			Position: 0,
+			Snapshot: StageTemplate{
+				Name:        "Describe",
+				Role:        RoleUser,
+				AutoAdvance: true,
+			},
+		}, {
+			Position: 1,
+			Snapshot: StageTemplate{
+				Name:               "Fix",
+				Role:               RoleAgent,
+				Agent:              "codex",
+				Model:              "gpt-5",
+				SessionReusePolicy: SessionReuseTaskMain,
+				PromptTemplate:     "Fix this:\n{previous_input}",
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("SaveTaskTemplate: %v", err)
+	}
+	first, err := svc.CreateTask(ctx, CreateTaskInput{RootID: root.ID, TaskTemplateID: tmpl.ID, Input: "first"})
+	if err != nil {
+		t.Fatalf("CreateTask first: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		first, err = svc.GetTask(ctx, root.ID, first.Task.ID)
+		if err == nil && first.Task.Status == StatusWaitingUser && first.Task.SchedulerAdmitted {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("GetTask first: %v", err)
+	}
+	if first.Task.Status != StatusWaitingUser || !first.Task.SchedulerAdmitted {
+		t.Fatalf("first task status/admitted = %s/%t, want waiting_user/true", first.Task.Status, first.Task.SchedulerAdmitted)
+	}
+	second, err := svc.CreateTask(ctx, CreateTaskInput{RootID: root.ID, TaskTemplateID: tmpl.ID, Input: "second"})
+	if err != nil {
+		t.Fatalf("CreateTask second: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	second, err = svc.GetTask(ctx, root.ID, second.Task.ID)
+	if err != nil {
+		t.Fatalf("GetTask second before run now: %v", err)
+	}
+	if second.Task.Status != StatusQueued || second.Task.SchedulerAdmitted {
+		t.Fatalf("second task status/admitted before run now = %s/%t, want queued/false", second.Task.Status, second.Task.SchedulerAdmitted)
+	}
+	if _, err := svc.RunNow(ctx, MoveInput{RootID: root.ID, TaskID: second.Task.ID}); err != nil {
+		t.Fatalf("RunNow second: %v", err)
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		second, err = svc.GetTask(ctx, root.ID, second.Task.ID)
+		if err == nil && second.Task.Status == StatusWaitingUser && second.Task.SchedulerAdmitted {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("GetTask second after run now: %v", err)
+	}
+	if second.Task.Status != StatusWaitingUser || !second.Task.SchedulerAdmitted {
+		t.Fatalf("second task status/admitted after run now = %s/%t, want waiting_user/true", second.Task.Status, second.Task.SchedulerAdmitted)
+	}
+}
+
+func TestCancellingAdmittedTaskSchedulesNextQueuedTask(t *testing.T) {
+	ctx := context.Background()
+	root := fs.NewRootInfo("root", "root", t.TempDir())
+	store := NewTemplateStoreAt(t.TempDir())
+	svc := NewService(store, testRoots{root: root})
+	svc.SetRunner(&fakeRunner{})
+	tmpl, err := store.SaveTaskTemplate(TaskTemplate{
+		Name:           "Two Slot Agent Flow",
+		MaxConcurrency: 2,
+		Stages: []TaskTemplateStage{{
+			Position: 0,
+			Snapshot: StageTemplate{
+				Name:        "Describe",
+				Role:        RoleUser,
+				AutoAdvance: true,
+			},
+		}, {
+			Position: 1,
+			Snapshot: StageTemplate{
+				Name:               "Fix",
+				Role:               RoleAgent,
+				Agent:              "codex",
+				Model:              "gpt-5",
+				SessionReusePolicy: SessionReuseTaskMain,
+				PromptTemplate:     "Fix this:\n{previous_input}",
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("SaveTaskTemplate: %v", err)
+	}
+	first, err := svc.CreateTask(ctx, CreateTaskInput{RootID: root.ID, TaskTemplateID: tmpl.ID, Input: "first", CreateWorktree: true})
+	if err != nil {
+		t.Fatalf("CreateTask first: %v", err)
+	}
+	second, err := svc.CreateTask(ctx, CreateTaskInput{RootID: root.ID, TaskTemplateID: tmpl.ID, Input: "second", CreateWorktree: true})
+	if err != nil {
+		t.Fatalf("CreateTask second: %v", err)
+	}
+	third, err := svc.CreateTask(ctx, CreateTaskInput{RootID: root.ID, TaskTemplateID: tmpl.ID, Input: "third", CreateWorktree: true})
+	if err != nil {
+		t.Fatalf("CreateTask third: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		first, _ = svc.GetTask(ctx, root.ID, first.Task.ID)
+		second, _ = svc.GetTask(ctx, root.ID, second.Task.ID)
+		third, err = svc.GetTask(ctx, root.ID, third.Task.ID)
+		if err == nil &&
+			first.Task.Status == StatusWaitingUser && first.Task.SchedulerAdmitted &&
+			second.Task.Status == StatusWaitingUser && second.Task.SchedulerAdmitted &&
+			third.Task.Status == StatusQueued && !third.Task.SchedulerAdmitted {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("GetTask third before cancel: %v", err)
+	}
+	if first.Task.Status != StatusWaitingUser || !first.Task.SchedulerAdmitted ||
+		second.Task.Status != StatusWaitingUser || !second.Task.SchedulerAdmitted ||
+		third.Task.Status != StatusQueued || third.Task.SchedulerAdmitted {
+		t.Fatalf("before cancel statuses: first=%s/%t second=%s/%t third=%s/%t",
+			first.Task.Status, first.Task.SchedulerAdmitted,
+			second.Task.Status, second.Task.SchedulerAdmitted,
+			third.Task.Status, third.Task.SchedulerAdmitted)
+	}
+	if _, err := svc.Cancel(ctx, MoveInput{RootID: root.ID, TaskID: first.Task.ID}); err != nil {
+		t.Fatalf("Cancel first: %v", err)
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		third, err = svc.GetTask(ctx, root.ID, third.Task.ID)
+		if err == nil && third.Task.Status == StatusWaitingUser && third.Task.SchedulerAdmitted {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("GetTask third after cancel: %v", err)
+	}
+	if third.Task.Status != StatusWaitingUser || !third.Task.SchedulerAdmitted {
+		t.Fatalf("third task status/admitted after cancel = %s/%t, want waiting_user/true", third.Task.Status, third.Task.SchedulerAdmitted)
 	}
 }
 

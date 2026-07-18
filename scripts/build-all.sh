@@ -58,6 +58,9 @@ for PLATFORM in "${PLATFORMS[@]}"; do
   if [[ -f "${ROOT}/agents.json" ]]; then
     cp "${ROOT}/agents.json" "${ROOT}/${OUT_DIR}/agents.json"
   fi
+  if [[ -f "${ROOT}/task_template.json" ]]; then
+    cp "${ROOT}/task_template.json" "${ROOT}/${OUT_DIR}/task_template.json"
+  fi
 done
 
 # Produce archives

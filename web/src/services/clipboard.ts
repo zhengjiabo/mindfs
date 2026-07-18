@@ -1,5 +1,6 @@
 import { getNativeBridge } from "./nativeBridge";
 import { isCapacitorRuntime, isNativeShellRuntime } from "./runtime";
+import { translateNow } from "../i18n";
 
 async function writeTextWithExecCommand(text: string): Promise<void> {
   if (typeof document === "undefined") {
@@ -34,7 +35,7 @@ async function writeTextWithExecCommand(text: string): Promise<void> {
     }
   }
   if (!ok) {
-    throw new Error("复制失败");
+    throw new Error(translateNow("clipboard.copyFailed"));
   }
 }
 
@@ -69,7 +70,7 @@ async function writeTextWithNativeBridge(text: string): Promise<boolean> {
 
 export async function copyText(text: string): Promise<void> {
   if (!text) {
-    throw new Error("复制内容为空");
+    throw new Error(translateNow("clipboard.empty"));
   }
   if (await writeTextWithNativeBridge(text)) {
     return;
@@ -90,5 +91,5 @@ export async function copyText(text: string): Promise<void> {
     return;
   }
 
-  throw new Error("当前浏览器不支持自动复制");
+  throw new Error(translateNow("clipboard.unsupported"));
 }

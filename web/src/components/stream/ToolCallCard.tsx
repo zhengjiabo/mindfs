@@ -1,6 +1,7 @@
 import React, { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { sessionService, type ToolCall, type ToolCallContentItem, type ToolCallLocation } from "../../services/session";
 import { MarkdownViewer } from "../MarkdownViewer";
+import { useI18n } from "../../i18n";
 
 type ToolCallCardProps = {
   kind?: string;
@@ -155,6 +156,26 @@ function stripAnsi(text: string): string {
 
 function normalizeTerminalText(text: string): string {
   return (text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+function extractExecuteCommand(meta: Record<string, unknown> | undefined, fallbackTitle: string): string {
+  const command = stringMeta(meta, "command");
+  if (command) return command;
+
+  const rawInput = stringMeta(meta, "input");
+  if (rawInput) {
+    try {
+      const parsed = JSON.parse(rawInput) as { command?: unknown };
+      if (typeof parsed.command === "string" && parsed.command.trim()) {
+        return parsed.command;
+      }
+    } catch {
+      return rawInput;
+    }
+    return rawInput;
+  }
+
+  return fallbackTitle;
 }
 
 type AnsiStyle = {
@@ -342,8 +363,8 @@ function AnsiOutput({ text, onRendered }: { text: string; onRendered?: () => voi
         marginTop: "10px",
         padding: "8px",
         borderRadius: "8px",
-        background: "var(--mindfs-code-bg, #f8fafc)",
-        border: "1px solid var(--mindfs-code-border, var(--border-color))",
+        background: "rgba(148, 163, 184, 0.12)",
+        border: "1px solid rgba(148, 163, 184, 0.28)",
         overflowX: "auto",
         overflowY: "hidden",
         width: "100%",
@@ -373,6 +394,50 @@ function AnsiOutput({ text, onRendered }: { text: string; onRendered?: () => voi
   );
 }
 
+function ExecuteToolDetails({
+  command,
+  output,
+  onOutputRendered,
+}: {
+  command: string;
+  output: string;
+  onOutputRendered?: () => void;
+}) {
+  const hasCommand = command.length > 0;
+  const hasOutput = output.trim().length > 0;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "10px", marginTop: "10px", minWidth: 0 }}>
+      {hasCommand ? (
+        <div
+          style={{
+            padding: "8px",
+            borderRadius: "8px",
+            background: "rgba(47, 128, 237, 0.10)",
+            border: "1px solid rgba(47, 128, 237, 0.24)",
+            minWidth: 0,
+          }}
+        >
+          <pre
+            style={{
+              margin: 0,
+              color: "var(--mindfs-code-text, var(--text-primary))",
+              fontFamily: terminalFontFamily,
+              fontSize: "12px",
+              lineHeight: 1.6,
+              whiteSpace: "pre-wrap",
+              overflowWrap: "anywhere",
+              wordBreak: "break-word",
+            }}
+          >
+            {command}
+          </pre>
+        </div>
+      ) : null}
+      {hasOutput ? <AnsiOutput text={output} onRendered={onOutputRendered} /> : null}
+    </div>
+  );
+}
+
 export const ToolCallCard = memo(function ToolCallCard({
   kind,
   title,
@@ -387,6 +452,7 @@ export const ToolCallCard = memo(function ToolCallCard({
   sessionKey,
   defaultExpanded = false,
 }: ToolCallCardProps) {
+  const { t } = useI18n();
   const [expanded, setExpanded] = useState(defaultExpanded);
   const [loadedToolCall, setLoadedToolCall] = useState<ToolCall | null>(null);
   const [loadingDetails, setLoadingDetails] = useState(false);
@@ -414,19 +480,28 @@ export const ToolCallCard = memo(function ToolCallCard({
   const isCollabTool = effectiveMeta?.rawType === "collabToolCall" || effectiveMeta?.type === "collabAgentToolCall";
   const collabToolName = typeof effectiveMeta?.tool === "string" ? effectiveMeta.tool.trim() : "";
   const isCollabWait = isCollabTool && collabToolName === "wait";
-  const isUserShell = normalizedKind === "execute" && effectiveMeta?.source === "userShell";
-  const userShellText = useMemo(
-    () => (effectiveContent || []).map((item) => ("text" in item ? item.text || "" : "")).join("") || result || "",
-    [effectiveContent, result],
+  const isExecute = normalizedKind === "execute";
+  const isUserShell = isExecute && effectiveMeta?.source === "userShell";
+  const executeCommand = isExecute ? extractExecuteCommand(effectiveMeta, labelTitle) : "";
+  const executeOutputText = useMemo(
+    () => {
+      const contentText = (effectiveContent || []).map((item) => ("text" in item ? item.text || "" : "")).join("");
+      if (contentText) return contentText;
+      if (!result) return "";
+      const rawInput = stringMeta(effectiveMeta, "input");
+      return result === rawInput || result === executeCommand ? "" : result;
+    },
+    [effectiveContent, effectiveMeta, executeCommand, result],
   );
   const hasContent = !!(effectiveContent && effectiveContent.length > 0);
   const hasLocations = !!(effectiveLocations && effectiveLocations.length > 0);
   const hasResult = !!result;
-  const hasUserShellOutput = userShellText.trim().length > 0;
+  const hasExecuteCommand = executeCommand.length > 0;
+  const hasExecuteOutput = executeOutputText.trim().length > 0;
   const hasCollabDetails = isCollabTool && !isCollabWait && Boolean(effectiveMeta?.prompt);
   const canLoadDetails = Boolean(rootId && sessionKey && _callId);
-  const needsRemoteDetails = canLoadDetails && (isUserShell ? !hasUserShellOutput : !hasContent);
-  const hasDetails = (isUserShell ? hasUserShellOutput : hasContent || hasLocations || hasResult || hasCollabDetails) || canLoadDetails;
+  const needsRemoteDetails = canLoadDetails && (isExecute ? !hasExecuteOutput : !hasContent);
+  const hasDetails = (isExecute ? hasExecuteCommand || hasExecuteOutput : hasContent || hasLocations || hasResult || hasCollabDetails) || canLoadDetails;
   const icon = renderToolIcon(normalizedKind);
   const normalizedStatus = (effectiveStatus || "").toLowerCase();
   const detailSections = useMemo(() => {
@@ -640,22 +715,26 @@ export const ToolCallCard = memo(function ToolCallCard({
 
       {expanded && hasDetails && (
         <div
-          ref={isUserShell ? detailScrollRef : undefined}
+          ref={isExecute ? detailScrollRef : undefined}
           style={{
             padding: "0 10px 22px",
             borderTop: "1px solid var(--border-color)",
             maxHeight: "min(60vh, 720px)",
             overflowY: "auto",
             WebkitOverflowScrolling: "touch",
-            overscrollBehavior: isUserShell ? "auto" : undefined,
+            overscrollBehavior: isExecute ? "auto" : undefined,
           }}
         >
-          {isUserShell ? (
-            <AnsiOutput text={userShellText} onRendered={scrollUserShellDetailsToBottom} />
+          {isExecute ? (
+            <ExecuteToolDetails
+              command={executeCommand}
+              output={executeOutputText}
+              onOutputRendered={scrollUserShellDetailsToBottom}
+            />
           ) : loadingDetails ? (
-            <div style={{ marginTop: "10px", fontSize: "12px", color: "var(--text-secondary)" }}>加载中...</div>
+            <div style={{ marginTop: "10px", fontSize: "12px", color: "var(--text-secondary)" }}>{t("common.loading")}</div>
           ) : detailLoadFailed && !hasContent && !hasLocations && !hasResult && !hasCollabDetails ? (
-            <div style={{ marginTop: "10px", fontSize: "12px", color: "var(--text-secondary)" }}>加载失败</div>
+            <div style={{ marginTop: "10px", fontSize: "12px", color: "var(--text-secondary)" }}>{t("common.loadingFailed")}</div>
           ) : isCollabTool ? (
             <CollabToolDetails meta={effectiveMeta} rootId={rootId} />
           ) : hasStructuredDetails ? (
@@ -704,7 +783,7 @@ export const ToolCallCard = memo(function ToolCallCard({
                   {typeof loc.line === "number" ? `:${loc.line}` : ""}
                 </div>
               ))}
-              {effectiveLocations!.length > 3 && <div>... +{effectiveLocations!.length - 3} 处</div>}
+              {effectiveLocations!.length > 3 && <div>{t("common.moreLocations", { count: effectiveLocations!.length - 3 })}</div>}
             </div>
           ) : null}
           {!hasStructuredDetails && hasResult && <MarkdownViewer content={result || ""} root={rootId || undefined} />}

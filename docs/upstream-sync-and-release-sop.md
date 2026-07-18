@@ -44,6 +44,7 @@ PREFIX/
   share/
     mindfs/
       agents.json
+      task_template.json
       web/
 ```
 
@@ -279,6 +280,7 @@ PREFIX/bin/mindfs
 
 ```text
 PREFIX/share/mindfs/agents.json
+PREFIX/share/mindfs/task_template.json
 PREFIX/share/mindfs/web/
 ```
 
@@ -510,6 +512,7 @@ export MINDFS_UPDATE_REPO="zhengjiabo/mindfs"
 - 安装 `bin/mindfs`
 - 安装 `share/mindfs/web`
 - 安装 `share/mindfs/agents.json`
+- 安装 `share/mindfs/task_template.json`
 - 保留用户配置目录
 - 支持覆盖升级
 

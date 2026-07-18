@@ -204,6 +204,13 @@ try {
         Copy-Item -Force $AgentsSrc (Join-Path $ShareDir "agents.json")
         Write-Host "  Agents  -> $(Join-Path $ShareDir 'agents.json')"
     }
+    $TaskTemplateSrc = Join-Path $PkgDir "task_template.json"
+    if (Test-Path $TaskTemplateSrc -PathType Leaf) {
+        $ShareDir = Join-Path $Prefix "share\mindfs"
+        New-Item -ItemType Directory -Force -Path $ShareDir | Out-Null
+        Copy-Item -Force $TaskTemplateSrc (Join-Path $ShareDir "task_template.json")
+        Write-Host "  Templates -> $(Join-Path $ShareDir 'task_template.json')"
+    }
 
     # ── Install web assets (optional) ───────────────────────────────────────
     $WebSrc = Join-Path $PkgDir "web"

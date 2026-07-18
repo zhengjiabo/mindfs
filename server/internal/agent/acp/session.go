@@ -107,6 +107,24 @@ func mapCommandState(commands []acpsdk.AvailableCommand) types.CommandList {
 	return types.CommandList{Commands: items}
 }
 
+func mapModelState(state *acpsdk.SessionModelState) types.ModelList {
+	if state == nil {
+		return types.ModelList{}
+	}
+	models := make([]types.ModelInfo, 0, len(state.AvailableModels))
+	for _, model := range state.AvailableModels {
+		models = append(models, types.ModelInfo{
+			ID:          strings.TrimSpace(string(model.ModelId)),
+			Name:        firstNonEmpty(strings.TrimSpace(model.Name), strings.TrimSpace(string(model.ModelId))),
+			Description: stringPtrValue(model.Description),
+		})
+	}
+	return types.ModelList{
+		CurrentModelID: strings.TrimSpace(string(state.CurrentModelId)),
+		Models:         models,
+	}
+}
+
 func mapModeState(state *acpsdk.SessionModeState) types.ModeList {
 	if state == nil {
 		return types.ModeList{}
@@ -269,7 +287,10 @@ func (s *session) CurrentModel() string {
 	if s == nil || s.proc == nil {
 		return ""
 	}
-	return strings.TrimSpace(mapModelConfigOptions(s.proc.SessionConfigOptions(s.sessionKey)).CurrentModelID)
+	if current := strings.TrimSpace(mapModelConfigOptions(s.proc.SessionConfigOptions(s.sessionKey)).CurrentModelID); current != "" {
+		return current
+	}
+	return strings.TrimSpace(mapModelState(s.proc.SessionModelState(s.sessionKey)).CurrentModelID)
 }
 
 func (s *session) SetModel(ctx context.Context, model string) error {
@@ -283,7 +304,10 @@ func (s *session) ListModels(_ context.Context) (types.ModelList, error) {
 	if s == nil || s.proc == nil {
 		return types.ModelList{}, errors.New("acp session not initialized")
 	}
-	return mapModelConfigOptions(s.proc.SessionConfigOptions(s.sessionKey)), nil
+	if models := mapModelConfigOptions(s.proc.SessionConfigOptions(s.sessionKey)); len(models.Models) > 0 || models.CurrentModelID != "" {
+		return models, nil
+	}
+	return mapModelState(s.proc.SessionModelState(s.sessionKey)), nil
 }
 
 func (s *session) SetMode(ctx context.Context, mode string) error {
@@ -359,8 +383,12 @@ func (s *session) RuntimeDefaults(context.Context) (types.RuntimeDefaults, error
 		return types.RuntimeDefaults{}, errors.New("acp session not initialized")
 	}
 	options := s.proc.SessionConfigOptions(s.sessionKey)
+	model := configOptionCurrentValue(options, acpsdk.SessionConfigOptionCategoryModel)
+	if model == "" {
+		model = mapModelState(s.proc.SessionModelState(s.sessionKey)).CurrentModelID
+	}
 	return types.RuntimeDefaults{
-		Model:  configOptionCurrentValue(options, acpsdk.SessionConfigOptionCategoryModel),
+		Model:  model,
 		Effort: configOptionCurrentValue(options, acpsdk.SessionConfigOptionCategoryThoughtLevel),
 	}, nil
 }

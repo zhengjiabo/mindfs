@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { errorService, type AppError } from "../services/error";
+import { useI18n } from "../i18n";
 
 type ToastItem = {
   id: string;
@@ -96,12 +97,15 @@ type ToastProps = {
 };
 
 function Toast({ error, onClose, onRetry }: ToastProps): React.ReactElement {
+  const { t } = useI18n();
   const bgColor =
     error.severity === "error"
       ? "rgba(239, 68, 68, 0.95)"
       : error.severity === "warning"
       ? "rgba(245, 158, 11, 0.95)"
       : "rgba(59, 130, 246, 0.95)";
+
+  const message = error.usesDefaultMessage && error.messageKey ? t(error.messageKey) : error.message;
 
   return (
     <div
@@ -147,9 +151,9 @@ function Toast({ error, onClose, onRetry }: ToastProps): React.ReactElement {
             overflowWrap: "anywhere",
             lineHeight: 1.45,
           }}
-          title={error.message}
+          title={message}
         >
-          {error.message}
+          {message}
         </div>
         {error.code && (
           <div style={{ fontSize: "11px", opacity: 0.8 }}>{error.code}</div>
@@ -172,7 +176,7 @@ function Toast({ error, onClose, onRetry }: ToastProps): React.ReactElement {
               cursor: "pointer",
             }}
           >
-            重试
+            {t("common.retry")}
           </button>
         )}
         <button

@@ -19,6 +19,28 @@ func TestWrapSessionUpdateRecognizesPlan(t *testing.T) {
 	}
 }
 
+func TestMapModelStateUsesLegacyACPModels(t *testing.T) {
+	models := mapModelState(&acpsdk.SessionModelState{
+		CurrentModelId: acpsdk.ModelId("gpt-4.1"),
+		AvailableModels: []acpsdk.ModelInfo{
+			{
+				ModelId:     acpsdk.ModelId("gpt-4.1"),
+				Name:        "GPT-4.1",
+				Description: acpsdk.Ptr("Fast model"),
+			},
+		},
+	})
+	if models.CurrentModelID != "gpt-4.1" {
+		t.Fatalf("CurrentModelID = %q", models.CurrentModelID)
+	}
+	if len(models.Models) != 1 {
+		t.Fatalf("Models = %#v", models.Models)
+	}
+	if got := models.Models[0]; got.ID != "gpt-4.1" || got.Name != "GPT-4.1" || got.Description != "Fast model" {
+		t.Fatalf("model = %#v", got)
+	}
+}
+
 func TestConvertEventMapsACPPlanToTodoUpdate(t *testing.T) {
 	event := convertEvent(SessionUpdate{
 		Type:      UpdateTypePlan,

@@ -1,6 +1,7 @@
 import React from "react";
 import { ModeIcon } from "./ModeIcon";
 import { InlineTokenText } from "./InlineTokenText";
+import { useI18n, type MessageKey } from "../i18n";
 
 type SessionInfo = {
   key: string;
@@ -29,12 +30,12 @@ type SessionHistoryProps = {
   onClose?: () => void;
 };
 
-const typeLabels: Record<string, string> = {
-  chat: "对话",
-  plugin: "视图插件",
-  command: "命令执行",
-  task: "任务",
-  skill: "对话",
+const typeLabelKeys: Record<string, MessageKey> = {
+  chat: "mode.chat",
+  plugin: "mode.plugin",
+  command: "mode.command",
+  task: "directory.taskKanban",
+  skill: "mode.chat",
 };
 
 export function SessionHistory({
@@ -45,7 +46,10 @@ export function SessionHistory({
   onFileClick,
   onClose,
 }: SessionHistoryProps) {
+  const { t } = useI18n();
   if (!session) return null;
+  const currentProjectLabel = t("session.currentProject");
+  const displayRepoName = (name?: string) => (!name || name === "当前项目" ? currentProjectLabel : name);
   const relatedFileGroups = (() => {
     const repoGroups = relatedFiles.reduce<
       Array<{
@@ -69,8 +73,8 @@ export function SessionHistory({
         key: repoKey,
         repoPath,
         repoName: isCurrentRepoRecord
-          ? "当前项目"
-          : file.repo_name || repoPath.split(/[\\/]/).filter(Boolean).pop() || "当前项目",
+          ? currentProjectLabel
+          : displayRepoName(file.repo_name || repoPath.split(/[\\/]/).filter(Boolean).pop()),
         repoKind,
         headGroups: [],
       };
@@ -128,7 +132,7 @@ export function SessionHistory({
             {session.name || `Session ${session.key.slice(0, 8)}`}
           </div>
           <div style={{ fontSize: "12px", color: "var(--text-secondary)" }}>
-            {typeLabels[session.task_id ? "task" : session.type]} · {session.agent || "-"} · 已关闭
+            {t(typeLabelKeys[session.task_id ? "task" : session.type] || "mode.chat")} · {session.agent || "-"} · {t("session.closed")}
           </div>
         </div>
         <button
@@ -147,7 +151,7 @@ export function SessionHistory({
             gap: "6px",
           }}
         >
-          ↻ 恢复
+          ↻ {t("session.restore")}
         </button>
         {onClose && (
           <button
@@ -185,7 +189,7 @@ export function SessionHistory({
               color: "var(--text-primary)",
             }}
           >
-            对话历史
+            {t("session.history")}
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
             {exchanges.map((ex, i) => (
@@ -204,7 +208,7 @@ export function SessionHistory({
                     fontWeight: 500,
                   }}
                 >
-                  {ex.role === "user" ? "用户" : "Agent"}
+                  {ex.role === "user" ? t("session.user") : "Agent"}
                   {ex.timestamp && ` · ${ex.timestamp}`}
                 </div>
                 <div
@@ -242,17 +246,17 @@ export function SessionHistory({
                 color: "var(--text-primary)",
               }}
             >
-              关联文件
+              {t("session.relatedFiles", { count: relatedFiles.length })}
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
               {relatedFileGroups.map((group) => {
-                const isCurrentRepo = !group.repoPath || group.repoName === "当前项目";
+                const isCurrentRepo = !group.repoPath || group.repoName === currentProjectLabel || group.repoName === "当前项目";
                 const showGroupHeader = group.repoKind === "plain" || group.head || !isCurrentRepo;
                 return (
                   <div key={group.key} style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
                     {showGroupHeader ? (
                       <div
-                        title={[group.repoPath, group.head].filter(Boolean).join(" · ") || group.repoName || "当前项目"}
+                        title={[group.repoPath, group.head].filter(Boolean).join(" · ") || displayRepoName(group.repoName)}
                         style={{
                           fontSize: "11px",
                           color: "var(--text-secondary)",
@@ -260,12 +264,12 @@ export function SessionHistory({
                         }}
                       >
                         {group.repoKind === "plain"
-                          ? `${group.repoName || "当前项目"} · 非 Git`
+                          ? `${displayRepoName(group.repoName)} · ${t("session.nonGit")}`
                           : group.head
                             ? isCurrentRepo
                               ? `HEAD ${group.head.slice(0, 8)}`
-                              : `${group.repoName || "当前项目"} · HEAD ${group.head.slice(0, 8)}`
-                            : group.repoName || "当前项目"}
+                              : `${displayRepoName(group.repoName)} · HEAD ${group.head.slice(0, 8)}`
+                            : displayRepoName(group.repoName)}
                       </div>
                     ) : null}
                     {group.files.map((file) => (

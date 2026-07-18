@@ -417,6 +417,8 @@ func TestLoadConfigWithExtraMergesSingleExtraConfigAfterDefaultConfig(t *testing
 	userConfigPath := filepath.Join(tempDir, "user-agents.json")
 	extraConfigPath := filepath.Join(tempDir, "extra-agents.json")
 	if err := os.WriteFile(userConfigPath, []byte(`{
+  "relayBaseURL": "https://relay.user.example.com",
+  "tokenStationURL": "https://token.user.example.com",
   "agents": [
     {"name":"user-agent","command":"user-agent","brief":"from user"},
     {"name":"shared-agent","command":"user-shared","brief":"from user"}
@@ -425,6 +427,8 @@ func TestLoadConfigWithExtraMergesSingleExtraConfigAfterDefaultConfig(t *testing
 		t.Fatalf("write user config: %v", err)
 	}
 	if err := os.WriteFile(extraConfigPath, []byte(`{
+  "relayBaseURL": "https://relay.extra.example.com",
+  "tokenStationURL": "https://token.extra.example.com",
   "agents": [
     {"name":"extra-agent","command":"extra-agent","brief":"from extra"},
     {"name":"shared-agent","command":"extra-shared","brief":"from extra"}
@@ -450,5 +454,11 @@ func TestLoadConfigWithExtraMergesSingleExtraConfigAfterDefaultConfig(t *testing
 	}
 	if shared.Command != "extra-shared" || shared.Brief != "from extra" {
 		t.Fatalf("extra config should override same-name user config, got %+v", shared)
+	}
+	if cfg.RelayBaseURL != "https://relay.extra.example.com" {
+		t.Fatalf("relay base url = %q", cfg.RelayBaseURL)
+	}
+	if cfg.TokenStationURL != "https://token.extra.example.com" {
+		t.Fatalf("token station url = %q", cfg.TokenStationURL)
 	}
 }

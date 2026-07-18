@@ -16,6 +16,17 @@ export type AgentConfigBackup = {
   envKeys?: string[];
 };
 
+export type AgentAPIProvider = {
+  id: string;
+  name: string;
+  baseUrl: string;
+  protocols: string[];
+  modelFamilies: string[];
+  models?: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type AgentConfigDefaults = {
   agent: string;
   file_sources: string[];
@@ -73,6 +84,64 @@ export async function switchAgentConfig(input: {
     body: JSON.stringify({
       id: input.id,
       confirm_overwrite: !!input.confirmOverwrite,
+    }),
+  });
+}
+
+export async function fetchAgentAPIProviders(agent?: string): Promise<AgentAPIProvider[]> {
+  const params = new URLSearchParams();
+  if (agent) {
+    params.set("agent", agent);
+  }
+  const query = params.toString();
+  return protectedJSON<AgentAPIProvider[]>(appPath(`/api/agent-api-providers${query ? `?${query}` : ""}`));
+}
+
+export async function createAgentAPIProvider(input: {
+  name: string;
+  baseUrl: string;
+  apiKey: string;
+}): Promise<AgentAPIProvider> {
+  return protectedJSON<AgentAPIProvider>(appPath("/api/agent-api-providers"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      name: input.name,
+      baseUrl: input.baseUrl,
+      apiKey: input.apiKey,
+    }),
+  });
+}
+
+export async function syncAgentAPIProviders(input: Array<{
+  name: string;
+  baseUrl: string;
+  apiKey: string;
+}>): Promise<{ providers: AgentAPIProvider[] }> {
+  return protectedJSON<{ providers: AgentAPIProvider[] }>(appPath("/api/agent-api-providers/sync"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ providers: input }),
+  });
+}
+
+export async function deleteAgentAPIProvider(id: string): Promise<{ deleted: boolean; id: string; providers?: AgentAPIProvider[] }> {
+  const params = new URLSearchParams({ id });
+  return protectedJSON<{ deleted: boolean; id: string; providers?: AgentAPIProvider[] }>(appPath(`/api/agent-api-providers?${params.toString()}`), {
+    method: "DELETE",
+  });
+}
+
+export async function switchAgentAPIProvider(input: {
+  agent: string;
+  providerID: string;
+}): Promise<{ provider?: AgentAPIProvider }> {
+  return protectedJSON(appPath("/api/agent-api-providers/switch"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      agent: input.agent,
+      provider_id: input.providerID,
     }),
   });
 }

@@ -1,4 +1,5 @@
 import React, { memo, useEffect, useState } from "react";
+import { useI18n } from "../../i18n";
 
 type ThinkingBlockProps = {
   content: string;
@@ -6,6 +7,7 @@ type ThinkingBlockProps = {
 };
 
 export const ThinkingBlock = memo(function ThinkingBlock({ content, defaultExpanded = false }: ThinkingBlockProps) {
+  const { t } = useI18n();
   const [expanded, setExpanded] = useState(defaultExpanded);
   useEffect(() => {
     if (!defaultExpanded) {
@@ -45,9 +47,9 @@ export const ThinkingBlock = memo(function ThinkingBlock({ content, defaultExpan
         }}
       >
         <span style={{ display: "inline-flex", alignItems: "center", gap: "5px", minWidth: 0, flex: 1 }}>
-          <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>思考过程</span>
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{t("thinking.title")}</span>
           <span style={{ color: "var(--text-secondary)", fontWeight: 400, flexShrink: 0 }}>
-            ({content.length} 字符)
+            ({t("common.characterCount", { count: content.length })})
           </span>
         </span>
         <span

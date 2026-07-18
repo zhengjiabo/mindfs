@@ -188,11 +188,12 @@ type StreamingExternalSessionImporter interface {
 }
 
 type ModelInfo struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	Description   string `json:"description,omitempty"`
-	Hidden        bool   `json:"hidden,omitempty"`
-	SupportEffort bool   `json:"supportEffort,omitempty"`
+	ID            string   `json:"id"`
+	Name          string   `json:"name"`
+	Description   string   `json:"description,omitempty"`
+	Hidden        bool     `json:"hidden,omitempty"`
+	SupportEffort bool     `json:"supportEffort,omitempty"`
+	Efforts       []string `json:"efforts,omitempty"`
 }
 
 type ModelList struct {

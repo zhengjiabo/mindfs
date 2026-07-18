@@ -364,8 +364,21 @@ func (s *session) handleStreamedEvents(events <-chan codexsdk.ThreadEvent) error
 		switch e := event.(type) {
 		case *codexsdk.ThreadStartedEvent:
 			s.setThreadID(e.ThreadId)
+		case *codexsdk.TurnStartedEvent:
+			continue
+		case *codexsdk.ThreadGoalUpdatedEvent:
+			s.setThreadID(e.ThreadID)
+			continue
+		case *codexsdk.ThreadGoalClearedEvent:
+			s.setThreadID(e.ThreadID)
+			continue
+		case *codexsdk.TurnDiffUpdatedEvent:
+			continue
 		case *codexsdk.ItemStartedEvent:
 			s.logRawToolItem(e.Item)
+			if _, ok := e.Item.(*codexsdk.AgentMessageItem); ok {
+				continue
+			}
 			if s.handleNonToolItem(e.Item, true) {
 				continue
 			}
@@ -730,7 +743,7 @@ func (s *session) SetModel(_ context.Context, model string) error {
 	return nil
 }
 
-func (s *session) SetPlanMode(_ context.Context, enabled bool) error {
+func (s *session) SetPlanMode(ctx context.Context, enabled bool) error {
 	if s == nil || s.client == nil {
 		return errors.New("codex session not initialized")
 	}
@@ -745,6 +758,9 @@ func (s *session) SetPlanMode(_ context.Context, enabled bool) error {
 	opts := s.threadOpts
 	opts.CollaborationMode = codexCollaborationMode(enabled)
 	thread := s.client.ResumeThread(threadID, opts)
+	if err := thread.SetCollaborationMode(ctx, opts.CollaborationMode); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	s.thread = thread
 	s.threadOpts = opts
@@ -758,7 +774,7 @@ func (s *session) ListModels(ctx context.Context) (types.ModelList, error) {
 	if s == nil || s.client == nil {
 		return types.ModelList{}, errors.New("codex session not initialized")
 	}
-	resp, err := s.client.ListModels(ctx, codexsdk.ModelListParams{})
+	resp, err := s.client.ListModels(ctx, codexListModelsParams())
 	if err != nil {
 		return types.ModelList{}, err
 	}
@@ -776,6 +792,7 @@ func (s *session) ListModels(ctx context.Context) (types.ModelList, error) {
 			Description:   model.Description,
 			Hidden:        model.Hidden,
 			SupportEffort: true,
+			Efforts:       codexModelEfforts(model.SupportedReasoningEfforts),
 		})
 		if model.IsDefault && currentModelID == "" {
 			currentModelID = model.Model
@@ -788,6 +805,28 @@ func (s *session) ListModels(ctx context.Context) (types.ModelList, error) {
 		CurrentModelID: currentModelID,
 		Models:         models,
 	}, nil
+}
+
+func codexListModelsParams() codexsdk.ModelListParams {
+	includeHidden := true
+	return codexsdk.ModelListParams{IncludeHidden: &includeHidden}
+}
+
+func codexModelEfforts(options []codexsdk.ReasoningEffortOption) []string {
+	efforts := make([]string, 0, len(options))
+	seen := make(map[string]struct{}, len(options))
+	for _, option := range options {
+		effort := strings.TrimSpace(string(option.ReasoningEffort))
+		if effort == "" || effort == "none" {
+			continue
+		}
+		if _, ok := seen[effort]; ok {
+			continue
+		}
+		seen[effort] = struct{}{}
+		efforts = append(efforts, effort)
+	}
+	return efforts
 }
 
 func (s *session) RuntimeDefaults(ctx context.Context) (types.RuntimeDefaults, error) {
@@ -935,6 +974,8 @@ func (s *session) handleRawEvent(event *codexsdk.RawEvent) bool {
 		return false
 	}
 	switch normalizeEventType(event.Type) {
+	case "thread.status.changed":
+		return true
 	case "thread.tokenUsage.updated":
 		usage, ok := parseContextWindow(event.Raw)
 		if !ok {

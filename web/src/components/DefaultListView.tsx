@@ -7,9 +7,21 @@ import {
   type FileEntry,
   sortDirectoryEntries,
 } from "../services/directorySort";
+import type { UploadProgress } from "../services/upload";
+import { useI18n, type MessageKey } from "../i18n";
+import { CompactUploadProgress } from "./CompactUploadProgress";
 
 type DirectorySortControlValue = DirectorySortMode | "inherit";
 export type MainContentViewMode = "task-kanban" | "file-browser";
+
+const sortLabelKeys: Partial<Record<DirectorySortControlValue, MessageKey>> = {
+  "name-asc": "sort.nameAsc",
+  "name-desc": "sort.nameDesc",
+  "mtime-desc": "sort.mtimeDesc",
+  "mtime-asc": "sort.mtimeAsc",
+  "size-desc": "sort.sizeDesc",
+  "size-asc": "sort.sizeAsc",
+};
 
 const ChevronRight = ({ isOpen }: { isOpen: boolean }) => (
   <svg
@@ -44,6 +56,8 @@ type DefaultListViewProps = {
   onPathClick?: (path: string) => void;
   onSortModeChange?: (mode: DirectorySortControlValue) => void;
   onUploadFiles?: (files: File[]) => void | Promise<void>;
+  onCancelUpload?: () => void;
+  uploadProgress?: UploadProgress | null;
   onRenameRoot?: (nextName: string) => Promise<boolean> | boolean;
   onRemoveRoot?: () => void;
   isGitRepo?: boolean;
@@ -199,6 +213,7 @@ function Breadcrumbs({
   onRootRenameSubmit?: () => void;
   onRootRenameCancel?: () => void;
 }) {
+  const { t } = useI18n();
   const normalizedPath =
     root && path.startsWith(root)
       ? path.slice(root.length).replace(/^\/+/, "")
@@ -307,7 +322,7 @@ function Breadcrumbs({
                 onMouseDown={(event) => event.preventDefault()}
                 onClick={onRootRenameCancel}
                 disabled={rootRenaming}
-                aria-label="取消项目重命名"
+                aria-label={t("directory.cancelRename")}
                 style={{
                   width: "22px",
                   height: "22px",
@@ -410,6 +425,8 @@ export function DefaultListView({
   onPathClick,
   onSortModeChange,
   onUploadFiles,
+  onCancelUpload,
+  uploadProgress = null,
   onRenameRoot,
   onRemoveRoot,
   isGitRepo = false,
@@ -425,6 +442,7 @@ export function DefaultListView({
   onViewModeChange,
   menuOverlay = null,
 }: DefaultListViewProps) {
+  const { t } = useI18n();
   const inputRef = React.useRef<HTMLInputElement>(null);
   const rootNameInputRef = React.useRef<HTMLInputElement>(null);
   const menuRef = React.useRef<HTMLDivElement | null>(null);
@@ -448,7 +466,12 @@ export function DefaultListView({
   const isRootView = !!root && (!!path ? path === root : true);
   const showTaskKanban = currentViewMode === "task-kanban";
   const showFileBrowser = currentViewMode === "file-browser";
-  const currentViewLabel = showTaskKanban ? "任务看板" : "文件浏览";
+  const currentViewLabel = showTaskKanban ? t("directory.taskKanban") : t("directory.fileBrowser");
+  const sortLabel = (value: DirectorySortControlValue): string => {
+    if (value === "inherit") return t("directory.followGlobal");
+    const key = sortLabelKeys[value];
+    return key ? t(key) : t("directory.defaultSort");
+  };
 
   React.useEffect(() => {
     if (!editingRoot) {
@@ -555,6 +578,17 @@ export function DefaultListView({
             }}
             onRootRenameCancel={cancelRootRename}
           />
+          {uploadProgress ? (
+          <div style={{ marginLeft: "10px", flexShrink: 0 }}>
+            <CompactUploadProgress
+              progress={uploadProgress}
+              label={t("upload.directoryProgress")}
+              statusLabel={t("upload.inProgress")}
+              cancelLabel={t("upload.cancel")}
+              onCancel={onCancelUpload}
+            />
+          </div>
+          ) : null}
         </div>
         <div
           style={{
@@ -572,7 +606,7 @@ export function DefaultListView({
                 opacity: 0.6,
               }}
             >
-              {sortedEntries.length}项
+              {t("directory.itemCount", { count: sortedEntries.length })}
             </div>
           ) : null}
           <div ref={menuRef} style={{ position: "relative" }}>
@@ -588,7 +622,7 @@ export function DefaultListView({
                   return nextOpen;
                 });
               }}
-              aria-label="打开目录菜单"
+              aria-label={t("directory.openMenu")}
               style={{
                 width: "28px",
                 height: "28px",
@@ -652,15 +686,11 @@ export function DefaultListView({
                   }}
                   aria-expanded={isSortMenuOpen}
                 >
-                  <span style={{ flex: 1 }}>当前排序</span>
+                  <span style={{ flex: 1 }}>{t("directory.currentSort")}</span>
                   <span
                     style={{ color: "var(--text-secondary)", fontSize: "11px" }}
                   >
-                    {sortControlValue === "inherit"
-                      ? "跟随全局"
-                      : DIRECTORY_SORT_OPTIONS.find(
-                          (option) => option.value === sortControlValue,
-                        )?.label || "默认"}
+                    {sortLabel(sortControlValue)}
                   </span>
                   <ChevronRight isOpen={isSortMenuOpen} />
                 </button>
@@ -694,7 +724,7 @@ export function DefaultListView({
                         fontSize: "12px",
                       }}
                     >
-                      <span>跟随全局</span>
+                      <span>{t("directory.followGlobal")}</span>
                       <span
                         style={{
                           fontSize: "11px",
@@ -736,7 +766,7 @@ export function DefaultListView({
                             fontSize: "12px",
                           }}
                         >
-                          <span>{option.label}</span>
+                          <span>{sortLabel(option.value as DirectorySortControlValue)}</span>
                           <span
                             style={{
                               fontSize: "11px",
@@ -772,7 +802,7 @@ export function DefaultListView({
                   }}
                   aria-expanded={isViewMenuOpen}
                 >
-                  <span style={{ flex: 1 }}>当前视图</span>
+                  <span style={{ flex: 1 }}>{t("directory.currentView")}</span>
                   <span
                     style={{ color: "var(--text-secondary)", fontSize: "11px" }}
                   >
@@ -783,8 +813,8 @@ export function DefaultListView({
                 {isViewMenuOpen ? (
                   <>
                     {([
-                      ["task-kanban", "任务看板"],
-                      ["file-browser", "文件浏览"],
+                      ["task-kanban", t("directory.taskKanban")],
+                      ["file-browser", t("directory.fileBrowser")],
                     ] as const).map(([mode, label]) => {
                       const active = currentViewMode === mode;
                       return (
@@ -890,7 +920,7 @@ export function DefaultListView({
                               d="M4.266 16.06a8.92 8.92 0 0 0 3.915 3.978a8.7 8.7 0 0 0 5.471.832a8.8 8.8 0 0 0 4.887-2.64a9.07 9.07 0 0 0 2.388-5.079a9.14 9.14 0 0 0-1.044-5.53a8.9 8.9 0 0 0-4.069-3.815a8.7 8.7 0 0 0-5.5-.608c-1.85.401-3.366 1.313-4.62 2.755c-.151.16-.735.806-1.22 1.781M7.5 8l-3.609.72L3 5m9 4v4l3 2"
                             />
                           </svg>
-                          <span>Git 历史</span>
+                          <span>{t("directory.gitHistory")}</span>
                         </span>
                         <span
                           style={{
@@ -925,7 +955,7 @@ export function DefaultListView({
                         }}
                       >
                         <GitBranchMenuIcon marker="plus" />
-                        <span>创建 worktree</span>
+                        <span>{t("directory.createWorktree")}</span>
                       </button>
                     ) : null}
                     {isGitRepo ? (
@@ -951,7 +981,7 @@ export function DefaultListView({
                         }}
                       >
                         <GitBranchMenuIcon marker="switch" />
-                        <span>切换 worktree</span>
+                        <span>{t("directory.switchWorktree")}</span>
                       </button>
                     ) : null}
                     {isGitWorktree ? (
@@ -977,7 +1007,7 @@ export function DefaultListView({
                         }}
                       >
                         <GitBranchMenuIcon marker="minus" />
-                        <span>移除 worktree</span>
+                        <span>{t("directory.removeWorktree")}</span>
                       </button>
                     ) : null}
                     {isGitRepo || isGitWorktree ? (
@@ -1024,7 +1054,7 @@ export function DefaultListView({
                         <circle cx="12" cy="12" r="9" />
                         <path d="M12 7v5l3 2" />
                       </svg>
-                      <span>定时任务</span>
+                      <span>{t("directory.scheduledTasks")}</span>
                     </button>
                     <button
                       type="button"
@@ -1062,7 +1092,7 @@ export function DefaultListView({
                         <path d="M12 20h9" />
                         <path d="M16.5 3.5a2.12 2.12 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
                       </svg>
-                      <span>项目重命名</span>
+                      <span>{t("directory.renameProject")}</span>
                     </button>
                     <button
                       type="button"
@@ -1099,7 +1129,7 @@ export function DefaultListView({
                         <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5.2a2 2 0 0 1 1.4.58l1.82 1.84A2 2 0 0 0 13.84 6H20a2 2 0 0 1 2 2z" />
                         <path d="M9 14h6" />
                       </svg>
-                      <span>移除项目</span>
+                      <span>{t("directory.removeProject")}</span>
                     </button>
                     <div
                       style={{
@@ -1147,7 +1177,7 @@ export function DefaultListView({
                     <path d="M12 5v14" />
                     <path d="M5 12h14" />
                   </svg>
-                  <span>上传到当前目录</span>
+                  <span>{t("directory.uploadHere")}</span>
                 </button>
               </div>
             ) : null}
@@ -1203,7 +1233,7 @@ export function DefaultListView({
                     marginBottom: "6px",
                   }}
                 >
-                  当前目录无法访问
+                  {t("directory.inaccessible")}
                 </div>
                 <div
                   style={{

@@ -10,7 +10,7 @@ import (
 	"syscall"
 )
 
-func startReplacementProcess(currentPID int, exe string, args []string, stdout, stderr io.Writer, pkgDir, dstBin, dstAgents, dstWeb string) error {
+func startReplacementProcess(currentPID int, exe string, args []string, stdout, stderr io.Writer, pkgDir, dstBin, dstAgents, dstTaskTemplate, dstWeb string) error {
 	argList := append([]string(nil), args...)
 	quotedArgs := make([]string, 0, len(argList))
 	for _, arg := range argList {
@@ -25,6 +25,7 @@ func startReplacementProcess(currentPID int, exe string, args []string, stdout, 
 		"$cleanupDir = Split-Path -Parent (Split-Path -Parent $pkgDir)",
 		"$dstBin = " + psQuote(dstBin),
 		"$dstAgents = " + psQuote(dstAgents),
+		"$dstTaskTemplate = " + psQuote(dstTaskTemplate),
 		"$dstWeb = " + psQuote(dstWeb),
 		"$argList = @(" + strings.Join(quotedArgs, ", ") + ")",
 		"for ($i = 0; $i -lt 100; $i++) {",
@@ -38,6 +39,11 @@ func startReplacementProcess(currentPID int, exe string, args []string, stdout, 
 		"if (Test-Path $srcAgents -PathType Leaf) {",
 		"  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dstAgents) | Out-Null",
 		"  Copy-Item -Force $srcAgents $dstAgents",
+		"}",
+		"$srcTaskTemplate = Join-Path $pkgDir 'task_template.json'",
+		"if (Test-Path $srcTaskTemplate -PathType Leaf) {",
+		"  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dstTaskTemplate) | Out-Null",
+		"  Copy-Item -Force $srcTaskTemplate $dstTaskTemplate",
 		"}",
 		"$srcWeb = Join-Path $pkgDir 'web'",
 		"if (Test-Path $srcWeb -PathType Container) {",

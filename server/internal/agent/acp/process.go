@@ -37,6 +37,7 @@ type Process struct {
 	sessions      map[string]*sessionState // sessionKey -> state
 	sessionsByID  map[string]*sessionState // ACP session id -> state
 	capability    CapabilitySnapshot
+	models        *acp.SessionModelState
 	modes         *acp.SessionModeState
 	configOptions []acp.SessionConfigOption
 	commands      []acp.AvailableCommand
@@ -67,6 +68,7 @@ var stderrMessagePattern = regexp.MustCompile(`"message"\s*:\s*"([^"]+)"`)
 
 type sessionState struct {
 	ID            acp.SessionId
+	models        *acp.SessionModelState
 	modes         *acp.SessionModeState
 	configOptions []acp.SessionConfigOption
 	commands      []acp.AvailableCommand
@@ -94,6 +96,18 @@ func (s *sessionState) getOnUpdate() func(SessionUpdate) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.onUpdate
+}
+
+func (s *sessionState) setModels(models *acp.SessionModelState) {
+	s.mu.Lock()
+	s.models = models
+	s.mu.Unlock()
+}
+
+func (s *sessionState) getModels() *acp.SessionModelState {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.models
 }
 
 func (s *sessionState) setModes(modes *acp.SessionModeState) {
@@ -475,6 +489,7 @@ func (p *Process) NewSession(ctx context.Context, sessionKey, cwd string) error 
 	}
 	sess := &sessionState{
 		ID:            resp.SessionId,
+		models:        resp.Models,
 		modes:         resp.Modes,
 		configOptions: cloneConfigOptions(resp.ConfigOptions),
 	}
@@ -482,6 +497,9 @@ func (p *Process) NewSession(ctx context.Context, sessionKey, cwd string) error 
 	if _, ok := p.sessions[sessionKey]; ok {
 		p.mu.Unlock()
 		return nil
+	}
+	if resp.Models != nil {
+		p.models = resp.Models
 	}
 	if resp.Modes != nil {
 		p.modes = resp.Modes
@@ -511,6 +529,7 @@ func (p *Process) ResumeSession(ctx context.Context, sessionKey, sessionID, cwd 
 	}
 	sess := &sessionState{
 		ID:            acp.SessionId(strings.TrimSpace(sessionID)),
+		models:        resp.Models,
 		configOptions: cloneConfigOptions(resp.ConfigOptions),
 	}
 	if resp.Modes != nil {
@@ -520,6 +539,9 @@ func (p *Process) ResumeSession(ctx context.Context, sessionKey, sessionID, cwd 
 	if _, ok := p.sessions[sessionKey]; ok {
 		p.mu.Unlock()
 		return nil
+	}
+	if sess.models != nil {
+		p.models = sess.models
 	}
 	if sess.modes != nil {
 		p.modes = sess.modes
@@ -664,6 +686,12 @@ func (p *Process) ConfigOptions() []acp.SessionConfigOption {
 	return cloneConfigOptions(p.configOptions)
 }
 
+func (p *Process) ModelState() *acp.SessionModelState {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.models
+}
+
 func (p *Process) ModeState() *acp.SessionModeState {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -678,7 +706,23 @@ func (p *Process) SetModel(ctx context.Context, sessionKey, model string) error 
 	options := sess.getConfigOptions()
 	option, ok := findSelectConfigOption(options, acp.SessionConfigOptionCategoryModel)
 	if !ok {
-		return nil
+		if sess.getModels() == nil {
+			return nil
+		}
+		_, err := p.conn.UnstableSetSessionModel(ctx, acp.UnstableSetSessionModelRequest{
+			SessionId: sess.ID,
+			ModelId:   acp.UnstableModelId(strings.TrimSpace(model)),
+		})
+		if err == nil {
+			if state := sess.getModels(); state != nil {
+				state.CurrentModelId = acp.ModelId(strings.TrimSpace(model))
+				sess.setModels(state)
+				p.mu.Lock()
+				p.models = state
+				p.mu.Unlock()
+			}
+		}
+		return err
 	}
 	resp, err := p.conn.SetSessionConfigOption(ctx, acp.SetSessionConfigOptionRequest{
 		ValueId: &acp.SetSessionConfigOptionValueId{
@@ -759,6 +803,14 @@ func (p *Process) SetThoughtLevel(ctx context.Context, sessionKey, effort string
 	p.configOptions = cloneConfigOptions(resp.ConfigOptions)
 	p.mu.Unlock()
 	return nil
+}
+
+func (p *Process) SessionModelState(sessionKey string) *acp.SessionModelState {
+	sess := p.getSessionByKey(sessionKey)
+	if sess == nil {
+		return nil
+	}
+	return sess.getModels()
 }
 
 func (p *Process) SessionConfigOptions(sessionKey string) []acp.SessionConfigOption {

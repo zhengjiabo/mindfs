@@ -26,6 +26,8 @@ type TemplateStore struct {
 	now func() time.Time
 }
 
+var bundledTaskTemplatePaths = defaultBundledTaskTemplatePaths
+
 func NewTemplateStore() (*TemplateStore, error) {
 	dir, err := configpkg.MindFSConfigDir()
 	if err != nil {
@@ -69,9 +71,6 @@ func (s *TemplateStore) SaveStageTemplate(in StageTemplate) (StageTemplate, erro
 	if in.Role == RoleAgent {
 		if strings.TrimSpace(in.Agent) == "" {
 			return StageTemplate{}, errors.New("agent stage requires agent")
-		}
-		if strings.TrimSpace(in.Model) == "" {
-			return StageTemplate{}, errors.New("agent stage requires model")
 		}
 	}
 	if in.ID == "" {
@@ -189,9 +188,6 @@ func (s *TemplateStore) SaveTaskTemplate(in TaskTemplate) (TaskTemplate, error) 
 			if strings.TrimSpace(in.Stages[i].Snapshot.Agent) == "" {
 				return TaskTemplate{}, errors.New("agent stage requires agent")
 			}
-			if strings.TrimSpace(in.Stages[i].Snapshot.Model) == "" {
-				return TaskTemplate{}, errors.New("agent stage requires model")
-			}
 		}
 	}
 	if in.MaxConcurrency <= 0 {
@@ -250,13 +246,85 @@ func (s *TemplateStore) loadStageTemplatesLocked() ([]StageTemplate, error) {
 
 func (s *TemplateStore) loadTaskTemplatesLocked() ([]TaskTemplate, error) {
 	var items []TaskTemplate
-	if err := s.loadJSONLocked(taskTemplateFile, &items); err != nil {
+	path := filepath.Join(s.dir, taskTemplateFile)
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		items, err = loadBundledTaskTemplates()
+		if err != nil {
+			return nil, err
+		}
+		if len(items) > 0 {
+			if err := s.saveJSONLocked(taskTemplateFile, items); err != nil {
+				return nil, err
+			}
+		}
+		return items, nil
+	}
+	if err != nil {
 		return nil, err
+	}
+	if len(strings.TrimSpace(string(data))) > 0 {
+		if err := json.Unmarshal(data, &items); err != nil {
+			return nil, err
+		}
 	}
 	if items == nil {
 		items = []TaskTemplate{}
 	}
 	return items, nil
+}
+
+func loadBundledTaskTemplates() ([]TaskTemplate, error) {
+	for _, path := range bundledTaskTemplatePaths() {
+		data, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if len(strings.TrimSpace(string(data))) == 0 {
+			return []TaskTemplate{}, nil
+		}
+		var items []TaskTemplate
+		if err := json.Unmarshal(data, &items); err != nil {
+			return nil, err
+		}
+		if items == nil {
+			items = []TaskTemplate{}
+		}
+		return items, nil
+	}
+	return []TaskTemplate{}, nil
+}
+
+func defaultBundledTaskTemplatePaths() []string {
+	paths := []string{}
+	if exe, err := os.Executable(); err == nil {
+		exeDir := filepath.Dir(exe)
+		paths = append(paths,
+			filepath.Join(exeDir, taskTemplateFile),
+			filepath.Join(filepath.Dir(exeDir), "share", "mindfs", taskTemplateFile),
+		)
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		paths = append(paths, filepath.Join(cwd, taskTemplateFile))
+	}
+	return uniqueNonEmptyPaths(paths)
+}
+
+func uniqueNonEmptyPaths(paths []string) []string {
+	out := make([]string, 0, len(paths))
+	seen := map[string]bool{}
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path == "" || seen[path] {
+			continue
+		}
+		seen[path] = true
+		out = append(out, path)
+	}
+	return out
 }
 
 func (s *TemplateStore) loadJSONLocked(name string, out any) error {

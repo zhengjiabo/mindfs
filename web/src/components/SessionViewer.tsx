@@ -1,4 +1,4 @@
-import React, { memo, useEffect, useMemo, useRef, useState } from "react";
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSessionStream, type TimelineItem } from "../hooks/useSessionStream";
 import type { TodoUpdate } from "../services/session";
 import { ThinkingBlock } from "./stream/ThinkingBlock";
@@ -13,6 +13,7 @@ import { reportError } from "../services/error";
 import { rootBadgeButtonStyle } from "./rootBadgeStyle";
 import { copyText } from "../services/clipboard";
 import type { AgentStatus } from "../services/agents";
+import { useI18n, type Locale } from "../i18n";
 
 type SessionItem = {
   key?: string;
@@ -161,7 +162,7 @@ function AttachmentImage({
   );
 }
 
-const uploadTokenPattern = /\[read file:\s*([^\]]+)\]/g;
+const uploadTokenPattern = /\[(?:read file|file):\s*([^\]]+)\]/g;
 
 function basename(path: string): string {
   const normalized = (path || "").replace(/\\/g, "/");
@@ -326,14 +327,14 @@ function ContextWindowBadge({
   );
 }
 
-const formatTime = (isoString?: string) => {
+const formatTime = (isoString: string | undefined, locale: Locale) => {
   if (!isoString) return "";
   try {
     const date = new Date(isoString);
     const now = new Date();
     const isToday = date.toDateString() === now.toDateString();
     const isThisYear = date.getFullYear() === now.getFullYear();
-    const timeStr = date.toLocaleTimeString([], {
+    const timeStr = date.toLocaleTimeString(locale, {
       hour: "2-digit",
       minute: "2-digit",
       hour12: false,
@@ -566,6 +567,15 @@ function getAskUserAnswers(toolCall: Partial<ToolCall>): Record<string, string> 
   return answers;
 }
 
+function askUserQuestionTitle(question?: AskUserQuestionItem): string {
+  const questionText = `${question?.question || ""}`.trim();
+  const header = `${question?.header || ""}`.trim();
+  if (header && questionText) {
+    return `${header}：${questionText}`;
+  }
+  return questionText || header;
+}
+
 function AskUserIcon() {
   return (
     <svg
@@ -627,6 +637,7 @@ function AskUserQuestionCard({
   active: boolean;
   onAnswer?: SessionViewerProps["onAskUserAnswer"];
 }) {
+  const { t } = useI18n();
   const questions = getAskUserQuestions(toolCall);
   const [focusedCustomAnswerKey, setFocusedCustomAnswerKey] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -642,16 +653,11 @@ function AskUserQuestionCard({
   const hasPersistedAnswers = Object.keys(persistedAnswers).length > 0;
   const [answers, setAnswers] = useState<Record<string, string>>(persistedAnswers);
   const [submitted, setSubmitted] = useState(hasPersistedAnswers);
-  const firstQuestion = questions[0] || {};
-  const questionTitle = `${firstQuestion.question || ""}`.trim();
-  const questionHeader = `${firstQuestion.header || ""}`.trim();
+  const firstQuestionTitle = askUserQuestionTitle(questions[0]);
   const title =
-    questionHeader && questionTitle
-      ? `${questionHeader}：${questionTitle}`
-      : questionTitle ||
+    firstQuestionTitle ||
     `${toolCall.title || ""}`.trim() ||
     (typeof toolCall.meta?.title === "string" ? toolCall.meta.title : "") ||
-    questionHeader ||
     "ask user";
   const canSubmit =
     !!rootId &&
@@ -728,6 +734,7 @@ function AskUserQuestionCard({
           gap: "6px",
           minWidth: 0,
         }}
+        title={title}
       >
         <AskUserIcon />
         <span
@@ -736,10 +743,12 @@ function AskUserQuestionCard({
             flex: 1,
             fontWeight: 500,
             color: "var(--text-primary)",
-            whiteSpace: "nowrap",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
+            whiteSpace: expanded ? "normal" : "nowrap",
+            overflow: expanded ? "visible" : "hidden",
+            textOverflow: expanded ? "clip" : "ellipsis",
             textAlign: "left",
+            overflowWrap: "anywhere",
+            lineHeight: 1.35,
           }}
         >
           {title}
@@ -789,8 +798,22 @@ function AskUserQuestionCard({
             const customAnswer = hasOptionSelection ? "" : selected;
             const customAnswerActive =
               customAnswer.trim() !== "" || focusedCustomAnswerKey === key;
+            const itemTitle = askUserQuestionTitle(question);
             return (
               <div key={key} style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                {itemTitle ? (
+                  <div
+                    style={{
+                      fontSize: "13px",
+                      fontWeight: 700,
+                      color: "var(--text-primary)",
+                      lineHeight: 1.45,
+                      overflowWrap: "anywhere",
+                    }}
+                  >
+                    {itemTitle}
+                  </div>
+                ) : null}
                 {options.length > 0 ? (
                   <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
                     {options.map((option) => {
@@ -844,7 +867,7 @@ function AskUserQuestionCard({
                       onFocus={() => setFocusedCustomAnswerKey(key)}
                       onBlur={() => setFocusedCustomAnswerKey((current) => (current === key ? "" : current))}
                       onChange={(event) => setAnswer(index, event.target.value)}
-                      placeholder="输入自定义回答..."
+                      placeholder={t("session.askCustomAnswer")}
                       rows={2}
                       style={{
                         width: "100%",
@@ -867,7 +890,7 @@ function AskUserQuestionCard({
                     value={selected}
                     disabled={submitted}
                     onChange={(event) => setAnswer(index, event.target.value)}
-                    placeholder="输入回答..."
+                    placeholder={t("session.askAnswer")}
                     rows={3}
                     style={{
                       width: "100%",
@@ -911,7 +934,7 @@ function AskUserQuestionCard({
             cursor: canSubmit ? "pointer" : "default",
           }}
         >
-          {submitted ? "已提交" : submitting ? "提交中..." : "提交回答"}
+          {submitted ? t("session.askSubmitted") : submitting ? t("session.askSubmitting") : t("session.askSubmit")}
         </button>
         </div>
       ) : null}
@@ -973,12 +996,12 @@ function shouldDefaultCollapseRelatedFiles(
 
 const USER_MESSAGE_SUMMARY_LENGTH = 48;
 
-function normalizeUserMessageSummary(content: string): string {
+function normalizeUserMessageSummary(content: string, emptyLabel: string): string {
   const text = stripUploadAttachmentTokens(content || "")
     .replace(/\s+/g, " ")
     .trim();
   if (!text) {
-    return "空消息";
+    return emptyLabel;
   }
   return text.length > USER_MESSAGE_SUMMARY_LENGTH
     ? `${text.slice(0, USER_MESSAGE_SUMMARY_LENGTH)}...`
@@ -1012,6 +1035,7 @@ function SessionViewerInner({
   onForkAgentMessage,
   agents,
 }: SessionViewerProps) {
+  const { locale, t } = useI18n();
   const [showAllFiles, setShowAllFiles] = useState(false);
   const [relatedFilesCollapsed, setRelatedFilesCollapsed] = useState(false);
   const [isMobile, setIsMobile] = useState(() => {
@@ -1033,6 +1057,7 @@ function SessionViewerInner({
   const copyResetTimersRef = useRef<Record<string, number>>({});
   const relatedFilesDefaultStateRef = useRef<string>("");
   const userSummaryRootRef = useRef<HTMLDivElement | null>(null);
+  const userSummaryListRef = useRef<HTMLDivElement | null>(null);
   const sessionKey = session?.key || session?.session_key || null;
   const exchanges = Array.isArray(session?.exchanges) ? session.exchanges : [];
   const isAwaiting = !!(session as any)?.pending;
@@ -1051,6 +1076,7 @@ function SessionViewerInner({
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [userSummaryHoverOpen, setUserSummaryHoverOpen] = useState(false);
   const [userSummaryPinnedOpen, setUserSummaryPinnedOpen] = useState(false);
+  const [currentUserMessageIndex, setCurrentUserMessageIndex] = useState(0);
   const viewportStickFrameRef = useRef<number | null>(null);
 
   const cancelTargetSeqScroll = () => {
@@ -1095,6 +1121,7 @@ function SessionViewerInner({
     setCopiedMessageKeys({});
     setUserSummaryHoverOpen(false);
     setUserSummaryPinnedOpen(false);
+    setCurrentUserMessageIndex(0);
     relatedFilesDefaultStateRef.current = "";
     Object.values(copyResetTimersRef.current).forEach((timer) =>
       window.clearTimeout(timer),
@@ -1109,11 +1136,61 @@ function SessionViewerInner({
         .map((item, index) => ({
           id: item.id || `user-${index}`,
           index: index + 1,
-          summary: normalizeUserMessageSummary(item.content || ""),
+          summary: normalizeUserMessageSummary(item.content || "", t("session.emptyMessage")),
         })),
-    [timeline],
+    [timeline, t],
   );
   const userSummaryOpen = userSummaryHoverOpen || userSummaryPinnedOpen;
+
+  const readCurrentUserMessageIndex = useCallback(() => {
+    const container = scrollRef.current;
+    if (!container) {
+      return 0;
+    }
+    const nodes = Array.from(
+      container.querySelectorAll<HTMLElement>("[data-user-message-index]"),
+    );
+    if (nodes.length === 0) {
+      return 0;
+    }
+    const containerRect = container.getBoundingClientRect();
+    const viewportTop = containerRect.top;
+    const viewportBottom = containerRect.bottom;
+    let firstVisible = 0;
+    let firstFullyEntered = 0;
+    let lastBeforeViewport = 0;
+    for (const node of nodes) {
+      const index = Number(node.dataset.userMessageIndex || 0);
+      if (!index) {
+        continue;
+      }
+      const rect = node.getBoundingClientRect();
+      if (rect.bottom < viewportTop) {
+        lastBeforeViewport = index;
+        continue;
+      }
+      if (rect.top > viewportBottom) {
+        break;
+      }
+      const isVisible = rect.bottom >= viewportTop && rect.top <= viewportBottom;
+      if (isVisible && !firstVisible) {
+        firstVisible = index;
+      }
+      if (rect.top >= viewportTop && !firstFullyEntered) {
+        firstFullyEntered = index;
+      }
+    }
+    return (
+      firstFullyEntered ||
+      firstVisible ||
+      lastBeforeViewport ||
+      Number(nodes[0]?.dataset.userMessageIndex || 0)
+    );
+  }, []);
+
+  const refreshCurrentUserMessageIndex = useCallback(() => {
+    setCurrentUserMessageIndex(readCurrentUserMessageIndex());
+  }, [readCurrentUserMessageIndex]);
 
   const scrollToUserMessageSummary = (index: number) => {
     const container = scrollRef.current;
@@ -1146,7 +1223,27 @@ function SessionViewerInner({
     setShowJumpToLatest(nextTop < maxTop - 40);
     setUserSummaryPinnedOpen(false);
     setUserSummaryHoverOpen(false);
+    setCurrentUserMessageIndex(index);
   };
+
+  useEffect(() => {
+    if (!userSummaryOpen) {
+      return;
+    }
+    const nextIndex = readCurrentUserMessageIndex();
+    setCurrentUserMessageIndex(nextIndex);
+    if (!nextIndex) {
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      const list = userSummaryListRef.current;
+      const item = list?.querySelector<HTMLElement>(
+        `[data-user-summary-index="${nextIndex}"]`,
+      );
+      item?.scrollIntoView({ block: "center" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [readCurrentUserMessageIndex, userSummaryOpen, userMessageSummaries.length]);
 
   useEffect(() => {
     if (!userSummaryOpen) {
@@ -1261,6 +1358,7 @@ if (useInnerScrollContainer && !container) {
         shouldStickToBottomRef.current = true;
       }
       setShowJumpToLatest(!shouldStickToBottomRef.current);
+      refreshCurrentUserMessageIndex();
       lastScrollTop = el.scrollTop;
     };
     updateStickiness();
@@ -1268,7 +1366,7 @@ if (useInnerScrollContainer && !container) {
     return () => {
       el.removeEventListener("scroll", updateStickiness);
     };
-  }, [sessionKey, useInnerScrollContainer]);
+  }, [refreshCurrentUserMessageIndex, sessionKey, useInnerScrollContainer]);
 
   useEffect(() => {
     if (!targetSeq) {
@@ -1411,7 +1509,7 @@ if (useInnerScrollContainer && !container) {
           color: "var(--text-secondary)",
         }}
       >
-        选择一个会话查看内容
+        {t("session.empty")}
       </div>
     );
   }
@@ -1433,7 +1531,7 @@ if (useInnerScrollContainer && !container) {
     const normalizedRepoPath = String(rawRepoPath || "").replace(/[\\/]+$/, "");
     const isCurrentRepoRecord =
       !rawRepoPath ||
-      file.repo_name === "当前项目" ||
+      file.repo_name === t("session.currentProject") ||
       (!!currentRootPath && normalizedRepoPath === currentRootPath);
     const repoPath = isCurrentRepoRecord ? "" : rawRepoPath;
     const rawRepoKind = file.repo_kind || "";
@@ -1445,8 +1543,8 @@ if (useInnerScrollContainer && !container) {
         key: repoKey,
         repoPath,
         repoName: isCurrentRepoRecord
-          ? "当前项目"
-          : file.repo_name || repoPath.split(/[\\/]/).filter(Boolean).pop() || "当前项目",
+          ? t("session.currentProject")
+          : file.repo_name || repoPath.split(/[\\/]/).filter(Boolean).pop() || t("session.currentProject"),
         repoKind,
         headGroups: [],
       };
@@ -1603,7 +1701,7 @@ if (useInnerScrollContainer && !container) {
       !isUser &&
       (hasFollowingAssistantFlow ||
         (isStreaming && idx === timeline.length - 1));
-    const time = formatTime(item.timestamp);
+    const time = formatTime(item.timestamp, locale);
     const uploadAttachments = isUser
       ? extractUploadAttachments(item.content || "")
       : [];
@@ -1770,7 +1868,7 @@ if (useInnerScrollContainer && !container) {
             >
               {item.pendingAck ? (
                 <span
-                  aria-label="发送中"
+                  aria-label={t("session.sending")}
                   style={{
                     width: "8px",
                     height: "8px",
@@ -1789,15 +1887,15 @@ if (useInnerScrollContainer && !container) {
                   onEditUserMessage?.(item.content || "");
                 }}
                 style={userMetaButtonStyle}
-                aria-label="编辑消息"
-                title="编辑消息"
+                aria-label={t("session.editMessage")}
+                title={t("session.editMessage")}
               >
                 {renderToolIcon("edit")}
               </button>
               {promptSaved ? (
                 <span
-                  aria-label="已添加提示词"
-                  title="已添加提示词"
+                  aria-label={t("session.promptSaved")}
+                  title={t("session.promptSaved")}
                   style={{
                     ...userMetaButtonStyle,
                     color: "#2563eb",
@@ -1813,7 +1911,7 @@ if (useInnerScrollContainer && !container) {
                     if (!promptSaveContent) {
                       reportError(
                         "file.write_failed",
-                        "消息内容为空，无法加入常用提示词",
+                        t("session.emptyPromptCannotSave"),
                       );
                       return;
                     }
@@ -1827,13 +1925,13 @@ if (useInnerScrollContainer && !container) {
                       .catch((err) => {
                         reportError(
                           "file.write_failed",
-                          String((err as Error)?.message || "保存提示词失败"),
+                          String((err as Error)?.message || t("session.savePromptFailed")),
                         );
                       });
                   }}
                   style={userMetaButtonStyle}
-                  aria-label="加入常用提示词"
-                  title="加入常用提示词"
+                  aria-label={t("session.addPrompt")}
+                  title={t("session.addPrompt")}
                 >
                   <svg
                     xmlns="http://www.w3.org/2000/svg"
@@ -1856,7 +1954,7 @@ if (useInnerScrollContainer && !container) {
                 type="button"
                 onClick={() => {
                   if (!promptSaveContent) {
-                    reportError("clipboard.write_failed", "消息内容为空，无法复制");
+                    reportError("clipboard.write_failed", t("session.emptyMessageCannotCopy"));
                     return;
                   }
                   const markCopied = () => {
@@ -1881,13 +1979,13 @@ if (useInnerScrollContainer && !container) {
                     .catch((err) => {
                       reportError(
                         "clipboard.write_failed",
-                        String((err as Error)?.message || "复制失败"),
+                        String((err as Error)?.message || t("session.copyFailed")),
                       );
                     });
                 }}
                 style={userMetaButtonStyle}
-                aria-label="复制消息"
-                title="复制消息"
+                aria-label={t("session.copyMessage")}
+                title={t("session.copyMessage")}
               >
                 {copySucceeded ? (
                   <span
@@ -1962,7 +2060,7 @@ if (useInnerScrollContainer && !container) {
                     if (!assistantMarkdownContent) {
                       reportError(
                         "clipboard.write_failed",
-                        "消息内容为空，无法复制",
+                        t("session.emptyMessageCannotCopy"),
                       );
                       return;
                     }
@@ -1990,13 +2088,13 @@ if (useInnerScrollContainer && !container) {
                       .catch((err) => {
                         reportError(
                           "clipboard.write_failed",
-                          String((err as Error)?.message || "复制失败"),
+                          String((err as Error)?.message || t("session.copyFailed")),
                         );
                       });
                   }}
                   style={userMetaButtonStyle}
-                  aria-label="复制 Markdown"
-                  title="复制 Markdown"
+                  aria-label={t("session.copyMarkdown")}
+                  title={t("session.copyMarkdown")}
                 >
                   {copySucceeded ? (
                     <span
@@ -2038,8 +2136,8 @@ if (useInnerScrollContainer && !container) {
                       }
                     }}
                     style={userMetaButtonStyle}
-                    aria-label="从此消息 fork"
-                    title="从此消息 fork"
+                    aria-label={t("session.forkFromMessage")}
+                    title={t("session.forkFromMessage")}
                   >
                     <ForkIcon />
                   </button>
@@ -2074,8 +2172,8 @@ if (useInnerScrollContainer && !container) {
       slashCommandResult.content ||
       (slashCommandResult.status === "running"
         ? isLogin
-          ? "等待登录完成..."
-          : "正在获取状态..."
+          ? t("session.loginWaiting")
+          : t("session.statusFetching")
         : "");
     const loginCodeCopyKey = loginNotice?.loginId
       ? `login-code:${loginNotice.loginId}`
@@ -2111,10 +2209,10 @@ if (useInnerScrollContainer && !container) {
           </span>
           <span>
             {slashCommandResult.status === "running"
-              ? "运行中"
+              ? t("session.statusRunning")
               : slashCommandResult.status === "failed"
-                ? "失败"
-                : "完成"}
+                ? t("session.statusFailed")
+                : t("session.statusComplete")}
           </span>
         </div>
         {isLogin && loginNotice?.userCode ? (
@@ -2160,7 +2258,7 @@ if (useInnerScrollContainer && !container) {
                 onClick={() => {
                   const userCode = loginNotice.userCode || "";
                   if (!userCode) {
-                    reportError("clipboard.write_failed", "验证码为空，无法复制");
+                    reportError("clipboard.write_failed", t("session.emptyCodeCannotCopy"));
                     return;
                   }
                   void copyText(userCode)
@@ -2187,7 +2285,7 @@ if (useInnerScrollContainer && !container) {
                     .catch((err) => {
                       reportError(
                         "clipboard.write_failed",
-                        String((err as Error)?.message || "复制失败"),
+                        String((err as Error)?.message || t("session.copyFailed")),
                       );
                     });
                 }}
@@ -2204,8 +2302,8 @@ if (useInnerScrollContainer && !container) {
                   padding: 0,
                   cursor: "pointer",
                 }}
-                aria-label={loginCodeCopied ? "已复制验证码" : "复制验证码"}
-                title={loginCodeCopied ? "已复制" : "复制验证码"}
+                aria-label={loginCodeCopied ? t("session.codeCopied") : t("session.copyCode")}
+                title={loginCodeCopied ? t("session.copied") : t("session.copyCode")}
               >
                 {loginCodeCopied ? (
                   <span
@@ -2236,7 +2334,7 @@ if (useInnerScrollContainer && !container) {
             </div>
             {slashCommandResult.status === "complete" ? (
               <div style={{ color: "var(--text-secondary)" }}>
-                登录完成
+                {t("session.loginComplete")}
                 {loginNotice.planType ? ` · ${loginNotice.planType}` : ""}
               </div>
             ) : null}
@@ -2397,12 +2495,11 @@ if (useInnerScrollContainer && !container) {
                   }}
                 />
                 {isStreaming
-                  ? streamStatusText || "正在生成..."
-                  : "已发送，等待响应..."}
+                  ? streamStatusText || t("session.generating")
+                  : t("session.sentWaiting")}
               </div>
             )}
 
-            {/* 关联文件区域 */}
             {relatedFiles.length > 0 && (
               <div
                 style={{
@@ -2437,7 +2534,7 @@ if (useInnerScrollContainer && !container) {
                     outline: "none",
                   }}
                 >
-                  <span>关联文件 {relatedFiles.length}</span>
+                  <span>{t("session.relatedFiles", { count: relatedFiles.length })}</span>
                   <div
                     style={{
                       display: "inline-flex",
@@ -2461,7 +2558,7 @@ if (useInnerScrollContainer && !container) {
                           fontSize: "11px",
                         }}
                       >
-                        {showAllFiles ? "收起" : "更多"}
+                        {showAllFiles ? t("session.less") : t("session.more")}
                       </button>
                     ) : null}
                     <button
@@ -2471,10 +2568,10 @@ if (useInnerScrollContainer && !container) {
                         setRelatedFilesCollapsed((value) => !value)
                       }}
                       aria-label={
-                        relatedFilesCollapsed ? "展开关联文件" : "折叠关联文件"
+                        relatedFilesCollapsed ? t("session.expandRelatedFiles") : t("session.collapseRelatedFiles")
                       }
                       title={
-                        relatedFilesCollapsed ? "展开关联文件" : "折叠关联文件"
+                        relatedFilesCollapsed ? t("session.expandRelatedFiles") : t("session.collapseRelatedFiles")
                       }
                       style={{
                         border: "none",
@@ -2533,7 +2630,7 @@ if (useInnerScrollContainer && !container) {
                       const normalizedRootPath = String(rootPath || "").replace(/[\\/]+$/, "");
                       const isCurrentRepo =
                         !group.repoPath ||
-                        group.repoName === "当前项目" ||
+                        group.repoName === t("session.currentProject") ||
                         normalizedRepoPath === normalizedRootPath;
                       const showGroupHeader = group.repoKind === "plain" || group.head || !isCurrentRepo;
                       return (
@@ -2547,7 +2644,7 @@ if (useInnerScrollContainer && !container) {
                         >
                           {showGroupHeader ? (
                             <div
-                              title={[group.repoPath, group.head].filter(Boolean).join(" · ") || group.repoName || "当前项目"}
+                              title={[group.repoPath, group.head].filter(Boolean).join(" · ") || group.repoName || t("session.currentProject")}
                               style={{
                                 padding: "2px 6px 0",
                                 fontSize: "11px",
@@ -2558,12 +2655,12 @@ if (useInnerScrollContainer && !container) {
                               }}
                             >
                               {group.repoKind === "plain"
-                                ? `${group.repoName || "当前项目"} · 非 Git`
+                                ? `${group.repoName || t("session.currentProject")} · ${t("session.nonGit")}`
                                 : group.head
                                   ? isCurrentRepo
                                     ? `HEAD ${group.head.slice(0, 8)}`
-                                    : `${group.repoName || "当前项目"} · HEAD ${group.head.slice(0, 8)}`
-                                  : group.repoName || "当前项目"}
+                                    : `${group.repoName || t("session.currentProject")} · HEAD ${group.head.slice(0, 8)}`
+                                  : group.repoName || t("session.currentProject")}
                             </div>
                           ) : null}
                           {group.files.map((file) => (
@@ -2661,7 +2758,7 @@ if (useInnerScrollContainer && !container) {
                             </div>
                             <button
                               type="button"
-                              aria-label={`移除关联文件 ${file.name}`}
+                              aria-label={t("session.removeRelatedFile", { name: file.name || file.path })}
                               onClick={(event) => {
                                 event.stopPropagation();
                                 onRemoveRelatedFile?.(
@@ -2722,8 +2819,8 @@ if (useInnerScrollContainer && !container) {
                   setShowJumpToLatest(false);
                   stickSessionToBottom("smooth");
                 }}
-                aria-label="回到底部最新消息"
-                title="回到底部最新消息"
+                aria-label={t("session.jumpLatest")}
+                title={t("session.jumpLatest")}
                 style={{
                   display: "inline-flex",
                   alignItems: "center",
@@ -2740,13 +2837,16 @@ if (useInnerScrollContainer && !container) {
                   whiteSpace: "nowrap",
                 }}
               >
-                <span>回到底部</span>
+                <span>{t("session.jumpBottom")}</span>
               </button>
             ) : null}
             {userMessageSummaries.length > 0 ? (
               <div
                 ref={userSummaryRootRef}
-                onMouseEnter={() => setUserSummaryHoverOpen(true)}
+                onMouseEnter={() => {
+                  refreshCurrentUserMessageIndex();
+                  setUserSummaryHoverOpen(true);
+                }}
                 onMouseLeave={() => setUserSummaryHoverOpen(false)}
                 style={{
                   position: "relative",
@@ -2767,7 +2867,7 @@ if (useInnerScrollContainer && !container) {
                     />
                     <div
                       role="dialog"
-                      aria-label="用户消息摘要"
+                      aria-label={t("session.userSummary")}
                       style={{
                         position: "absolute",
                         right: 0,
@@ -2784,47 +2884,58 @@ if (useInnerScrollContainer && !container) {
                         boxSizing: "border-box",
                       }}
                     >
-                      <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
-                        {userMessageSummaries.map((item) => (
-                          <button
-                            key={item.id}
-                            type="button"
-                            onClick={() => scrollToUserMessageSummary(item.index)}
-                            style={{
-                              width: "100%",
-                              border: "none",
-                              background: "transparent",
-                              display: "block",
-                              padding: "6px 8px",
-                              borderRadius: "6px",
-                              cursor: "pointer",
-                              textAlign: "left",
-                              color: "var(--text-primary)",
-                            }}
-                            onMouseEnter={(event) => {
-                              event.currentTarget.style.background = "var(--menu-active-bg)";
-                            }}
-                            onMouseLeave={(event) => {
-                              event.currentTarget.style.background = "transparent";
-                            }}
-                          >
-                            <span
-                              title={item.summary}
+                      <div
+                        ref={userSummaryListRef}
+                        style={{ display: "flex", flexDirection: "column", gap: "2px" }}
+                      >
+                        {userMessageSummaries.map((item) => {
+                          const isCurrent = item.index === currentUserMessageIndex;
+                          return (
+                            <button
+                              key={item.id}
+                              type="button"
+                              data-user-summary-index={item.index}
+                              onClick={() => scrollToUserMessageSummary(item.index)}
                               style={{
+                                width: "100%",
+                                border: "none",
+                                background: isCurrent
+                                  ? "rgba(148, 163, 184, 0.22)"
+                                  : "transparent",
                                 display: "block",
-                                minWidth: 0,
-                                fontSize: "12px",
-                                lineHeight: "18px",
+                                padding: "6px 8px",
+                                borderRadius: "6px",
+                                cursor: "pointer",
+                                textAlign: "left",
                                 color: "var(--text-primary)",
-                                overflow: "hidden",
-                                textOverflow: "ellipsis",
-                                whiteSpace: "nowrap",
+                              }}
+                              onMouseEnter={(event) => {
+                                event.currentTarget.style.background = "var(--menu-active-bg)";
+                              }}
+                              onMouseLeave={(event) => {
+                                event.currentTarget.style.background = isCurrent
+                                  ? "rgba(148, 163, 184, 0.22)"
+                                  : "transparent";
                               }}
                             >
-                              {item.summary}
-                            </span>
-                          </button>
-                        ))}
+                              <span
+                                title={item.summary}
+                                style={{
+                                  display: "block",
+                                  minWidth: 0,
+                                  fontSize: "12px",
+                                  lineHeight: "18px",
+                                  color: "var(--text-primary)",
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
+                                  whiteSpace: "nowrap",
+                                }}
+                              >
+                                {item.summary}
+                              </span>
+                            </button>
+                          );
+                        })}
                       </div>
                     </div>
                   </>
@@ -2832,6 +2943,7 @@ if (useInnerScrollContainer && !container) {
                 <button
                   type="button"
                   onClick={() => {
+                    refreshCurrentUserMessageIndex();
                     setUserSummaryPinnedOpen((open) => {
                       const nextOpen = !open;
                       if (!nextOpen) {
@@ -2840,8 +2952,8 @@ if (useInnerScrollContainer && !container) {
                       return nextOpen;
                     });
                   }}
-                  aria-label={userSummaryOpen ? "隐藏用户消息摘要" : "显示用户消息摘要"}
-                  title={userSummaryOpen ? "隐藏用户消息摘要" : "显示用户消息摘要"}
+                  aria-label={userSummaryOpen ? t("session.hideUserSummary") : t("session.showUserSummary")}
+                  title={userSummaryOpen ? t("session.hideUserSummary") : t("session.showUserSummary")}
                   style={{
                     position: "relative",
                     width: "34px",

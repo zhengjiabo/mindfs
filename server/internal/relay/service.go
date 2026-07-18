@@ -29,6 +29,7 @@ const (
 )
 
 const relayDeviceIDHeader = "X-MindFS-Device-ID"
+const relayNodeNameHeader = "X-MindFS-Relay-Node-Name"
 
 type Service struct {
 	localAddr string
@@ -40,9 +41,11 @@ type Service struct {
 }
 
 type credentialResponse struct {
-	DeviceToken string `json:"device_token"`
-	NodeID      string `json:"node_id"`
-	Endpoint    string `json:"endpoint"`
+	DeviceToken       string `json:"device_token"`
+	NodeID            string `json:"node_id"`
+	NodeName          string `json:"node_name"`
+	Endpoint          string `json:"endpoint"`
+	TokenStationToken string `json:"token_station_token"`
 }
 
 type bindPollResponse struct {
@@ -52,9 +55,45 @@ type bindPollResponse struct {
 }
 
 type BindPollResult struct {
-	Status        string
-	NextPollAfter time.Duration
-	Credentials   RelayCredentials
+	Status            string
+	NextPollAfter     time.Duration
+	Credentials       RelayCredentials
+	TokenStationToken string
+}
+
+type relayDialError struct {
+	statusCode int
+	status     string
+	errorCode  string
+	err        error
+}
+
+func (e *relayDialError) Error() string {
+	if e == nil {
+		return ""
+	}
+	status := strings.TrimSpace(e.status)
+	if status == "" && e.statusCode > 0 {
+		status = fmt.Sprintf("HTTP %d", e.statusCode)
+	}
+	message := "relay websocket dial failed"
+	if status != "" {
+		message += ": " + status
+	}
+	if e.errorCode != "" {
+		message += ": " + e.errorCode
+	}
+	if e.err != nil {
+		message += ": " + e.err.Error()
+	}
+	return message
+}
+
+func (e *relayDialError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
 }
 
 func NewService(localAddr string, useTLS bool) (*Service, error) {
@@ -139,7 +178,11 @@ func (s *Service) Run(ctx context.Context) error {
 }
 
 func (s *Service) PollBind(ctx context.Context, baseURL, pendingCode string) (BindPollResult, error) {
-	pollURL, err := buildBindPollURL(baseURL, pendingCode)
+	return s.PollBindPurpose(ctx, baseURL, pendingCode, "")
+}
+
+func (s *Service) PollBindPurpose(ctx context.Context, baseURL, pendingCode, purpose string) (BindPollResult, error) {
+	pollURL, err := buildBindPollURL(baseURL, pendingCode, purpose)
 	if err != nil {
 		return BindPollResult{}, err
 	}
@@ -172,8 +215,10 @@ func (s *Service) PollBind(ctx context.Context, baseURL, pendingCode string) (Bi
 		result.Credentials = RelayCredentials{
 			DeviceToken: strings.TrimSpace(out.DeviceToken),
 			NodeID:      strings.TrimSpace(out.NodeID),
+			NodeName:    strings.TrimSpace(out.NodeName),
 			Endpoint:    strings.TrimSpace(out.Endpoint),
 		}
+		result.TokenStationToken = strings.TrimSpace(out.TokenStationToken)
 	}
 	return result, nil
 }
@@ -192,7 +237,7 @@ func (s *Service) attachDeviceID(req *http.Request) error {
 	return nil
 }
 
-func buildBindPollURL(baseURL, pendingCode string) (string, error) {
+func buildBindPollURL(baseURL, pendingCode string, purpose ...string) (string, error) {
 	baseURL = strings.TrimSuffix(strings.TrimSpace(baseURL), "/")
 	pendingCode = strings.TrimSpace(pendingCode)
 	if baseURL == "" {
@@ -210,6 +255,9 @@ func buildBindPollURL(baseURL, pendingCode string) (string, error) {
 		u.Path = strings.TrimSuffix(u.Path, "/") + "/api/bind/poll"
 		q := u.Query()
 		q.Set("code", pendingCode)
+		if len(purpose) > 0 && strings.TrimSpace(purpose[0]) != "" {
+			q.Set("purpose", strings.TrimSpace(purpose[0]))
+		}
 		u.RawQuery = q.Encode()
 		u.Fragment = ""
 		return u.String(), nil
@@ -218,17 +266,80 @@ func buildBindPollURL(baseURL, pendingCode string) (string, error) {
 	}
 }
 
+func (s *Service) FetchTokenStationUserInfo(ctx context.Context, baseURL string, creds Credentials, purpose string) (map[string]any, error) {
+	baseURL = strings.TrimSuffix(strings.TrimSpace(baseURL), "/")
+	if baseURL == "" {
+		return nil, errors.New("relay base URL required")
+	}
+	token := strings.TrimSpace(creds.Relay.DeviceToken)
+	if token == "" {
+		token = strings.TrimSpace(creds.TokenStation.Token)
+	}
+	if token == "" {
+		return nil, errors.New("token station credentials unavailable")
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return nil, err
+	}
+	u.Path = strings.TrimSuffix(u.Path, "/") + "/api/token-station/userinfo"
+	q := u.Query()
+	if purpose = strings.TrimSpace(purpose); purpose != "" {
+		q.Set("purpose", purpose)
+	}
+	u.RawQuery = q.Encode()
+	u.Fragment = ""
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
+	var payload map[string]any
+	if len(strings.TrimSpace(string(body))) > 0 {
+		if err := json.Unmarshal(body, &payload); err != nil {
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				return nil, fmt.Errorf("token station userinfo failed: %s", resp.Status)
+			}
+			return nil, fmt.Errorf("token station userinfo returned invalid payload")
+		}
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if message, _ := payload["error"].(string); strings.TrimSpace(message) != "" {
+			return nil, errors.New(message)
+		}
+		if message, _ := payload["message"].(string); strings.TrimSpace(message) != "" {
+			return nil, errors.New(message)
+		}
+		return nil, fmt.Errorf("token station userinfo failed: %s", resp.Status)
+	}
+	if payload == nil {
+		return nil, errors.New("token station userinfo returned empty payload")
+	}
+	return payload, nil
+}
+
 func (s *Service) runSession(ctx context.Context, creds RelayCredentials) error {
 	headers := http.Header{}
 	headers.Set("Authorization", "Bearer "+creds.DeviceToken)
 	conn, resp, err := websocket.DefaultDialer.DialContext(ctx, creds.Endpoint, headers)
 	if err != nil {
-		if resp != nil && strings.TrimSpace(resp.Status) != "" {
-			return fmt.Errorf("relay websocket dial failed: %s: %w", resp.Status, err)
+		if resp != nil {
+			return newRelayDialError(resp, err)
 		}
 		return err
 	}
 	defer conn.Close()
+	s.storeRelayNodeName(creds, resp)
 
 	wsConn := NewWebSocketNetConn(conn)
 	yamuxConfig := yamux.DefaultConfig()
@@ -409,6 +520,20 @@ func (s *Service) waitForLocalServer(ctx context.Context) error {
 	}
 }
 
+func (s *Service) storeRelayNodeName(creds RelayCredentials, resp *http.Response) {
+	if s == nil || s.store == nil || resp == nil {
+		return
+	}
+	nodeName := strings.TrimSpace(resp.Header.Get(relayNodeNameHeader))
+	if nodeName == "" || nodeName == strings.TrimSpace(creds.NodeName) {
+		return
+	}
+	creds.NodeName = nodeName
+	if err := s.store.Save(Credentials{Relay: creds}); err != nil {
+		log.Printf("[relay] save relay node name failed: %v", err)
+	}
+}
+
 func addrToURL(addr, path string, useTLS bool) string {
 	if strings.HasPrefix(addr, "http://") || strings.HasPrefix(addr, "https://") {
 		return strings.TrimSuffix(addr, "/") + path
@@ -570,10 +695,42 @@ func cloneHeader(header http.Header) http.Header {
 	return clone
 }
 
+func newRelayDialError(resp *http.Response, err error) error {
+	dialErr := &relayDialError{err: err}
+	if resp == nil {
+		return dialErr
+	}
+	dialErr.statusCode = resp.StatusCode
+	dialErr.status = resp.Status
+	dialErr.errorCode = readRelayErrorCode(resp)
+	return dialErr
+}
+
+func readRelayErrorCode(resp *http.Response) string {
+	if resp == nil || resp.Body == nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	payload, err := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	if err != nil {
+		return ""
+	}
+	var out struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(payload, &out); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out.Error)
+}
+
 func isPermanentRelayError(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := err.Error()
-	return strings.Contains(msg, "401") || strings.Contains(msg, "403") || strings.Contains(msg, "404")
+	var dialErr *relayDialError
+	if !errors.As(err, &dialErr) {
+		return false
+	}
+	return dialErr.statusCode == http.StatusUnauthorized && dialErr.errorCode == "device_token_invalid"
 }

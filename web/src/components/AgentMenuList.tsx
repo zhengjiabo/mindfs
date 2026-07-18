@@ -1,11 +1,13 @@
 import React from "react";
 import { AgentIcon } from "./AgentIcon";
 import type { AgentStatus } from "../services/agents";
+import { useI18n } from "../i18n";
 
 type AgentMenuListProps = {
   agents: AgentStatus[];
   selectedAgent?: string;
   maxHeight?: string;
+  renderEnd?: (agent: AgentStatus) => React.ReactNode;
   onSelect: (agentName: string) => void;
 };
 
@@ -13,8 +15,10 @@ export function AgentMenuList({
   agents,
   selectedAgent = "",
   maxHeight = "180px",
+  renderEnd,
   onSelect,
 }: AgentMenuListProps) {
+  const { t } = useI18n();
   return (
     <div
       style={{
@@ -63,8 +67,8 @@ export function AgentMenuList({
             </span>
             {!item.available ? (
               <span
-                aria-label="当前未就绪"
-                title="当前未就绪"
+                aria-label={t("agent.notReady")}
+                title={t("agent.notReady")}
                 style={{
                   minWidth: "11px",
                   height: "11px",
@@ -82,6 +86,7 @@ export function AgentMenuList({
                 !
               </span>
             ) : null}
+            {renderEnd ? renderEnd(item) : null}
           </button>
         );
       })}

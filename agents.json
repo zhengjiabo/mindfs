@@ -127,6 +127,33 @@
       }
     },
     {
+      "name": "grok",
+      "brief": "Bring Grok into your terminal.",
+      "installCommands": [
+        { "os": ["darwin", "linux"], "command": "curl -fsSL https://x.ai/cli/install.sh | bash" },
+        { "os": "windows", "command": "irm 'https://x.ai/cli/install.ps1' | iex" }
+      ],
+      "updateCommands": [
+        { "os": ["darwin", "linux"], "command": "curl -fsSL https://x.ai/cli/install.sh | bash" },
+        { "os": "windows", "command": "irm 'https://x.ai/cli/install.ps1' | iex" }
+      ],
+      "command": "grok",
+      "protocol": "acp",
+      "args": [
+        "agent", "stdio"
+      ],
+      "configBackup": {
+        "fileSources": [
+          "~/.grok/config.json",
+          "~/.grok/auth.json"
+        ],
+        "envKeys": [
+          "XAI_API_KEY",
+          "GROK_XAI_API_BASE_URL"
+        ]
+      }
+    },
+    {
       "name": "cursor",
       "brief": "把 Cursor agent 带到终端、脚本和自动化流程；适合复用 Cursor 的代码上下文、MCP、headless 执行和带安全检查的 shell mode。",
       "installCommands": [
@@ -349,7 +376,17 @@
       ],
       "command": "pi-acp",
       "protocol": "acp",
-      "configBackup": {}
+      "configBackup": {
+        "fileSources": [
+          "~/.pi/agent/models.json",
+          "~/.pi/agent/settings.json",
+          "~/.pi/agent/auth.json"
+        ],
+        "envKeys": [
+          "PI_CONFIG_DIR",
+          "PI_CODING_AGENT_DIR"
+        ]
+      }
     },
     {
       "name": "hermes",
@@ -390,5 +427,6 @@
       "configBackup": {}
     }
   ],
-  "relayBaseURL": "https://relay.a9gent.com"
+  "relayBaseURL": "https://relay.a9gent.com",
+  "tokenStationURL":"https://token.a9gent.com"
 }

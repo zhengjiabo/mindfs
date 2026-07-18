@@ -16,16 +16,26 @@ import (
 const defaultRelayBaseURL = "http://localhost:7331"
 
 type Status struct {
-	Bound        bool   `json:"relay_bound"`
-	NoRelayer    bool   `json:"no_relayer"`
-	PendingCode  string `json:"pending_code"`
-	NodeName     string `json:"node_name"`
-	NodeID       string `json:"node_id"`
-	E2EENodeID   string `json:"e2ee_node_id,omitempty"`
-	RelayBaseURL string `json:"relay_base_url"`
-	NodeURL      string `json:"node_url"`
-	LastError    string `json:"last_error,omitempty"`
-	E2EERequired bool   `json:"e2ee_required"`
+	Bound             bool   `json:"relay_bound"`
+	NoRelayer         bool   `json:"no_relayer"`
+	TokenStationBound bool   `json:"token_station_bound"`
+	PendingCode       string `json:"pending_code"`
+	NodeName          string `json:"node_name"`
+	NodeID            string `json:"node_id"`
+	E2EENodeID        string `json:"e2ee_node_id,omitempty"`
+	RelayBaseURL      string `json:"relay_base_url"`
+	NodeURL           string `json:"node_url"`
+	LastError         string `json:"last_error,omitempty"`
+	E2EERequired      bool   `json:"e2ee_required"`
+}
+
+type TokenStationStatus struct {
+	Bound        bool           `json:"bound"`
+	PendingCode  string         `json:"pending_code,omitempty"`
+	RelayBaseURL string         `json:"relay_base_url"`
+	TopUpURL     string         `json:"topup_url"`
+	UserInfo     map[string]any `json:"userinfo,omitempty"`
+	LastError    string         `json:"last_error,omitempty"`
 }
 
 type Manager struct {
@@ -42,6 +52,10 @@ type Manager struct {
 	pendingSince time.Time
 	nodeName     string
 	lastError    string
+
+	tokenStationPendingCode string
+	tokenStationPolling     bool
+	tokenStationLastError   string
 }
 
 func NewManager(localAddr string, noRelayer bool, relayBaseURL string, useTLS bool) (*Manager, error) {
@@ -133,13 +147,60 @@ func (m *Manager) StartBinding() (Status, error) {
 	return m.statusLocked(), nil
 }
 
+func (m *Manager) TokenStationStatus(ctx context.Context) (TokenStationStatus, error) {
+	m.mu.Lock()
+	status := m.tokenStationStatusLocked()
+	m.mu.Unlock()
+	if !status.Bound {
+		return status, nil
+	}
+	userInfo, err := m.TokenStationUserInfo(ctx, "")
+	if err != nil {
+		status.LastError = err.Error()
+		return status, err
+	}
+	status.UserInfo = userInfo
+	return status, nil
+}
+
+func (m *Manager) StartTokenStationBinding() (TokenStationStatus, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.ctx == nil {
+		return m.tokenStationStatusLocked(), errors.New("relay manager not started")
+	}
+	if creds, err := m.service.store.Load(); err == nil {
+		if creds.Relay.DeviceToken != "" || creds.TokenStation.Token != "" {
+			return m.tokenStationStatusLocked(), nil
+		}
+	} else {
+		m.tokenStationLastError = err.Error()
+		return m.tokenStationStatusLocked(), err
+	}
+	if strings.TrimSpace(m.tokenStationPendingCode) == "" {
+		m.tokenStationPendingCode = generatePendingCode()
+	}
+	m.startTokenStationPollingLocked(m.ctx, m.tokenStationPendingCode)
+	return m.tokenStationStatusLocked(), nil
+}
+
+func (m *Manager) TokenStationUserInfo(ctx context.Context, purpose string) (map[string]any, error) {
+	creds, err := m.service.store.Load()
+	if err != nil {
+		return nil, err
+	}
+	return m.service.FetchTokenStationUserInfo(ctx, m.resolveRelayBase(), creds, purpose)
+}
+
 func (m *Manager) statusLocked() Status {
 	status := Status{
-		NoRelayer:    m.noRelayer,
-		PendingCode:  m.pendingCode,
-		NodeName:     m.nodeName,
-		RelayBaseURL: m.resolveRelayBaseLocked(),
-		LastError:    m.lastError,
+		NoRelayer:         m.noRelayer,
+		TokenStationBound: m.tokenStationBoundLocked(),
+		PendingCode:       m.pendingCode,
+		NodeName:          m.nodeName,
+		RelayBaseURL:      m.resolveRelayBaseLocked(),
+		LastError:         m.lastError,
 	}
 	if m.noRelayer {
 		status.PendingCode = ""
@@ -149,12 +210,34 @@ func (m *Manager) statusLocked() Status {
 	if err == nil && creds.Relay.DeviceToken != "" && creds.Relay.Endpoint != "" {
 		status.Bound = true
 		status.NodeID = creds.Relay.NodeID
+		if nodeName := strings.TrimSpace(creds.Relay.NodeName); nodeName != "" {
+			status.NodeName = nodeName
+		}
 		if status.RelayBaseURL == "" {
 			status.RelayBaseURL = endpointBaseURL(creds.Relay.Endpoint)
 		}
 		if status.RelayBaseURL != "" && status.NodeID != "" {
 			status.NodeURL = strings.TrimSuffix(status.RelayBaseURL, "/") + "/n/" + status.NodeID + "/"
 		}
+		status.PendingCode = ""
+	}
+	return status
+}
+
+func (m *Manager) tokenStationBoundLocked() bool {
+	creds, err := m.service.store.Load()
+	return err == nil && (creds.Relay.DeviceToken != "" || creds.TokenStation.Token != "")
+}
+
+func (m *Manager) tokenStationStatusLocked() TokenStationStatus {
+	status := TokenStationStatus{
+		PendingCode:  m.tokenStationPendingCode,
+		RelayBaseURL: m.resolveRelayBaseLocked(),
+		TopUpURL:     m.resolveRelayBaseLocked(),
+		LastError:    m.tokenStationLastError,
+	}
+	status.Bound = m.tokenStationBoundLocked()
+	if status.Bound {
 		status.PendingCode = ""
 	}
 	return status
@@ -183,9 +266,81 @@ func (m *Manager) startPollingLocked(parent context.Context, pendingCode string)
 	go m.pollLoop(parent, pendingCode)
 }
 
+func (m *Manager) startTokenStationPollingLocked(parent context.Context, pendingCode string) {
+	if strings.TrimSpace(pendingCode) == "" || m.tokenStationPolling {
+		return
+	}
+	m.tokenStationPolling = true
+	go m.tokenStationPollLoop(parent, pendingCode)
+}
+
+func (m *Manager) tokenStationPollLoop(parent context.Context, pendingCode string) {
+	defer func() {
+		m.mu.Lock()
+		m.tokenStationPolling = false
+		m.mu.Unlock()
+	}()
+
+	m.runBindPollLoop(parent, pendingCode, "token_station",
+		func(result BindPollResult) error {
+			return m.service.store.SaveTokenStation(result.TokenStationToken)
+		},
+		func(status string) {
+			m.mu.Lock()
+			m.tokenStationPendingCode = ""
+			m.tokenStationLastError = status
+			m.mu.Unlock()
+		},
+		func(message string) {
+			m.mu.Lock()
+			m.tokenStationLastError = message
+			m.mu.Unlock()
+		},
+	)
+}
+
 func (m *Manager) pollLoop(parent context.Context, pendingCode string) {
 	defer m.finishPolling(pendingCode)
 
+	m.runBindPollLoop(parent, pendingCode, "",
+		func(result BindPollResult) error {
+			return m.service.store.Save(Credentials{Relay: result.Credentials})
+		},
+		func(status string) {
+			m.mu.Lock()
+			m.pendingCode = ""
+			m.lastError = status
+			alreadyStarted := status == "" && m.cancel != nil
+			m.mu.Unlock()
+			if status != "" {
+				return
+			}
+			if alreadyStarted {
+				m.restart()
+				return
+			}
+			m.mu.Lock()
+			if m.ctx != nil {
+				m.startLocked(m.ctx)
+			}
+			m.mu.Unlock()
+		},
+		func(message string) {
+			m.mu.Lock()
+			m.lastError = message
+			m.mu.Unlock()
+		},
+	)
+}
+
+func (m *Manager) runBindPollLoop(
+	parent context.Context,
+	pendingCode string,
+	purpose string,
+	onConfirmed func(BindPollResult) error,
+	onFinished func(status string),
+	onError func(message string),
+) {
 	delay := time.Duration(0)
 	for {
 		if delay > 0 {
@@ -198,12 +353,10 @@ func (m *Manager) pollLoop(parent context.Context, pendingCode string) {
 			return
 		}
 
-		result, err := m.service.PollBind(parent, m.resolveRelayBase(), pendingCode)
+		result, err := m.service.PollBindPurpose(parent, m.resolveRelayBase(), pendingCode, purpose)
 		if err != nil {
 			delay = nextDelay(delay)
-			m.mu.Lock()
-			m.lastError = err.Error()
-			m.mu.Unlock()
+			onError(err.Error())
 			continue
 		}
 
@@ -214,33 +367,15 @@ func (m *Manager) pollLoop(parent context.Context, pendingCode string) {
 				delay = 3 * time.Second
 			}
 		case "confirmed":
-			if err := m.service.store.Save(Credentials{Relay: result.Credentials}); err != nil {
-				m.mu.Lock()
-				m.lastError = err.Error()
-				m.mu.Unlock()
+			if err := onConfirmed(result); err != nil {
 				delay = nextDelay(delay)
+				onError(err.Error())
 				continue
 			}
-			m.mu.Lock()
-			m.pendingCode = ""
-			m.lastError = ""
-			alreadyStarted := m.cancel != nil
-			m.mu.Unlock()
-			if alreadyStarted {
-				m.restart()
-			} else {
-				m.mu.Lock()
-				if m.ctx != nil {
-					m.startLocked(m.ctx)
-				}
-				m.mu.Unlock()
-			}
+			onFinished("")
 			return
 		case "claimed", "expired", "revoked":
-			m.mu.Lock()
-			m.lastError = result.Status
-			m.pendingCode = ""
-			m.mu.Unlock()
+			onFinished(result.Status)
 			return
 		default:
 			delay = nextDelay(delay)

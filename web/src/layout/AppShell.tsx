@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { useI18n } from "../i18n";
 
 type AppShellProps = {
   sidebar: React.ReactNode;
@@ -95,8 +96,9 @@ export function AppShell({
   onOpenRight,
   sidebarsSwapped = false,
 }: AppShellProps) {
+  const { t } = useI18n();
   const { isMobile, isTablet } = useResponsive();
-  
+
   const sidebarWidth = isMobile ? "0px" : (isTablet ? "200px" : "260px");
   const rightWidth = isMobile ? "0px" : (rightSidebar ? (isTablet ? "240px" : "280px") : "0px");
   const mobileHeight = "var(--mindfs-viewport-height, 100dvh)";
@@ -110,8 +112,8 @@ export function AppShell({
   const physicalLeftOpenHandler = sidebarsSwapped ? onOpenRight : onOpenLeft;
   const physicalRightClose = sidebarsSwapped ? onCloseLeft : onCloseRight;
   const physicalRightOpenHandler = sidebarsSwapped ? onOpenLeft : onOpenRight;
-  const physicalLeftLabel = sidebarsSwapped ? "会话侧栏" : "文件侧栏";
-  const physicalRightLabel = sidebarsSwapped ? "文件侧栏" : "会话侧栏";
+  const physicalLeftLabel = sidebarsSwapped ? t("sidebar.session") : t("sidebar.file");
+  const physicalRightLabel = sidebarsSwapped ? t("sidebar.file") : t("sidebar.session");
 
   const shellStyle: React.CSSProperties & {
     "--mindfs-actionbar-bottom-padding"?: string;
@@ -135,7 +137,7 @@ export function AppShell({
     isolation: "isolate",
     boxSizing: "border-box",
     transition: "grid-template-columns 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
-    "--mindfs-actionbar-bottom-padding": "calc(env(safe-area-inset-bottom, 0px) + 2px)",
+    "--mindfs-actionbar-bottom-padding": "calc(var(--mindfs-safe-area-bottom) + 12px)",
   };
 
   const mobileSidebarStyle = (side: 'left' | 'right'): React.CSSProperties => ({
@@ -237,8 +239,8 @@ export function AppShell({
             type="button"
             className={`mindfs-sidebar-resize-rail mindfs-sidebar-resize-rail--left${physicalLeftOpen ? " is-open" : " is-closed"}`}
             onClick={physicalLeftOpen ? physicalLeftClose : physicalLeftOpenHandler}
-            aria-label={physicalLeftOpen ? `收起${physicalLeftLabel}` : `展开${physicalLeftLabel}`}
-            title={physicalLeftOpen ? `收起${physicalLeftLabel}` : `展开${physicalLeftLabel}`}
+            aria-label={physicalLeftOpen ? t("sidebar.collapse", { label: physicalLeftLabel }) : t("sidebar.expand", { label: physicalLeftLabel })}
+            title={physicalLeftOpen ? t("sidebar.collapse", { label: physicalLeftLabel }) : t("sidebar.expand", { label: physicalLeftLabel })}
             style={{
               left: physicalLeftOpen ? `calc(${physicalLeftWidth} - 6px)` : 0,
               cursor: physicalLeftOpen ? "w-resize" : "e-resize",
@@ -249,8 +251,8 @@ export function AppShell({
               type="button"
               className={`mindfs-sidebar-resize-rail mindfs-sidebar-resize-rail--right${physicalRightOpen ? " is-open" : " is-closed"}`}
               onClick={physicalRightOpen ? physicalRightClose : physicalRightOpenHandler}
-              aria-label={physicalRightOpen ? `收起${physicalRightLabel}` : `展开${physicalRightLabel}`}
-              title={physicalRightOpen ? `收起${physicalRightLabel}` : `展开${physicalRightLabel}`}
+              aria-label={physicalRightOpen ? t("sidebar.collapse", { label: physicalRightLabel }) : t("sidebar.expand", { label: physicalRightLabel })}
+              title={physicalRightOpen ? t("sidebar.collapse", { label: physicalRightLabel }) : t("sidebar.expand", { label: physicalRightLabel })}
               style={{
                 right: physicalRightOpen ? `calc(${physicalRightWidth} - 6px)` : 0,
                 cursor: physicalRightOpen ? "e-resize" : "w-resize",

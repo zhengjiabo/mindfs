@@ -9,6 +9,7 @@ import Prism from "prismjs";
 import { copyText } from "../services/clipboard";
 import { fetchProofProtectedBlob } from "../services/file";
 import { openExternalURL } from "../services/platformNavigation";
+import { useI18n } from "../i18n";
 import "prismjs/themes/prism.css";
 import "katex/dist/katex.min.css";
 // Reuse the language imports from global Prism context (since they are imported in CodeViewer, they might be available if loaded, 
@@ -192,6 +193,7 @@ function MarkdownCodeBlock({
   language: string;
   sourceLineProps: Record<string, unknown>;
 }) {
+  const { t } = useI18n();
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const resetTimerRef = useRef<number | null>(null);
 
@@ -248,8 +250,8 @@ function MarkdownCodeBlock({
       <button
         type="button"
         onClick={handleCopy}
-        aria-label={isCopied ? "已复制代码" : "复制代码"}
-        title={isCopied ? "已复制" : isFailed ? "复制失败" : "复制代码"}
+        aria-label={isCopied ? t("markdown.codeCopied") : t("markdown.copyCode")}
+        title={isCopied ? t("markdown.copied") : isFailed ? t("markdown.copyFailed") : t("markdown.copyCode")}
         style={{
           position: "absolute",
           top: "4px",

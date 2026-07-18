@@ -1,4 +1,5 @@
 // Error handling service for MindFS
+import { translateNow, type MessageKey } from "../i18n";
 
 export type ErrorCode =
   // Session errors
@@ -46,6 +47,8 @@ export type ErrorSeverity = "info" | "warning" | "error" | "fatal";
 export type AppError = {
   code: ErrorCode;
   message: string;
+  messageKey?: MessageKey;
+  usesDefaultMessage?: boolean;
   severity: ErrorSeverity;
   recoverable: boolean;
   retryAction?: () => Promise<void>;
@@ -92,9 +95,12 @@ class ErrorService {
     options?: Partial<Omit<AppError, "code" | "message">>
   ): AppError {
     const defaults = this.getDefaults(code);
+    const usesDefaultMessage = !message;
     return {
       code,
       message: message || defaults.message,
+      messageKey: defaults.messageKey,
+      usesDefaultMessage,
       severity: options?.severity || defaults.severity,
       recoverable: options?.recoverable ?? defaults.recoverable,
       retryAction: options?.retryAction,
@@ -105,171 +111,176 @@ class ErrorService {
   // Get default error properties by code
   private getDefaults(code: ErrorCode): {
     message: string;
+    messageKey: MessageKey;
     severity: ErrorSeverity;
     recoverable: boolean;
   } {
     const defaults: Record<
       ErrorCode,
-      { message: string; severity: ErrorSeverity; recoverable: boolean }
+      { messageKey: MessageKey; severity: ErrorSeverity; recoverable: boolean }
     > = {
       "session.not_found": {
-        message: "会话不存在",
+        messageKey: "error.session.notFound",
         severity: "error",
         recoverable: false,
       },
       "session.create_failed": {
-        message: "创建会话失败",
+        messageKey: "error.session.createFailed",
         severity: "error",
         recoverable: true,
       },
       "session.closed": {
-        message: "会话已关闭",
+        messageKey: "error.session.closed",
         severity: "warning",
         recoverable: true,
       },
       "session.resume_failed": {
-        message: "恢复会话失败",
+        messageKey: "error.session.resumeFailed",
         severity: "error",
         recoverable: true,
       },
       "session.delete_failed": {
-        message: "删除会话失败",
+        messageKey: "error.session.deleteFailed",
         severity: "error",
         recoverable: true,
       },
       "session.import_failed": {
-        message: "导入会话失败",
+        messageKey: "error.session.importFailed",
         severity: "error",
         recoverable: true,
       },
       "session.rename_failed": {
-        message: "重命名会话失败",
+        messageKey: "error.session.renameFailed",
         severity: "error",
         recoverable: true,
       },
       "session.sync_failed": {
-        message: "同步会话失败",
+        messageKey: "error.session.syncFailed",
         severity: "error",
         recoverable: true,
       },
       "session.slash_command_failed": {
-        message: "命令执行失败",
+        messageKey: "error.session.slashCommandFailed",
         severity: "error",
         recoverable: true,
       },
       "app.init_failed": {
-        message: "初始化失败",
+        messageKey: "error.app.initFailed",
         severity: "error",
         recoverable: true,
       },
       "root.create_failed": {
-        message: "创建项目失败",
+        messageKey: "error.root.createFailed",
         severity: "error",
         recoverable: true,
       },
       "root.delete_failed": {
-        message: "删除项目失败",
+        messageKey: "error.root.deleteFailed",
         severity: "error",
         recoverable: true,
       },
       "root.rename_failed": {
-        message: "重命名项目失败",
+        messageKey: "error.root.renameFailed",
         severity: "error",
         recoverable: true,
       },
       "git.checkout_failed": {
-        message: "切换分支失败",
+        messageKey: "error.git.checkoutFailed",
         severity: "error",
         recoverable: true,
       },
       "git.related_file_diff_failed": {
-        message: "关联文件 diff 不可用",
+        messageKey: "error.git.relatedFileDiffFailed",
         severity: "warning",
         recoverable: true,
       },
       "git.worktree_switch_failed": {
-        message: "切换 worktree 失败",
+        messageKey: "error.git.worktreeSwitchFailed",
         severity: "error",
         recoverable: true,
       },
       "git.worktree_remove_failed": {
-        message: "移除 worktree 失败",
+        messageKey: "error.git.worktreeRemoveFailed",
         severity: "error",
         recoverable: true,
       },
       "agent.unavailable": {
-        message: "Agent 不可用",
+        messageKey: "error.agent.unavailable",
         severity: "error",
         recoverable: true,
       },
       "agent.timeout": {
-        message: "Agent 响应超时",
+        messageKey: "error.agent.timeout",
         severity: "warning",
         recoverable: true,
       },
       "agent.crashed": {
-        message: "Agent 进程崩溃",
+        messageKey: "error.agent.crashed",
         severity: "error",
         recoverable: true,
       },
       "agent.permission_denied": {
-        message: "权限被拒绝",
+        messageKey: "error.agent.permissionDenied",
         severity: "warning",
         recoverable: false,
       },
       "view.invalid": {
-        message: "视图格式无效",
+        messageKey: "error.view.invalid",
         severity: "error",
         recoverable: false,
       },
       "view.render_failed": {
-        message: "视图渲染失败",
+        messageKey: "error.view.renderFailed",
         severity: "error",
         recoverable: true,
       },
       "file.not_found": {
-        message: "文件不存在",
+        messageKey: "error.file.notFound",
         severity: "error",
         recoverable: false,
       },
       "file.read_failed": {
-        message: "读取文件失败",
+        messageKey: "error.file.readFailed",
         severity: "error",
         recoverable: true,
       },
       "file.write_failed": {
-        message: "写入文件失败",
+        messageKey: "error.file.writeFailed",
         severity: "error",
         recoverable: true,
       },
       "clipboard.write_failed": {
-        message: "复制失败",
+        messageKey: "error.clipboard.writeFailed",
         severity: "warning",
         recoverable: true,
       },
       "skill.not_found": {
-        message: "技能不存在",
+        messageKey: "error.skill.notFound",
         severity: "error",
         recoverable: false,
       },
       "skill.execute_failed": {
-        message: "技能执行失败",
+        messageKey: "error.skill.executeFailed",
         severity: "error",
         recoverable: true,
       },
       "network.disconnected": {
-        message: "网络连接断开",
+        messageKey: "error.network.disconnected",
         severity: "warning",
         recoverable: true,
       },
       "network.timeout": {
-        message: "网络请求超时",
+        messageKey: "error.network.timeout",
         severity: "warning",
         recoverable: true,
       },
     };
 
-    return defaults[code];
+    const defaultsForCode = defaults[code];
+    return {
+      ...defaultsForCode,
+      message: translateNow(defaultsForCode.messageKey),
+    };
   }
 }
 

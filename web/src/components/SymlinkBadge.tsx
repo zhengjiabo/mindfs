@@ -1,14 +1,16 @@
 import React from "react";
+import { useI18n } from "../i18n";
 
 type SymlinkBadgeProps = {
   offset?: string;
 };
 
 export function SymlinkBadge({ offset = "-2px" }: SymlinkBadgeProps) {
+  const { t } = useI18n();
   return (
     <span
-      title="软连接目录"
-      aria-label="软连接目录"
+      title={t("symlink.directory")}
+      aria-label={t("symlink.directory")}
       style={{
         position: "absolute",
         right: offset,

@@ -7,6 +7,7 @@ import {
   type TodoUpdate,
   type ToolCall,
 } from "../services/session";
+import { translateNow } from "../i18n";
 
 type ExchangeLike = {
   seq?: number;
@@ -487,7 +488,7 @@ export function useSessionStream(
       onStream: (event) => {
         setStreamVersion((value) => value + 1);
         if (event.type === "recovery") {
-          setStreamStatusText(event.data?.message || "遇到错误，重试中...");
+          setStreamStatusText(event.data?.message || translateNow("session.recovering"));
           setIsStreaming(true);
           return;
         }

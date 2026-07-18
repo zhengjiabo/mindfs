@@ -389,29 +389,32 @@ func (h *WSHandler) broadcastSessionMetaUpdated(rootID string, sess *session.Ses
 }
 
 func (h *WSHandler) broadcastAgentStatusChange(status agent.Status) {
+	status = applyAgentAPIProviderCapabilities([]agent.Status{status})[0]
 	resp := WSResponse{
 		Type: "agent.status.changed",
 		Payload: map[string]any{
-			"name":                  status.Name,
-			"protocol":              status.Protocol,
-			"installed":             status.Installed,
-			"available":             status.Available,
-			"version":               status.Version,
-			"error":                 status.Error,
-			"last_probe":            status.LastProbe,
-			"current_model_id":      status.CurrentModelID,
-			"current_mode_id":       status.CurrentModeID,
-			"default_model_id":      status.DefaultModelID,
-			"default_effort":        status.DefaultEffort,
-			"default_fast_service":  status.DefaultFastService,
-			"supports_fast_service": status.SupportsFastService,
-			"efforts":               status.Efforts,
-			"models":                status.Models,
-			"modes":                 status.Modes,
-			"models_error":          status.ModelsError,
-			"modes_error":           status.ModesError,
-			"commands":              status.Commands,
-			"commands_error":        status.CommandsError,
+			"name":                             status.Name,
+			"protocol":                         status.Protocol,
+			"installed":                        status.Installed,
+			"available":                        status.Available,
+			"version":                          status.Version,
+			"error":                            status.Error,
+			"last_probe":                       status.LastProbe,
+			"current_model_id":                 status.CurrentModelID,
+			"current_mode_id":                  status.CurrentModeID,
+			"default_model_id":                 status.DefaultModelID,
+			"default_effort":                   status.DefaultEffort,
+			"default_fast_service":             status.DefaultFastService,
+			"supports_api_provider_switch":     status.SupportsAPIProviderSwitch,
+			"supported_api_provider_protocols": status.SupportedAPIProviderProtocols,
+			"supports_fast_service":            status.SupportsFastService,
+			"efforts":                          status.Efforts,
+			"models":                           status.Models,
+			"modes":                            status.Modes,
+			"models_error":                     status.ModelsError,
+			"modes_error":                      status.ModesError,
+			"commands":                         status.Commands,
+			"commands_error":                   status.CommandsError,
 		},
 	}
 	h.broadcastWS(resp)
@@ -865,6 +868,9 @@ func (h *WSHandler) runSessionMessage(job sessionMessageJob) {
 				return
 			}
 			h.AppContext.BroadcastSessionUpdate(rootID, key, update)
+		},
+		OnAgentDefaultsChanged: func(agentName string) {
+			h.AppContext.BroadcastAgentStatusChanged(agentName)
 		},
 		OnSubSessionCreated: func(created *session.Session) {
 			h.broadcastSessionMetaUpdated(rootID, created)

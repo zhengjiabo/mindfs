@@ -17,6 +17,7 @@ import {
   type AppUpdateState,
 } from "../services/appUpdate";
 import { downloadURL } from "../services/download";
+import { useI18n, type MessageKey, type MessageParams } from "../i18n";
 
 type LoginProps = {
   onOpenNode: (nodeURL: string) => void;
@@ -109,18 +110,22 @@ function shouldShowAppUpdate(state: AppUpdateState): boolean {
   );
 }
 
-function appUpdateSummary(state: AppUpdateState): string {
+function appUpdateSummary(state: AppUpdateState, t: (key: MessageKey, params?: MessageParams) => string): string {
   const notes = String(state.notes || "").trim();
   if (notes) {
     return notes;
   }
   if (state.latest_version) {
-    return `发现 ${appPackageLabel(state.platform)} ${state.latest_version} 新版本`;
+    return t("login.updateAvailable", {
+      packageLabel: appPackageLabel(state.platform),
+      version: state.latest_version,
+    });
   }
   return "";
 }
 
 export function Login({ onOpenNode }: LoginProps): ReactElement {
+  const { t } = useI18n();
   const [nodes, setNodes] = useState<LauncherNode[]>(() => sortNodes(getStoredLauncherNodes()));
   const [composerOpen, setComposerOpen] = useState(false);
   const [nodeName, setNodeName] = useState("");
@@ -224,7 +229,7 @@ export function Login({ onOpenNode }: LoginProps): ReactElement {
       normalizeAppUpdateState({
         ...prev,
         status: "downloading",
-        message: `正在下载 ${packageLabel} 更新包`,
+        message: t("login.downloadingPackage", { packageLabel }),
       }),
     );
     try {
@@ -233,12 +238,12 @@ export function Login({ onOpenNode }: LoginProps): ReactElement {
         normalizeAppUpdateState({
           ...prev,
           status: "downloaded",
-          message: "更新包已开始下载，请在系统通知或下载目录中打开安装",
+          message: t("login.packageDownloadStarted"),
         }),
       );
     } catch (error) {
       const message =
-        error instanceof Error ? error.message : `${packageLabel} 更新下载失败`;
+        error instanceof Error ? error.message : t("login.packageDownloadFailed", { packageLabel });
       setAppUpdateState((prev) =>
         normalizeAppUpdateState({
           ...prev,
@@ -347,16 +352,19 @@ export function Login({ onOpenNode }: LoginProps): ReactElement {
     appUpdateStatus === "downloaded";
   const appUpdateText =
     appUpdateStatus === "downloading"
-      ? "下载中..."
+      ? t("login.updateDownloading")
       : appUpdateStatus === "downloaded"
-        ? "已开始下载"
-        : "更新APP";
+        ? t("login.updateDownloaded")
+        : t("login.updateApp");
   const appUpdateHelp =
     appUpdateState.message ||
     (appUpdateState.latest_version
-      ? `当前 ${appUpdateState.current_version || "未知"}，最新 ${appUpdateState.latest_version}`
+      ? t("login.updateVersionHelp", {
+          current: appUpdateState.current_version || t("login.unknownVersion"),
+          latest: appUpdateState.latest_version,
+        })
       : "");
-  const appUpdateNotes = appUpdateSummary(appUpdateState);
+  const appUpdateNotes = appUpdateSummary(appUpdateState, t);
 
   return (
     <div
@@ -520,7 +528,7 @@ export function Login({ onOpenNode }: LoginProps): ReactElement {
                       </div>
                       <button
                         type="button"
-                        aria-label={`重命名 ${node.name}`}
+                        aria-label={t("login.renameNode", { name: node.name })}
                         onClick={(event) => {
                           event.stopPropagation();
                           handleStartRename(node);
@@ -561,7 +569,7 @@ export function Login({ onOpenNode }: LoginProps): ReactElement {
             </div>
             <button
               type="button"
-              aria-label={`删除 ${node.name}`}
+              aria-label={t("login.deleteNode", { name: node.name })}
               onClick={(event) => {
                 event.stopPropagation();
                 handleDeleteNode(node.id);
@@ -623,7 +631,7 @@ export function Login({ onOpenNode }: LoginProps): ReactElement {
                     lineHeight: 1.25,
                   }}
                 >
-                  新版本
+                  {t("update.newVersion")}
                 </div>
                 {appUpdateHelp ? (
                   <div
@@ -684,7 +692,7 @@ export function Login({ onOpenNode }: LoginProps): ReactElement {
                       cursor: "pointer",
                     }}
                   >
-                    {appUpdateNotesOpen ? "收起更新说明" : "查看更新说明"}
+                    {appUpdateNotesOpen ? t("login.hideUpdateNotes") : t("login.showUpdateNotes")}
                   </button>
                   <span
                     style={{
@@ -694,7 +702,7 @@ export function Login({ onOpenNode }: LoginProps): ReactElement {
                       lineHeight: 1.35,
                     }}
                   >
-                    请先将 mindfs 后端升级到最新版本
+                    {t("login.backendUpgradeRequired")}
                   </span>
                 </div>
                 {appUpdateNotesOpen ? (
@@ -777,7 +785,7 @@ export function Login({ onOpenNode }: LoginProps): ReactElement {
               type="text"
               value={nodeName}
               onChange={(event) => setNodeName(event.target.value)}
-              placeholder="节点名称"
+              placeholder={t("login.nodeNamePlaceholder")}
               autoFocus
               style={{
                 width: "100%",
@@ -796,7 +804,7 @@ export function Login({ onOpenNode }: LoginProps): ReactElement {
               type="text"
               value={nodeURL}
               onChange={(event) => setNodeURL(event.target.value)}
-              placeholder="节点 url：http(s)://ip:port"
+              placeholder={t("login.nodeUrlPlaceholder")}
               spellCheck={false}
               style={{
                 width: "100%",
@@ -836,7 +844,7 @@ export function Login({ onOpenNode }: LoginProps): ReactElement {
                   width: "100%",
                 }}
               >
-                取消
+                {t("common.cancel")}
               </button>
               <button
                 type="submit"
@@ -852,7 +860,7 @@ export function Login({ onOpenNode }: LoginProps): ReactElement {
                   width: "100%",
                 }}
               >
-                保存
+                {t("common.save")}
               </button>
             </div>
           </form>

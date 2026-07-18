@@ -72,21 +72,72 @@ func TestClaudePlainStreamEventFallsBackToMessageChunk(t *testing.T) {
 	}
 }
 
-func TestClaudeTaskNotificationIsIgnored(t *testing.T) {
+func TestClaudePartialInputJSONDeltaIsKnownNonDisplayEvent(t *testing.T) {
+	raw := json.RawMessage(`{"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"具"}}`)
+
+	textDelta, thinkingDelta := extractDeltas(raw)
+	if textDelta != "" || thinkingDelta != "" {
+		t.Fatalf("extractDeltas = %q, %q; want no display deltas", textDelta, thinkingDelta)
+	}
+	if !isKnownNonDisplayPartialEvent(raw) {
+		t.Fatalf("input_json_delta should be recognized as non-display partial event")
+	}
+}
+
+func TestClaudeThinkingTokensMessageUpdatesSessionIDOnly(t *testing.T) {
+	events := make([]types.Event, 0, 1)
+	s := &session{onUpdate: func(event types.Event) {
+		events = append(events, event)
+	}}
+
+	msg := claudeagent.ThinkingTokensMessage{
+		Type:                 "system",
+		Subtype:              "thinking_tokens",
+		EstimatedTokens:      43,
+		EstimatedTokensDelta: 2,
+		SessionID:            "claude-session",
+	}
+	s.updateSessionID(msg)
+
+	if s.SessionID() != "claude-session" {
+		t.Fatalf("session id = %q, want claude-session", s.SessionID())
+	}
+	if len(events) != 0 {
+		t.Fatalf("events = %#v, want none", events)
+	}
+}
+
+func TestClaudeTaskNotificationEmitsTerminalTaskUpdate(t *testing.T) {
 	events := make([]types.Event, 0, 1)
 	s := &session{sessionID: "claude-session", onUpdate: func(event types.Event) {
 		events = append(events, event)
 	}}
+	s.trackTaskInfo("task-1", claudeTaskInfo{ToolUseID: "tool-1", TaskType: "local_agent"})
 
 	s.handleTaskNotificationMessage(claudeagent.TaskNotificationMessage{
-		TaskID:    "task-1",
-		ToolUseID: "tool-1",
-		Status:    claudeagent.TaskNotificationStatusCompleted,
-		Summary:   "subagent finished",
+		Subtype:    "task_notification",
+		TaskID:     "task-1",
+		ToolUseID:  "tool-1",
+		Status:     claudeagent.TaskNotificationStatusCompleted,
+		OutputFile: "/tmp/claude-task-output.md",
+		Summary:    "subagent finished",
 	})
 
-	if len(events) != 0 {
-		t.Fatalf("events = %#v, want none", events)
+	if len(events) != 1 {
+		t.Fatalf("events = %#v, want one terminal update", events)
+	}
+	if events[0].Type != types.EventTypeToolUpdate {
+		t.Fatalf("event type = %q, want tool update", events[0].Type)
+	}
+	toolCall, ok := events[0].Data.(types.ToolCall)
+	if !ok {
+		t.Fatalf("event data = %T, want ToolCall", events[0].Data)
+	}
+	if toolCall.CallID != "tool-1" || toolCall.Status != "complete" {
+		t.Fatalf("toolCall = %#v, want terminal update for original tool call", toolCall)
+	}
+	if toolCall.Meta["subtype"] != "task_notification" || toolCall.Meta["summary"] != "subagent finished" {
+		t.Fatalf("meta = %#v, want notification metadata", toolCall.Meta)
 	}
 }
 
@@ -178,6 +229,46 @@ func TestClaudeTaskProgressDoesNotOverridePendingToolTitle(t *testing.T) {
 	}
 	if toolCall.Meta["progress"] != "Acknowledging the user's instructions" {
 		t.Fatalf("progress meta = %#v", toolCall.Meta)
+	}
+}
+
+func TestClaudeTaskUpdatedUsesOriginalToolUseIDAndDescription(t *testing.T) {
+	var got types.Event
+	s := &session{sessionID: "claude-session", onUpdate: func(event types.Event) {
+		got = event
+	}}
+
+	s.handleTaskStartedMessage(claudeagent.TaskStartedMessage{
+		TaskID:       "aab5b6559d82ef106",
+		ToolUseID:    "call-task-1",
+		TaskType:     "local_agent",
+		Description:  "Review changed files",
+		SubagentType: "general-purpose",
+	})
+	s.handleTaskUpdatedMessage(claudeagent.TaskUpdatedMessage{
+		TaskID:  "aab5b6559d82ef106",
+		Subtype: "task_updated",
+		Patch:   claudeagent.TaskUpdatePatch{Status: claudeagent.TaskRunStatusCompleted},
+	})
+
+	if got.Type != types.EventTypeToolUpdate {
+		t.Fatalf("event type = %q, want tool update", got.Type)
+	}
+	toolCall, ok := got.Data.(types.ToolCall)
+	if !ok {
+		t.Fatalf("event data = %T, want ToolCall", got.Data)
+	}
+	if toolCall.CallID != "call-task-1" {
+		t.Fatalf("callID = %q, want original tool use id", toolCall.CallID)
+	}
+	if toolCall.Title != "Review changed files" {
+		t.Fatalf("title = %q, want original task description", toolCall.Title)
+	}
+	if toolCall.Status != "complete" {
+		t.Fatalf("status = %q, want complete", toolCall.Status)
+	}
+	if toolCall.Meta["taskId"] != "aab5b6559d82ef106" || toolCall.Meta["parentToolUseId"] != "call-task-1" {
+		t.Fatalf("meta = %#v, want task id and parent tool use id", toolCall.Meta)
 	}
 }
 

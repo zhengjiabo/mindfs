@@ -171,12 +171,15 @@ func TestInstallLayoutInstalled(t *testing.T) {
 	if got, want := filepath.Clean(layout.Prefix), filepath.Join("opt", "mindfs"); got != want {
 		t.Fatalf("layout prefix = %q, want %q", got, want)
 	}
-	bin, agents, web := layout.destinationPaths("mindfs")
+	bin, agents, taskTemplate, web := layout.destinationPaths("mindfs")
 	if got, want := bin, filepath.Join("opt", "mindfs", "bin", "mindfs"); got != want {
 		t.Fatalf("bin path = %q, want %q", got, want)
 	}
 	if got, want := agents, filepath.Join("opt", "mindfs", "share", "mindfs", "agents.json"); got != want {
 		t.Fatalf("agents path = %q, want %q", got, want)
+	}
+	if got, want := taskTemplate, filepath.Join("opt", "mindfs", "share", "mindfs", "task_template.json"); got != want {
+		t.Fatalf("task template path = %q, want %q", got, want)
 	}
 	if got, want := web, filepath.Join("opt", "mindfs", "share", "mindfs", "web"); got != want {
 		t.Fatalf("web path = %q, want %q", got, want)
@@ -195,12 +198,15 @@ func TestInstallLayoutPortable(t *testing.T) {
 	if got, want := filepath.Clean(layout.ExeDir), filepath.Join("tmp", "mindfs_v1.2.2_linux_amd64"); got != want {
 		t.Fatalf("layout exe dir = %q, want %q", got, want)
 	}
-	bin, agents, web := layout.destinationPaths("mindfs")
+	bin, agents, taskTemplate, web := layout.destinationPaths("mindfs")
 	if got, want := bin, filepath.Join("tmp", "mindfs_v1.2.2_linux_amd64", "mindfs"); got != want {
 		t.Fatalf("bin path = %q, want %q", got, want)
 	}
 	if got, want := agents, filepath.Join("tmp", "mindfs_v1.2.2_linux_amd64", "agents.json"); got != want {
 		t.Fatalf("agents path = %q, want %q", got, want)
+	}
+	if got, want := taskTemplate, filepath.Join("tmp", "mindfs_v1.2.2_linux_amd64", "task_template.json"); got != want {
+		t.Fatalf("task template path = %q, want %q", got, want)
 	}
 	if got, want := web, filepath.Join("tmp", "mindfs_v1.2.2_linux_amd64", "web"); got != want {
 		t.Fatalf("web path = %q, want %q", got, want)

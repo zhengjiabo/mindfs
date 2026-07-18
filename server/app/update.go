@@ -25,12 +25,21 @@ type UpdateResult struct {
 	Message        string
 }
 
+type updateInstaller interface {
+	AddListener(func(update.Status))
+	InstallLatest(context.Context) (update.Status, error)
+}
+
+var newUpdateInstaller = func(repo, currentVersion, executable string, args []string, interval time.Duration) updateInstaller {
+	return update.NewService(repo, currentVersion, executable, args, interval)
+}
+
 func UpdateNow(ctx context.Context, opts UpdateOptions) (UpdateResult, error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return UpdateResult{}, err
 	}
-	svc := update.NewService("a9gent/mindfs", opts.Version, executable, opts.Args, 10*time.Minute)
+	svc := newUpdateInstaller(resolveUpdateRepo(), opts.Version, executable, opts.Args, 10*time.Minute)
 	lastMessage := ""
 	if opts.Progress != nil {
 		svc.AddListener(func(st update.Status) {

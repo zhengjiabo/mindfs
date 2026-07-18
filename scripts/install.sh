@@ -194,6 +194,11 @@ if [[ -f "${PKG_DIR}/agents.json" ]]; then
   install -m 0644 "${PKG_DIR}/agents.json" "${PREFIX}/share/mindfs/agents.json"
   echo "  Agents  -> ${PREFIX}/share/mindfs/agents.json"
 fi
+if [[ -f "${PKG_DIR}/task_template.json" ]]; then
+  mkdir -p "${PREFIX}/share/mindfs"
+  install -m 0644 "${PKG_DIR}/task_template.json" "${PREFIX}/share/mindfs/task_template.json"
+  echo "  Templates -> ${PREFIX}/share/mindfs/task_template.json"
+fi
 
 # ── Install web assets (optional) ───────────────────────────────────────────
 if [[ -d "${PKG_DIR}/web" ]]; then

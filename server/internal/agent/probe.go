@@ -19,31 +19,34 @@ import (
 )
 
 type Status struct {
-	Name                string                   `json:"name"`
-	Protocol            Protocol                 `json:"protocol,omitempty"`
-	Installed           bool                     `json:"installed"`
-	Available           bool                     `json:"available"`
-	Version             string                   `json:"version,omitempty"`
-	Error               string                   `json:"error,omitempty"`
-	RuntimeError        string                   `json:"-"`
-	ProbeError          string                   `json:"-"`
-	LastProbe           time.Time                `json:"last_probe"`
-	CurrentModelID      string                   `json:"current_model_id,omitempty"`
-	CurrentModeID       string                   `json:"current_mode_id,omitempty"`
-	DefaultModelID      string                   `json:"default_model_id,omitempty"`
-	DefaultEffort       string                   `json:"default_effort,omitempty"`
-	DefaultFastService  string                   `json:"default_fast_service,omitempty"`
-	SupportsFastService bool                     `json:"supports_fast_service"`
-	Models              []agenttypes.ModelInfo   `json:"models,omitempty"`
-	Modes               []agenttypes.ModeInfo    `json:"modes"`
-	Efforts             []string                 `json:"efforts,omitempty"`
-	ModelsError         string                   `json:"models_error,omitempty"`
-	ModesError          string                   `json:"modes_error,omitempty"`
-	Commands            []agenttypes.CommandInfo `json:"commands,omitempty"`
-	CommandsError       string                   `json:"commands_error,omitempty"`
-	Brief               string                   `json:"brief,omitempty"`
-	InstallCommands     []string                 `json:"install_commands,omitempty"`
-	UpdateCommands      []string                 `json:"update_commands,omitempty"`
+	Name                          string                   `json:"name"`
+	Protocol                      Protocol                 `json:"protocol,omitempty"`
+	Installed                     bool                     `json:"installed"`
+	Available                     bool                     `json:"available"`
+	Version                       string                   `json:"version,omitempty"`
+	Error                         string                   `json:"error,omitempty"`
+	RuntimeError                  string                   `json:"-"`
+	ProbeError                    string                   `json:"-"`
+	LastProbe                     time.Time                `json:"last_probe"`
+	CurrentModelID                string                   `json:"current_model_id,omitempty"`
+	CurrentModeID                 string                   `json:"current_mode_id,omitempty"`
+	DefaultModelID                string                   `json:"default_model_id,omitempty"`
+	DefaultEffort                 string                   `json:"default_effort,omitempty"`
+	DefaultFastService            string                   `json:"default_fast_service,omitempty"`
+	LastConfigSelection           any                      `json:"last_config_selection,omitempty"`
+	SupportsAPIProviderSwitch     bool                     `json:"supports_api_provider_switch"`
+	SupportedAPIProviderProtocols []string                 `json:"supported_api_provider_protocols,omitempty"`
+	SupportsFastService           bool                     `json:"supports_fast_service"`
+	Models                        []agenttypes.ModelInfo   `json:"models,omitempty"`
+	Modes                         []agenttypes.ModeInfo    `json:"modes"`
+	Efforts                       []string                 `json:"efforts,omitempty"`
+	ModelsError                   string                   `json:"models_error,omitempty"`
+	ModesError                    string                   `json:"modes_error,omitempty"`
+	Commands                      []agenttypes.CommandInfo `json:"commands,omitempty"`
+	CommandsError                 string                   `json:"commands_error,omitempty"`
+	Brief                         string                   `json:"brief,omitempty"`
+	InstallCommands               []string                 `json:"install_commands,omitempty"`
+	UpdateCommands                []string                 `json:"update_commands,omitempty"`
 }
 
 const (
@@ -930,11 +933,27 @@ func preserveKnownCapabilities(prev Status, next Status) Status {
 func inferAgentEfforts(models []agenttypes.ModelInfo) []string {
 	hasSupport := false
 	looksLikeClaude := false
+	efforts := make([]string, 0)
+	seenEfforts := map[string]struct{}{}
+	appendEffort := func(effort string) {
+		effort = strings.TrimSpace(effort)
+		if effort == "" {
+			return
+		}
+		if _, ok := seenEfforts[effort]; ok {
+			return
+		}
+		seenEfforts[effort] = struct{}{}
+		efforts = append(efforts, effort)
+	}
 	for _, model := range models {
 		if !model.SupportEffort {
 			continue
 		}
 		hasSupport = true
+		for _, effort := range model.Efforts {
+			appendEffort(effort)
+		}
 		joined := strings.ToLower(strings.TrimSpace(model.ID) + " " + strings.TrimSpace(model.Name))
 		if strings.Contains(joined, "sonnet") || strings.Contains(joined, "opus") {
 			looksLikeClaude = true
@@ -942,6 +961,9 @@ func inferAgentEfforts(models []agenttypes.ModelInfo) []string {
 	}
 	if !hasSupport {
 		return nil
+	}
+	if len(efforts) > 0 {
+		return efforts
 	}
 	if looksLikeClaude {
 		return []string{"low", "medium", "high", "xhigh", "max"}

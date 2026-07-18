@@ -12,13 +12,19 @@ import (
 )
 
 type Credentials struct {
-	Relay RelayCredentials `json:"relay"`
+	Relay        RelayCredentials        `json:"relay"`
+	TokenStation TokenStationCredentials `json:"token_station,omitempty"`
 }
 
 type RelayCredentials struct {
 	DeviceToken string `json:"device_token"`
 	NodeID      string `json:"node_id"`
+	NodeName    string `json:"node_name,omitempty"`
 	Endpoint    string `json:"endpoint"`
+}
+
+type TokenStationCredentials struct {
+	Token string `json:"token"`
 }
 
 type CredentialsStore struct {
@@ -59,6 +65,30 @@ func (s *CredentialsStore) Save(creds Credentials) error {
 	if strings.TrimSpace(creds.Relay.DeviceToken) == "" || strings.TrimSpace(creds.Relay.Endpoint) == "" {
 		return errors.New("relay credentials require device_token and endpoint")
 	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	payload, err := json.MarshalIndent(creds, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(s.filePath, payload, 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(s.filePath, 0o600)
+}
+
+func (s *CredentialsStore) SaveTokenStation(token string) error {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return errors.New("token station credentials require token")
+	}
+	creds, err := s.Load()
+	if err != nil {
+		return err
+	}
+	creds.TokenStation.Token = token
 
 	s.mu.Lock()
 	defer s.mu.Unlock()

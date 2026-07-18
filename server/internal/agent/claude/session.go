@@ -33,6 +33,14 @@ type subagentMeta struct {
 	TaskDescription string
 }
 
+type claudeTaskInfo struct {
+	ToolUseID       string
+	TaskType        string
+	Description     string
+	SubagentType    string
+	TaskDescription string
+}
+
 type OpenOptions struct {
 	AgentName       string
 	SessionKey      string
@@ -197,7 +205,7 @@ type session struct {
 
 	pendingToolMu    sync.Mutex
 	pendingToolCalls map[string]types.ToolCall
-	taskTypes        map[string]string
+	taskInfos        map[string]claudeTaskInfo
 
 	questionMu    sync.Mutex
 	questionWaits map[string]chan askUserAnswerResult
@@ -624,6 +632,10 @@ func (s *session) consumeMessages() {
 		case claudeagent.TaskNotificationMessage:
 			s.flushAllDeltas()
 			s.handleTaskNotificationMessage(m)
+		case claudeagent.ThinkingTokensMessage:
+			// Live estimate for redacted thinking token progress. It is useful
+			// telemetry for clients that render token counters, but MindFS does
+			// not currently expose it in the session timeline.
 		case claudeagent.ResultMessage:
 			// End-of-turn boundary. Claude may place the final text here when no
 			// incremental tokens were streamed, so emit it as a last fallback.
@@ -657,7 +669,7 @@ func (s *session) handlePartialAssistantMessage(rawEvent json.RawMessage, meta s
 		s.mu.Unlock()
 	}
 	textDelta, thinkingDelta := extractDeltas(rawEvent)
-	if textDelta == "" && thinkingDelta == "" && len(rawEvent) > 0 {
+	if textDelta == "" && thinkingDelta == "" && len(rawEvent) > 0 && !isKnownNonDisplayPartialEvent(rawEvent) {
 		log.Printf("[agent/claude] output.unhandled.partial session=%s raw=%s", s.sessionKey, truncateRaw(rawEvent))
 	}
 	if meta.hasSubagentRef() {
@@ -889,7 +901,13 @@ func (s *session) handleSubagentResultMessage(msg claudeagent.SubagentResultMess
 }
 
 func (s *session) handleTaskStartedMessage(msg claudeagent.TaskStartedMessage) {
-	s.trackTaskType(msg.TaskID, msg.TaskType)
+	s.trackTaskInfo(msg.TaskID, claudeTaskInfo{
+		ToolUseID:       msg.ToolUseID,
+		TaskType:        msg.TaskType,
+		Description:     msg.Description,
+		SubagentType:    msg.SubagentType,
+		TaskDescription: msg.Description,
+	})
 	if isIgnoredClaudeTaskType(msg.TaskType) {
 		return
 	}
@@ -920,6 +938,12 @@ func (s *session) handleTaskProgressMessage(msg claudeagent.TaskProgressMessage)
 	if isIgnoredClaudeTaskType(s.taskType(msg.TaskID)) {
 		return
 	}
+	s.trackTaskInfo(msg.TaskID, claudeTaskInfo{
+		ToolUseID:       msg.ToolUseID,
+		Description:     msg.Description,
+		SubagentType:    msg.SubagentType,
+		TaskDescription: msg.Description,
+	})
 	callID := firstNonEmpty(msg.ToolUseID, msg.TaskID)
 	toolCall := claudeTaskToolCall(
 		callID,
@@ -945,15 +969,22 @@ func (s *session) handleTaskProgressMessage(msg claudeagent.TaskProgressMessage)
 }
 
 func (s *session) handleTaskUpdatedMessage(msg claudeagent.TaskUpdatedMessage) {
-	if isIgnoredClaudeTaskType(s.taskType(msg.TaskID)) {
+	info := s.taskInfo(msg.TaskID)
+	if isIgnoredClaudeTaskType(info.TaskType) {
 		return
 	}
+	description := firstNonEmpty(msg.Patch.Description, info.TaskDescription, info.Description)
 	toolCall := claudeTaskToolCall(
-		msg.TaskID,
+		firstNonEmpty(info.ToolUseID, msg.TaskID),
 		claudeTaskRunStatus(string(msg.Patch.Status)),
-		msg.Patch.Description,
+		description,
 		msg.Patch.Error,
-		subagentMeta{TaskID: msg.TaskID, TaskDescription: msg.Patch.Description},
+		subagentMeta{
+			ParentToolUseID: info.ToolUseID,
+			TaskID:          msg.TaskID,
+			SubagentType:    info.SubagentType,
+			TaskDescription: description,
+		},
 		map[string]any{
 			"subtype":        msg.Subtype,
 			"error":          msg.Patch.Error,
@@ -964,7 +995,38 @@ func (s *session) handleTaskUpdatedMessage(msg claudeagent.TaskUpdatedMessage) {
 }
 
 func (s *session) handleTaskNotificationMessage(msg claudeagent.TaskNotificationMessage) {
-	_ = msg
+	info := s.taskInfo(msg.TaskID)
+	if isIgnoredClaudeTaskType(info.TaskType) {
+		return
+	}
+	status := "complete"
+	switch msg.Status {
+	case claudeagent.TaskNotificationStatusFailed:
+		status = "failed"
+	case claudeagent.TaskNotificationStatusStopped:
+		status = "cancelled"
+	}
+	extra := map[string]any{
+		"subtype":    msg.Subtype,
+		"outputFile": msg.OutputFile,
+	}
+	if strings.TrimSpace(msg.Summary) != "" {
+		extra["summary"] = msg.Summary
+	}
+	toolCall := claudeTaskToolCall(
+		firstNonEmpty(msg.ToolUseID, info.ToolUseID, msg.TaskID),
+		status,
+		msg.Summary,
+		msg.Summary,
+		subagentMeta{
+			ParentToolUseID: firstNonEmpty(msg.ToolUseID, info.ToolUseID),
+			TaskID:          msg.TaskID,
+			SubagentType:    info.SubagentType,
+			TaskDescription: msg.Summary,
+		},
+		extra,
+	)
+	s.emit(types.Event{Type: types.EventTypeToolUpdate, SessionID: s.SessionID(), Data: toolCall})
 }
 
 func (s *session) awaitAskUserQuestion(ctx context.Context, qs claudeagent.QuestionSet) (claudeagent.Answers, error) {
@@ -1659,31 +1721,50 @@ func isIgnoredClaudeTaskType(taskType string) bool {
 	}
 }
 
-func (s *session) trackTaskType(taskID, taskType string) {
+func (s *session) trackTaskInfo(taskID string, update claudeTaskInfo) {
 	taskID = strings.TrimSpace(taskID)
-	taskType = strings.TrimSpace(taskType)
-	if taskID == "" || taskType == "" {
+	if taskID == "" {
 		return
 	}
 	s.pendingToolMu.Lock()
 	defer s.pendingToolMu.Unlock()
-	if s.taskTypes == nil {
-		s.taskTypes = make(map[string]string)
+	if s.taskInfos == nil {
+		s.taskInfos = make(map[string]claudeTaskInfo)
 	}
-	s.taskTypes[taskID] = taskType
+	info := s.taskInfos[taskID]
+	if value := strings.TrimSpace(update.ToolUseID); value != "" {
+		info.ToolUseID = value
+	}
+	if value := strings.TrimSpace(update.TaskType); value != "" {
+		info.TaskType = value
+	}
+	if value := strings.TrimSpace(update.Description); value != "" {
+		info.Description = value
+	}
+	if value := strings.TrimSpace(update.SubagentType); value != "" {
+		info.SubagentType = value
+	}
+	if value := strings.TrimSpace(update.TaskDescription); value != "" {
+		info.TaskDescription = value
+	}
+	s.taskInfos[taskID] = info
 }
 
-func (s *session) taskType(taskID string) string {
+func (s *session) taskInfo(taskID string) claudeTaskInfo {
 	taskID = strings.TrimSpace(taskID)
 	if taskID == "" {
-		return ""
+		return claudeTaskInfo{}
 	}
 	s.pendingToolMu.Lock()
 	defer s.pendingToolMu.Unlock()
-	if s.taskTypes == nil {
-		return ""
+	if s.taskInfos == nil {
+		return claudeTaskInfo{}
 	}
-	return s.taskTypes[taskID]
+	return s.taskInfos[taskID]
+}
+
+func (s *session) taskType(taskID string) string {
+	return s.taskInfo(taskID).TaskType
 }
 
 func (s *session) trackPendingToolCall(toolCall types.ToolCall) {
@@ -2253,6 +2334,8 @@ func (s *session) updateSessionID(msg any) {
 		s.setSessionID(m.SessionID)
 	case claudeagent.TaskNotificationMessage:
 		s.setSessionID(m.SessionID)
+	case claudeagent.ThinkingTokensMessage:
+		s.setSessionID(m.SessionID)
 	}
 }
 
@@ -2430,6 +2513,31 @@ func extractDeltas(raw json.RawMessage) (string, string) {
 		return "", event.Delta.Thinking
 	}
 	return event.Text, ""
+}
+
+func isKnownNonDisplayPartialEvent(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var event struct {
+		Type  string `json:"type"`
+		Delta struct {
+			Type string `json:"type"`
+		} `json:"delta"`
+	}
+	if err := json.Unmarshal(raw, &event); err != nil {
+		return false
+	}
+	switch strings.TrimSpace(event.Delta.Type) {
+	case "input_json_delta", "signature_delta":
+		return true
+	}
+	switch strings.TrimSpace(event.Type) {
+	case "content_block_start", "content_block_stop", "message_start", "message_stop":
+		return true
+	default:
+		return false
+	}
 }
 
 func mapToolKind(name string) types.ToolKind {

@@ -33,6 +33,8 @@ require (
 	modernc.org/memory v1.8.0 // indirect
 )
 
-replace github.com/fanwenlin/codex-go-sdk => github.com/yandc/codex-go-sdk v0.0.0-20260624054212-d21b33ab7e5b
+replace github.com/fanwenlin/codex-go-sdk => github.com/yandc/codex-go-sdk v0.0.0-20260715064458-1f8f4e355279
+
+replace github.com/coder/acp-go-sdk => github.com/yandc/acp-go-sdk v0.0.0-20260709074204-a1ec7b200d08
 
 replace github.com/roasbeef/claude-agent-sdk-go => github.com/yandc/claude-agent-sdk-go v0.0.0-20260617094341-2cad8bcf2686
