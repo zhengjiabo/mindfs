@@ -50,18 +50,20 @@ Installed paths:
 Useful checks:
 
 ```bash
+systemctl status mindfs --no-pager
 /root/.local/bin/mindfs -status -addr 0.0.0.0:7331 /root/mindfs
 ss -ltnp '( sport = :7331 )'
 readlink -f /proc/$(pgrep -x mindfs | head -n1)/exe
 ```
 
-Current production runtime on this server was verified on `2026-07-02` as:
+Current production runtime on this server was verified on `2026-07-18` as:
 
 ```bash
-/root/.local/bin/mindfs -addr 0.0.0.0:7331 /root/mindfs
+systemd unit: /etc/systemd/system/mindfs.service
+ExecStart=/root/.local/bin/mindfs -foreground -addr 0.0.0.0:7331 /root/mindfs
 ```
 
-Do not switch production to `./mindfs`, `go run`, Docker, PM2, or systemd unless the deployment model is intentionally changed.
+Do not switch production to `./mindfs`, `go run`, Docker, PM2, or a manually managed background process unless the deployment model is intentionally changed.
 
 
 ## E2EE / Pairing
@@ -279,12 +281,13 @@ scripts/install-custom.sh --version vX.Y.Z-custom.N --prefix /root/.local
 When restarting production, use this sequence:
 
 ```bash
-/root/.local/bin/mindfs -restart -addr 0.0.0.0:7331 /root/mindfs
+systemctl restart mindfs
+systemctl is-active mindfs
 ```
 
-This was the exact successful restart command used on `2026-07-02` after upgrading production to `v0.3.8-10-g8b5c6e3`.
+Do not use the binary's `-restart` command while systemd owns the process lifecycle.
 
-If E2EE is later re-enabled in `~/.config/mindfs/e2ee.json`, verify whether the restart command also needs `-e2ee` for that rollout.
+If E2EE is later re-enabled in `~/.config/mindfs/e2ee.json`, update the unit's `ExecStart` arguments as needed and run `systemctl daemon-reload` before restarting.
 
 Expected healthy state after restart:
 

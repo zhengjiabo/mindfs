@@ -1,4 +1,10 @@
-# MindFS v0.4.2
+# MindFS v0.4.2-custom.1
+
+## 自定义集成
+- 同步官方 MindFS v0.4.2
+- 保留 `zhengjiabo/mindfs` 自定义更新源和签名发布链
+- 保留生产环境验证过的 Codex `codex-tui` 客户端身份
+- 自定义安装和自更新支持内置任务模板
 
 ## 新功能
 - 支持 grok build
