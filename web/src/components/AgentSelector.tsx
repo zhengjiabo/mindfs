@@ -153,23 +153,46 @@ export function AgentSelector({
   );
   const submenuSelectedModel = useMemo(() => {
     if (!submenuAgentStatus) return null;
-    const fallbackModel =
-      submenuAgentStatus.default_model_id ||
-      submenuAgentStatus.current_model_id ||
-      "";
+    const followConfig = submenuAgentStatus.name === "codex";
+    const fallbackModel = followConfig
+      ? submenuAgentStatus.default_model_id || ""
+      : submenuAgentStatus.default_model_id ||
+        submenuAgentStatus.current_model_id ||
+        "";
     const targetModel =
       submenuAgentStatus.name === agent
         ? model || fallbackModel
         : fallbackModel;
+    if (!targetModel) {
+      return null;
+    }
     return (
       (submenuAgentStatus.models ?? []).find(
         (item) => item.id === targetModel,
       ) ?? null
     );
   }, [submenuAgentStatus, agent, model]);
+  const submenuConfigModel = useMemo(() => {
+    if (!submenuAgentStatus || submenuAgentStatus.name !== "codex") {
+      return null;
+    }
+    const configModelId =
+      submenuAgentStatus.current_model_id ||
+      submenuAgentStatus.default_model_id ||
+      "";
+    if (!configModelId) return null;
+    return (
+      (submenuAgentStatus.models ?? []).find((item) => item.id === configModelId) ??
+      null
+    );
+  }, [submenuAgentStatus]);
   const submenuEfforts = useMemo(
-    () => submenuSelectedModel?.efforts ?? submenuAgentStatus?.efforts ?? [],
-    [submenuAgentStatus, submenuSelectedModel],
+    () =>
+      submenuSelectedModel?.efforts ??
+      submenuConfigModel?.efforts ??
+      submenuAgentStatus?.efforts ??
+      [],
+    [submenuAgentStatus, submenuSelectedModel, submenuConfigModel],
   );
   const submenuModes = useMemo(
     () => submenuAgentStatus?.modes ?? [],
@@ -184,8 +207,14 @@ export function AgentSelector({
   }, [submenuAgentStatus, agent, mode]);
   const submenuIsCodex = submenuAgentStatus?.name === "codex";
   const submenuSupportsEffort = useMemo(
-    () => submenuEfforts.length > 0 && !!submenuSelectedModel?.supportEffort,
-    [submenuEfforts, submenuSelectedModel],
+    () =>
+      submenuEfforts.length > 0 &&
+      !!(
+        submenuSelectedModel?.supportEffort ||
+        submenuConfigModel?.supportEffort ||
+        submenuIsCodex
+      ),
+    [submenuEfforts, submenuSelectedModel, submenuConfigModel, submenuIsCodex],
   );
   const submenuSupportsServiceTier =
     !!submenuAgentStatus?.supports_fast_service;
@@ -203,6 +232,9 @@ export function AgentSelector({
     }
     if (agent && model) {
       return `${agent} · ${model}`;
+    }
+    if (agent === "codex") {
+      return `${agent} · ${t("agent.followConfig")}`;
     }
     return undefined;
   }, [agent, model, t, warnUnavailable]);
@@ -262,7 +294,11 @@ export function AgentSelector({
 
   const handleAgentRowClick = useCallback(
     (entry: AgentStatus) => {
-      handleAgentSelect(entry.name, entry.default_model_id || entry.current_model_id || "");
+      const nextModel =
+        entry.name === "codex"
+          ? entry.default_model_id || ""
+          : entry.default_model_id || entry.current_model_id || "";
+      handleAgentSelect(entry.name, nextModel);
     },
     [handleAgentSelect],
   );
@@ -794,10 +830,50 @@ export function AgentSelector({
                   title={t("agent.model")}
                   expanded={modelSectionExpanded}
                   onToggle={() => setModelSectionExpanded((prev) => !prev)}
-                  value={submenuSelectedModel?.id || undefined}
+                  value={
+                    submenuSelectedModel?.id ||
+                    (submenuIsCodex &&
+                    submenuAgentStatus.name === agent &&
+                    !model
+                      ? t("agent.followConfig")
+                      : undefined)
+                  }
                 />
                 {modelSectionExpanded ? (
                   <>
+                    {submenuIsCodex ? (
+                      <button
+                        key="__follow_config__"
+                        type="button"
+                        onClick={() =>
+                          handleAgentSelect(submenuAgentStatus.name, "")
+                        }
+                        style={sectionItemStyle(
+                          submenuAgentStatus.name === agent && !model,
+                          false,
+                        )}
+                        title={t("agent.followConfigHint")}
+                      >
+                        <span style={{ fontSize: "13px", fontWeight: 500 }}>
+                          {t("agent.followConfig")}
+                        </span>
+                        <span
+                          style={{
+                            fontSize: "11px",
+                            color: "var(--text-secondary)",
+                            whiteSpace: "normal",
+                            overflowWrap: "anywhere",
+                            wordBreak: "break-word",
+                          }}
+                        >
+                          {submenuConfigModel?.id
+                            ? t("agent.followConfigCurrent", {
+                                model: submenuConfigModel.id,
+                              })
+                            : t("agent.followConfigHint")}
+                        </span>
+                      </button>
+                    ) : null}
                     {submenuModels.map((item, index) => {
                       const isSelected =
                         submenuAgentStatus.name === agent &&
@@ -811,7 +887,7 @@ export function AgentSelector({
                           }
                           style={sectionItemStyle(
                             isSelected,
-                            index > 0,
+                            submenuIsCodex || index > 0,
                             item.hidden ? 0.66 : 1,
                           )}
                           title={item.description || item.id}

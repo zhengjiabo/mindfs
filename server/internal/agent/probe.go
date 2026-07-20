@@ -848,8 +848,13 @@ func populateProbeModels(ctx context.Context, sess agenttypes.Session, status *S
 			log.Printf("[agent/probe] defaults.error agent=%s err=%v", status.Name, defaultsErr)
 		}
 
-		if value := strings.TrimSpace(defaults.Model); value != "" {
-			status.DefaultModelID = value
+		// For Codex, config.toml model is the runtime current model, not an
+		// explicit user preference. Keep DefaultModelID empty so clients can
+		// leave model unset and let Codex read its own config.
+		if strings.TrimSpace(status.Name) != "codex" {
+			if value := strings.TrimSpace(defaults.Model); value != "" {
+				status.DefaultModelID = value
+			}
 		}
 		if value := strings.TrimSpace(defaults.Effort); value != "" {
 			status.DefaultEffort = value

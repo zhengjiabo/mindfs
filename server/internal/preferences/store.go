@@ -95,7 +95,9 @@ func (s *Store) UpdateAgentDefaultsIfChanged(agentName, model, effort, fastServi
 		s.data.Agents = map[string]AgentDefaults{}
 	}
 	next := s.data.Agents[agentName]
-	if model != "" {
+	// Empty model means follow config for Codex and clears any previous
+	// explicit override. Other agents keep non-empty-only updates.
+	if model != "" || agentName == "codex" {
 		next.Model = model
 	}
 	if effort != "" {
@@ -151,8 +153,15 @@ func (s *Store) ApplyAgentDefaults(statuses []agent.Status) []agent.Status {
 	}
 	out := append([]agent.Status(nil), statuses...)
 	for i := range out {
-		defaults := s.data.Agents[strings.TrimSpace(out[i].Name)]
-		if defaults.Model != "" {
+		defaults, hasDefaults := s.data.Agents[strings.TrimSpace(out[i].Name)]
+		if !hasDefaults {
+			continue
+		}
+		// Codex follows ~/.codex/config.toml unless the user explicitly
+		// selected a model (stored as a non-empty preference).
+		if strings.TrimSpace(out[i].Name) == "codex" {
+			out[i].DefaultModelID = strings.TrimSpace(defaults.Model)
+		} else if defaults.Model != "" {
 			out[i].DefaultModelID = defaults.Model
 		}
 		if defaults.Effort != "" {

@@ -798,6 +798,8 @@ func (s *session) ListModels(ctx context.Context) (types.ModelList, error) {
 			currentModelID = model.Model
 		}
 	}
+	// Prefer config/runtime model as the current indicator, but leave
+	// DefaultModelID empty at probe layer so MindFS does not force it.
 	if strings.TrimSpace(defaults.Model) != "" {
 		currentModelID = strings.TrimSpace(defaults.Model)
 	}

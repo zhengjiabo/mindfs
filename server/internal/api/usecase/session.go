@@ -1847,18 +1847,20 @@ func resolveRuntimeModel(current *session.Session, runtime agenttypes.Session, r
 	if model := strings.TrimSpace(requested); model != "" {
 		return model
 	}
+	// Empty request means follow session/runtime config. Prefer the explicit
+	// session model pin, and only then the live runtime model. Do not re-pin
+	// from historical exchange models, otherwise "follow config" cannot stick.
+	if current != nil {
+		if model := strings.TrimSpace(current.Model); model != "" {
+			return model
+		}
+	}
 	if runtime != nil {
 		if model := strings.TrimSpace(runtime.CurrentModel()); model != "" {
 			return model
 		}
 	}
-	if model := resolveSessionExchangeModel(current); model != "" {
-		return model
-	}
-	if current == nil {
-		return ""
-	}
-	return strings.TrimSpace(current.Model)
+	return ""
 }
 
 func (s *Service) resolveExchangeModelDisplayName(agentName, model string) string {
@@ -2212,17 +2214,24 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 	resolvedModel := resolveRuntimeModel(current, sess, in.Model)
 	resolvedEffort := resolveRuntimeEffort(in.Agent, current, in.Effort)
 	resolvedFastService := resolveRuntimeFastService(in.Agent, current, in.FastService)
+	// Persist only the user-requested model preference. Empty means follow runtime/config.
+	preferredModel := strings.TrimSpace(in.Model)
 	if prefs := s.Registry.GetPreferences(); prefs != nil {
-		if changed, err := prefs.UpdateAgentDefaultsIfChanged(in.Agent, resolvedModel, resolvedEffort, resolvedFastService); err != nil {
+		if changed, err := prefs.UpdateAgentDefaultsIfChanged(in.Agent, preferredModel, resolvedEffort, resolvedFastService); err != nil {
 			log.Printf("[preferences] agent_defaults.update.error agent=%s err=%v", strings.TrimSpace(in.Agent), err)
 		} else if changed {
-			log.Printf("[preferences] agent_defaults.update.done agent=%s model=%q effort=%q fast_service=%q", strings.TrimSpace(in.Agent), resolvedModel, resolvedEffort, resolvedFastService)
+			log.Printf("[preferences] agent_defaults.update.done agent=%s model=%q effort=%q fast_service=%q", strings.TrimSpace(in.Agent), preferredModel, resolvedEffort, resolvedFastService)
 			if in.OnAgentDefaultsChanged != nil {
 				in.OnAgentDefaultsChanged(strings.TrimSpace(in.Agent))
 			}
 		}
 	}
-	if err := manager.UpdateModel(ctx, current, resolvedModel); err != nil {
+	// Keep session model empty when user is following config so later turns do not re-pin it.
+	sessionModel := preferredModel
+	if sessionModel == "" && strings.TrimSpace(in.Agent) != "codex" {
+		sessionModel = resolvedModel
+	}
+	if err := manager.UpdateModel(ctx, current, sessionModel); err != nil {
 		return err
 	}
 	resolvedMode := resolveRuntimeMode(current, in.Mode)

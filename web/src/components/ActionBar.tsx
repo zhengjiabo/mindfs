@@ -160,8 +160,14 @@ const IME_ENTER_GUARD_MS = 120;
 const CANDIDATE_FETCH_DEBOUNCE_MS = 512;
 
 function getAgentDefaults(agent?: AgentStatus | null) {
+  // Codex leaves model empty to follow ~/.codex/config.toml unless the user
+  // explicitly saved a non-empty preference (exposed as default_model_id).
+  const model =
+    agent?.name === "codex"
+      ? agent?.default_model_id || ""
+      : agent?.default_model_id || agent?.current_model_id || "";
   return {
-    model: agent?.default_model_id || agent?.current_model_id || "",
+    model,
     effort: agent?.default_effort || "",
     fastService: (agent?.default_fast_service || "") as "" | "on" | "off",
   } as const;
@@ -573,7 +579,9 @@ export function ActionBar({
   const selectedModelInfo =
     (selectedAgent?.models ?? []).find((item) => item.id === model)
     || (selectedAgent?.models ?? []).find(
-      (item) => item.id === (selectedAgent?.default_model_id || selectedAgent?.current_model_id),
+      (item) =>
+        item.id ===
+        (selectedAgent?.default_model_id || selectedAgent?.current_model_id),
     );
   const availableEfforts = selectedModelInfo?.efforts ?? selectedAgent?.efforts ?? [];
   const isCodexEffortAgent = selectedAgent?.name === "codex";
