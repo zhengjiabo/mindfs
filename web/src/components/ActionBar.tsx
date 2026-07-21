@@ -896,7 +896,7 @@ export function ActionBar({
         payload,
         mode,
         mode === "command" ? "" : agent,
-        model || undefined,
+        mode === "command" ? undefined : model,
         agentMode || undefined,
         supportsEffort ? effort || undefined : undefined,
         supportsServiceTier ? fastService : undefined,
@@ -1646,7 +1646,7 @@ export function ActionBar({
                       const nextStatus = agents.find((item) => item.name === nextAgent);
                       const defaults = getAgentDefaults(nextStatus);
                       setAgent(nextAgent);
-                      setModel(nextModel || defaults.model);
+                      setModel(nextModel ?? defaults.model);
                       setAgentMode("");
                       setEffort(defaults.effort);
                       setFastService(defaults.fastService);

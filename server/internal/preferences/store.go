@@ -37,6 +37,12 @@ type LastConfigSelection struct {
 	Name string `json:"name,omitempty"`
 }
 
+type AgentDefaultsPatch struct {
+	Model       *string
+	Effort      string
+	FastService string
+}
+
 func NewStore() (*Store, error) {
 	configDir, err := config.MindFSConfigDir()
 	if err != nil {
@@ -77,7 +83,7 @@ func (s *Store) load() error {
 	return nil
 }
 
-func (s *Store) UpdateAgentDefaultsIfChanged(agentName, model, effort, fastService string) (bool, error) {
+func (s *Store) UpdateAgentDefaultsIfChanged(agentName string, patch AgentDefaultsPatch) (bool, error) {
 	if s == nil {
 		return false, nil
 	}
@@ -85,9 +91,8 @@ func (s *Store) UpdateAgentDefaultsIfChanged(agentName, model, effort, fastServi
 	if agentName == "" {
 		return false, nil
 	}
-	model = strings.TrimSpace(model)
-	effort = strings.TrimSpace(effort)
-	fastService = strings.TrimSpace(fastService)
+	patch.Effort = strings.TrimSpace(patch.Effort)
+	patch.FastService = strings.TrimSpace(patch.FastService)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -97,14 +102,17 @@ func (s *Store) UpdateAgentDefaultsIfChanged(agentName, model, effort, fastServi
 	next := s.data.Agents[agentName]
 	// Empty model means follow config for Codex and clears any previous
 	// explicit override. Other agents keep non-empty-only updates.
-	if model != "" || agentName == "codex" {
-		next.Model = model
+	if patch.Model != nil {
+		model := strings.TrimSpace(*patch.Model)
+		if model != "" || agentName == "codex" {
+			next.Model = model
+		}
 	}
-	if effort != "" {
-		next.Effort = effort
+	if patch.Effort != "" {
+		next.Effort = patch.Effort
 	}
-	if fastService != "" {
-		next.FastService = fastService
+	if patch.FastService != "" {
+		next.FastService = patch.FastService
 	}
 	if s.data.Agents[agentName] == next {
 		return false, nil

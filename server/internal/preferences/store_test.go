@@ -19,7 +19,11 @@ func TestUpdateAgentDefaultsClearsEmptyModel(t *testing.T) {
 		}},
 	}
 
-	changed, err := store.UpdateAgentDefaultsIfChanged("codex", "", "high", "")
+	model := ""
+	changed, err := store.UpdateAgentDefaultsIfChanged("codex", AgentDefaultsPatch{
+		Model:  &model,
+		Effort: "high",
+	})
 	if err != nil {
 		t.Fatalf("UpdateAgentDefaultsIfChanged: %v", err)
 	}
@@ -43,6 +47,26 @@ func TestUpdateAgentDefaultsClearsEmptyModel(t *testing.T) {
 	}
 	if got := data.Agents["codex"].Model; got != "" {
 		t.Fatalf("persisted model = %q, want empty", got)
+	}
+}
+
+func TestUpdateAgentDefaultsLeavesModelWhenPatchOmitsIt(t *testing.T) {
+	store := &Store{
+		path: filepath.Join(t.TempDir(), preferencesFileName),
+		data: UserPreferences{Agents: map[string]AgentDefaults{
+			"codex": {Model: "gpt-5.6-sol", Effort: "medium"},
+		}},
+	}
+
+	changed, err := store.UpdateAgentDefaultsIfChanged("codex", AgentDefaultsPatch{Effort: "high"})
+	if err != nil {
+		t.Fatalf("UpdateAgentDefaultsIfChanged: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected effort update to change preferences")
+	}
+	if got := store.data.Agents["codex"].Model; got != "gpt-5.6-sol" {
+		t.Fatalf("model = %q, want gpt-5.6-sol", got)
 	}
 }
 

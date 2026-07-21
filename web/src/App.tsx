@@ -5904,7 +5904,7 @@ export function App({ onGoHome }: AppProps) {
       }
       let effectiveMode = mode,
         effectiveAgent = agent,
-        effectiveModel = model || "",
+        effectiveModel = model ?? "",
         effectiveAgentMode = agentMode || "",
         effectiveEffort = effort || "",
         effectiveFastService = (fastService || "") as "" | "on" | "off",
@@ -5936,9 +5936,13 @@ export function App({ onGoHome }: AppProps) {
           (useTargetSessionDefaults ? previousAgent : agent) ||
           previousAgent ||
           "";
-        effectiveModel =
-          (useTargetSessionDefaults ? session.model || "" : model) ||
-          (effectiveAgent === previousAgent ? session.model || "" : "");
+        effectiveModel = useTargetSessionDefaults
+          ? session.model || ""
+          : model !== undefined
+            ? model
+            : effectiveAgent === previousAgent
+              ? session.model || ""
+              : "";
         effectiveAgentMode =
           (useTargetSessionDefaults ? (session as any).mode || "" : agentMode) ||
           (effectiveAgent === previousAgent ? (session as any).mode || "" : "");
@@ -6084,7 +6088,7 @@ export function App({ onGoHome }: AppProps) {
           targetSessionKey,
           transientSlashCommand,
           effectiveAgent,
-          effectiveModel || undefined,
+          effectiveModel,
           effectiveAgentMode || undefined,
           effectiveEffort || undefined,
           effectiveFastService,
@@ -6311,7 +6315,7 @@ export function App({ onGoHome }: AppProps) {
         outgoingMessage,
         effectiveMode,
         effectiveAgent,
-        effectiveModel || undefined,
+        effectiveMode === "command" ? undefined : effectiveModel,
         effectiveAgentMode || undefined,
         effectiveEffort || undefined,
         effectiveFastService,

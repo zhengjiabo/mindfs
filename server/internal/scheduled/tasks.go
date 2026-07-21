@@ -479,14 +479,15 @@ func (s *Service) runTask(ctx context.Context, task Task, force bool) error {
 	}
 	sessionName := current.Name
 	err = s.usecase.SendMessage(ctx, usecase.SendMessageInput{
-		RootID:      current.RootID,
-		Key:         sessionKey,
-		Agent:       current.Agent,
-		Model:       current.Model,
-		Mode:        current.Mode,
-		Effort:      current.Effort,
-		FastService: current.FastService,
-		Content:     current.Prompt,
+		RootID:         current.RootID,
+		Key:            sessionKey,
+		Agent:          current.Agent,
+		Model:          current.Model,
+		ModelSpecified: true,
+		Mode:           current.Mode,
+		Effort:         current.Effort,
+		FastService:    current.FastService,
+		Content:        current.Prompt,
 		ClientCtx: usecase.ClientContext{
 			CurrentRoot: current.RootID,
 		},

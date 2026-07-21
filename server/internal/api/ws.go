@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
@@ -555,7 +556,11 @@ func (h *WSHandler) handleSessionMessage(ctx context.Context, conn *websocket.Co
 	planMode := planRequested
 	sessionType := getString(req.Payload, "type")
 	agentName := getString(req.Payload, "agent")
-	model := getString(req.Payload, "model")
+	model, modelSpecified, err := getOptionalString(req.Payload, "model")
+	if err != nil {
+		h.sendWSError(conn, clientID, req.ID, "invalid_request", err.Error())
+		return
+	}
 	agentMode := getString(req.Payload, "agent_mode")
 	effort := getString(req.Payload, "effort")
 	fastService := normalizeFastServiceValue(getString(req.Payload, "fast_service"))
@@ -646,14 +651,15 @@ func (h *WSHandler) handleSessionMessage(ctx context.Context, conn *websocket.Co
 	}
 	clientCtx := parseClientContext(req.Payload, rootID)
 	userMessage := PendingUserMessage{
-		Agent:       agentName,
-		Model:       model,
-		Mode:        agentMode,
-		Effort:      effort,
-		FastService: fastService,
-		PlanMode:    planMode,
-		Content:     content,
-		Timestamp:   time.Now().UTC(),
+		Agent:          agentName,
+		Model:          model,
+		ModelSpecified: modelSpecified,
+		Mode:           agentMode,
+		Effort:         effort,
+		FastService:    fastService,
+		PlanMode:       planMode,
+		Content:        content,
+		Timestamp:      time.Now().UTC(),
 	}
 	job := sessionMessageJob{
 		RootID:          rootID,
@@ -688,7 +694,11 @@ func (h *WSHandler) handleSessionSlashCommandRun(ctx context.Context, conn *webs
 	key := getString(req.Payload, "session_key")
 	requestID := strings.TrimSpace(req.ID)
 	agentName := getString(req.Payload, "agent")
-	model := getString(req.Payload, "model")
+	model, modelSpecified, err := getOptionalString(req.Payload, "model")
+	if err != nil {
+		h.sendWSError(conn, clientID, req.ID, "invalid_request", err.Error())
+		return
+	}
 	agentMode := getString(req.Payload, "agent_mode")
 	effort := getString(req.Payload, "effort")
 	fastService := normalizeFastServiceValue(getString(req.Payload, "fast_service"))
@@ -724,15 +734,16 @@ func (h *WSHandler) handleSessionSlashCommandRun(ctx context.Context, conn *webs
 	msgCtx, cancel := h.sessionMessageContext()
 	defer cancel()
 	updateTracker := newTurnUpdateTracker()
-	err := uc.RunTransientSlashCommand(msgCtx, usecase.RunTransientSlashCommandInput{
-		RootID:      rootID,
-		Key:         key,
-		Agent:       agentName,
-		Model:       model,
-		Mode:        agentMode,
-		Effort:      effort,
-		FastService: fastService,
-		Command:     normalizedCommand,
+	err = uc.RunTransientSlashCommand(msgCtx, usecase.RunTransientSlashCommandInput{
+		RootID:         rootID,
+		Key:            key,
+		Agent:          agentName,
+		Model:          model,
+		ModelSpecified: modelSpecified,
+		Mode:           agentMode,
+		Effort:         effort,
+		FastService:    fastService,
+		Command:        normalizedCommand,
 		OnUpdate: func(update agenttypes.Event) {
 			updateTracker.Begin()
 			defer updateTracker.End()
@@ -845,18 +856,19 @@ func (h *WSHandler) runSessionMessage(job sessionMessageJob) {
 	}
 
 	err := uc.SendMessage(msgCtx, usecase.SendMessageInput{
-		RootID:       rootID,
-		Key:          key,
-		Agent:        job.User.Agent,
-		Model:        job.User.Model,
-		Mode:         job.User.Mode,
-		Effort:       job.User.Effort,
-		FastService:  job.User.FastService,
-		PlanMode:     &job.User.PlanMode,
-		Shell:        job.Shell,
-		TerminalCols: job.TerminalCols,
-		Content:      job.User.Content,
-		ClientCtx:    job.ClientCtx,
+		RootID:         rootID,
+		Key:            key,
+		Agent:          job.User.Agent,
+		Model:          job.User.Model,
+		ModelSpecified: job.User.ModelSpecified,
+		Mode:           job.User.Mode,
+		Effort:         job.User.Effort,
+		FastService:    job.User.FastService,
+		PlanMode:       &job.User.PlanMode,
+		Shell:          job.Shell,
+		TerminalCols:   job.TerminalCols,
+		Content:        job.User.Content,
+		ClientCtx:      job.ClientCtx,
 		OnStart: func() {
 			h.AppContext.ClearTaskAuxFlagsForSession(rootID, key)
 			streamHub.BroadcastSessionUserMessage(rootID, key, job.SessionType, job.SessionName, job.User.Agent, job.User.Model, job.User.Mode, job.User.Effort, job.User.FastService, job.User.PlanMode, job.User.Content, job.ExcludeClientID, job.Queued)
@@ -1209,6 +1221,24 @@ func getString(payload map[string]any, key string) string {
 		}
 	}
 	return ""
+}
+
+func getOptionalString(payload map[string]any, key string) (string, bool, error) {
+	if payload == nil {
+		return "", false, nil
+	}
+	value, ok := payload[key]
+	if !ok {
+		return "", false, nil
+	}
+	if value == nil {
+		return "", false, nil
+	}
+	text, ok := value.(string)
+	if !ok {
+		return "", true, fmt.Errorf("%s must be a string", key)
+	}
+	return text, true, nil
 }
 
 func getInt(payload map[string]any, key string) int {

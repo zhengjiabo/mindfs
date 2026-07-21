@@ -20,6 +20,7 @@ import (
 	agenttypes "mindfs/server/internal/agent/types"
 	"mindfs/server/internal/commandexec"
 	"mindfs/server/internal/fs"
+	"mindfs/server/internal/preferences"
 	"mindfs/server/internal/session"
 )
 
@@ -1038,6 +1039,7 @@ type SendMessageInput struct {
 	Key                    string
 	Agent                  string
 	Model                  string
+	ModelSpecified         bool
 	Mode                   string
 	Effort                 string
 	FastService            string
@@ -1054,15 +1056,16 @@ type SendMessageInput struct {
 }
 
 type RunTransientSlashCommandInput struct {
-	RootID      string
-	Key         string
-	Agent       string
-	Model       string
-	Mode        string
-	Effort      string
-	FastService string
-	Command     string
-	OnUpdate    func(agenttypes.Event)
+	RootID         string
+	Key            string
+	Agent          string
+	Model          string
+	ModelSpecified bool
+	Mode           string
+	Effort         string
+	FastService    string
+	Command        string
+	OnUpdate       func(agenttypes.Event)
 }
 
 type codexDeviceCodeLoginSession interface {
@@ -1680,27 +1683,23 @@ func (s *Service) ensureAgentSession(
 	current *session.Session,
 	agentName string,
 	model string,
+	modelSpecified bool,
 	mode string,
 	effort string,
 	fastService string,
 	rootAbs string,
 ) (agenttypes.Session, *int, error) {
 	poolSessionKey := agentPoolSessionKey(current.Key, agentName)
-	nextModel := resolveRuntimeModel(current, nil, model)
+	nextModel := resolveRequestedModelOverride(agentName, current, model, modelSpecified)
 	nextMode := resolveRuntimeMode(current, mode)
 	nextEffort := resolveRuntimeEffort(agentName, current, effort)
 	nextFastService := resolveRuntimeFastService(agentName, current, fastService)
 	nextPlanMode := current != nil && current.PlanMode
-	currentModel := ""
 	currentMode := ""
 	currentEffort := ""
 	currentFastService := ""
 	currentPlanMode := false
 	if current != nil {
-		currentModel = resolveSessionExchangeModel(current)
-		if currentModel == "" {
-			currentModel = strings.TrimSpace(current.Model)
-		}
 		currentMode = resolveSessionExchangeMode(current)
 		currentEffort = session.InferEffortFromSession(current)
 		currentFastService = inferFastServiceFromSession(current)
@@ -1709,8 +1708,9 @@ func (s *Service) ensureAgentSession(
 	if existing, ok := pool.Get(poolSessionKey); ok {
 		if !shouldReopenSessionForSetting(pool, agentName, currentEffort, nextEffort) &&
 			currentFastService == nextFastService {
-			if current != nil && currentModel != nextModel {
-				log.Printf("[session/model] switch.detected session=%s agent=%s from=%q to=%q action=set_runtime_model", current.Key, agentName, currentModel, nextModel)
+			currentRuntimeModel := strings.TrimSpace(existing.CurrentModel())
+			if currentRuntimeModel != nextModel {
+				log.Printf("[session/model] switch.detected session=%s agent=%s from=%q to=%q action=set_runtime_model", current.Key, agentName, currentRuntimeModel, nextModel)
 				if err := existing.SetModel(ctx, nextModel); err != nil {
 					if prober := s.Registry.GetProber(); prober != nil {
 						prober.ReportRuntimeFailure(agentName, err)
@@ -1843,22 +1843,29 @@ func shouldReopenSessionForSetting(pool *agent.Pool, agentName, currentValue, ne
 	return protocol == agent.ProtocolCodexSDK || protocol == agent.ProtocolClaudeSDK
 }
 
-func resolveRuntimeModel(current *session.Session, runtime agenttypes.Session, requested string) string {
-	if model := strings.TrimSpace(requested); model != "" {
-		return model
+func resolveRequestedModelOverride(agentName string, current *session.Session, requested string, specified bool) string {
+	requested = strings.TrimSpace(requested)
+	if requested != "" {
+		return requested
 	}
-	// Empty request means follow session/runtime config. Prefer the explicit
-	// session model pin, and only then the live runtime model. Do not re-pin
-	// from historical exchange models, otherwise "follow config" cannot stick.
+	agentName = strings.TrimSpace(agentName)
+	if agentName == "codex" && specified {
+		return ""
+	}
 	if current != nil {
 		if model := strings.TrimSpace(current.Model); model != "" {
 			return model
 		}
 	}
+	return ""
+}
+
+func resolveEffectiveRuntimeModel(agentName string, current *session.Session, runtime agenttypes.Session, requested string, specified bool) string {
+	if model := resolveRequestedModelOverride(agentName, current, requested, specified); model != "" {
+		return model
+	}
 	if runtime != nil {
-		if model := strings.TrimSpace(runtime.CurrentModel()); model != "" {
-			return model
-		}
+		return strings.TrimSpace(runtime.CurrentModel())
 	}
 	return ""
 }
@@ -1974,6 +1981,7 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 	if current.Type == session.TypeCommand {
 		return s.sendCommandMessage(turnCtx, in, manager, current)
 	}
+	modelSpecified := in.ModelSpecified || strings.TrimSpace(in.Model) != ""
 	if err := s.validateAgentModel(in.Agent, in.Model); err != nil {
 		log.Printf("[session/model] validate.error root=%s session=%s agent=%s model=%q err=%v", in.RootID, in.Key, strings.TrimSpace(in.Agent), strings.TrimSpace(in.Model), err)
 		return err
@@ -1995,7 +2003,7 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 		rootAbs = filepath.Clean(runtimeRootPath)
 	}
 	planMode := current != nil && current.PlanMode
-	sess, agentCtxSeq, err := s.ensureAgentSession(turnCtx, agentPool, manager, current, in.Agent, in.Model, in.Mode, in.Effort, in.FastService, rootAbs)
+	sess, agentCtxSeq, err := s.ensureAgentSession(turnCtx, agentPool, manager, current, in.Agent, in.Model, modelSpecified, in.Mode, in.Effort, in.FastService, rootAbs)
 	if err != nil {
 		return err
 	}
@@ -2211,27 +2219,35 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 	if sendErr != nil && !isCanceledTurnError(sendErr) {
 		log.Printf("[session] turn.send.error root=%s session=%s agent=%s err=%v", in.RootID, current.Key, in.Agent, sendErr)
 	}
-	resolvedModel := resolveRuntimeModel(current, sess, in.Model)
+	resolvedModel := resolveEffectiveRuntimeModel(in.Agent, current, sess, in.Model, modelSpecified)
 	resolvedEffort := resolveRuntimeEffort(in.Agent, current, in.Effort)
 	resolvedFastService := resolveRuntimeFastService(in.Agent, current, in.FastService)
-	// Persist only the user-requested model preference. Empty means follow runtime/config.
 	preferredModel := strings.TrimSpace(in.Model)
+	var modelPatch *string
+	if modelSpecified {
+		modelPatch = &preferredModel
+	}
 	if prefs := s.Registry.GetPreferences(); prefs != nil {
-		if changed, err := prefs.UpdateAgentDefaultsIfChanged(in.Agent, preferredModel, resolvedEffort, resolvedFastService); err != nil {
+		if changed, err := prefs.UpdateAgentDefaultsIfChanged(in.Agent, preferences.AgentDefaultsPatch{
+			Model:       modelPatch,
+			Effort:      resolvedEffort,
+			FastService: resolvedFastService,
+		}); err != nil {
 			log.Printf("[preferences] agent_defaults.update.error agent=%s err=%v", strings.TrimSpace(in.Agent), err)
 		} else if changed {
-			log.Printf("[preferences] agent_defaults.update.done agent=%s model=%q effort=%q fast_service=%q", strings.TrimSpace(in.Agent), preferredModel, resolvedEffort, resolvedFastService)
+			log.Printf("[preferences] agent_defaults.update.done agent=%s model=%q model_specified=%t effort=%q fast_service=%q", strings.TrimSpace(in.Agent), preferredModel, modelSpecified, resolvedEffort, resolvedFastService)
 			if in.OnAgentDefaultsChanged != nil {
 				in.OnAgentDefaultsChanged(strings.TrimSpace(in.Agent))
 			}
 		}
 	}
-	// Keep session model empty when user is following config so later turns do not re-pin it.
-	sessionModel := preferredModel
-	if sessionModel == "" && strings.TrimSpace(in.Agent) != "codex" {
-		sessionModel = resolvedModel
-	}
-	if err := manager.UpdateModel(ctx, current, sessionModel); err != nil {
+	if strings.TrimSpace(in.Agent) == "codex" {
+		if modelSpecified {
+			if err := manager.UpdateModel(ctx, current, preferredModel); err != nil {
+				return err
+			}
+		}
+	} else if err := manager.UpdateModel(ctx, current, resolvedModel); err != nil {
 		return err
 	}
 	resolvedMode := resolveRuntimeMode(current, in.Mode)
@@ -2320,7 +2336,8 @@ func (s *Service) RunTransientSlashCommand(ctx context.Context, in RunTransientS
 	}
 	root := manager.Root()
 	rootAbs, _ := root.RootDir()
-	sess, _, err := s.ensureAgentSession(turnCtx, agentPool, manager, current, agentName, in.Model, in.Mode, in.Effort, in.FastService, rootAbs)
+	modelSpecified := in.ModelSpecified || strings.TrimSpace(in.Model) != ""
+	sess, _, err := s.ensureAgentSession(turnCtx, agentPool, manager, current, agentName, in.Model, modelSpecified, in.Mode, in.Effort, in.FastService, rootAbs)
 	if err != nil {
 		return err
 	}

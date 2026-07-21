@@ -20,6 +20,63 @@ import (
 	"mindfs/server/internal/session"
 )
 
+func TestResolveRequestedModelOverride(t *testing.T) {
+	tests := []struct {
+		name          string
+		agent         string
+		currentModel  string
+		exchangeModel string
+		requested     string
+		specified     bool
+		want          string
+	}{
+		{
+			name:         "codex explicit follow clears current pin",
+			agent:        "codex",
+			currentModel: "gpt-5.6-sol",
+			specified:    true,
+			want:         "",
+		},
+		{
+			name:      "codex explicit pin",
+			agent:     "codex",
+			requested: "gpt-5.6-sol",
+			specified: true,
+			want:      "gpt-5.6-sol",
+		},
+		{
+			name:         "codex absent model inherits current pin",
+			agent:        "codex",
+			currentModel: "gpt-5.6-sol",
+			want:         "gpt-5.6-sol",
+		},
+		{
+			name:          "codex follow ignores historical exchange pin",
+			agent:         "codex",
+			exchangeModel: "gpt-5.6-sol",
+			want:          "",
+		},
+		{
+			name:          "non codex does not infer from history",
+			agent:         "claude",
+			exchangeModel: "sonnet",
+			want:          "",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			current := &session.Session{Model: test.currentModel}
+			if test.exchangeModel != "" {
+				current.Exchanges = []session.Exchange{{Model: test.exchangeModel}}
+			}
+			if got := resolveRequestedModelOverride(test.agent, current, test.requested, test.specified); got != test.want {
+				t.Fatalf("resolveRequestedModelOverride() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestSaveUploadedFilesDefaultsToAttachmentDirAndRenamesConflicts(t *testing.T) {
 	rootDir := t.TempDir()
 	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)

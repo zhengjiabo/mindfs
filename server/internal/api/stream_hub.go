@@ -28,14 +28,15 @@ type StreamHub struct {
 }
 
 type PendingUserMessage struct {
-	Agent       string    `json:"agent,omitempty"`
-	Model       string    `json:"model,omitempty"`
-	Mode        string    `json:"mode,omitempty"`
-	Effort      string    `json:"effort,omitempty"`
-	FastService string    `json:"fast_service,omitempty"`
-	PlanMode    bool      `json:"plan_mode,omitempty"`
-	Content     string    `json:"content"`
-	Timestamp   time.Time `json:"timestamp"`
+	Agent          string    `json:"agent,omitempty"`
+	Model          string    `json:"model,omitempty"`
+	ModelSpecified bool      `json:"-"`
+	Mode           string    `json:"mode,omitempty"`
+	Effort         string    `json:"effort,omitempty"`
+	FastService    string    `json:"fast_service,omitempty"`
+	PlanMode       bool      `json:"plan_mode,omitempty"`
+	Content        string    `json:"content"`
+	Timestamp      time.Time `json:"timestamp"`
 }
 
 type QueuedUserMessage struct {

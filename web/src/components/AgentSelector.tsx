@@ -161,7 +161,9 @@ export function AgentSelector({
         "";
     const targetModel =
       submenuAgentStatus.name === agent
-        ? model || fallbackModel
+        ? followConfig
+          ? model
+          : model || fallbackModel
         : fallbackModel;
     if (!targetModel) {
       return null;

@@ -144,6 +144,28 @@ func TestTurnUpdateTrackerWaitIdleTimesOutWhenUpdateNeverEnds(t *testing.T) {
 	}
 }
 
+func TestGetOptionalStringDistinguishesAbsentAndEmpty(t *testing.T) {
+	value, specified, err := getOptionalString(map[string]any{}, "model")
+	if err != nil {
+		t.Fatalf("getOptionalString absent: %v", err)
+	}
+	if value != "" || specified {
+		t.Fatalf("absent value=%q specified=%t, want empty false", value, specified)
+	}
+
+	value, specified, err = getOptionalString(map[string]any{"model": ""}, "model")
+	if err != nil {
+		t.Fatalf("getOptionalString empty: %v", err)
+	}
+	if value != "" || !specified {
+		t.Fatalf("empty value=%q specified=%t, want empty true", value, specified)
+	}
+
+	if _, _, err = getOptionalString(map[string]any{"model": 1}, "model"); err == nil {
+		t.Fatal("expected non-string model to fail")
+	}
+}
+
 func TestStreamHubFrozenQueueBlocksAutomaticPopUntilUnfrozen(t *testing.T) {
 	hub := NewStreamHub(nil)
 	rootID := "root"
@@ -159,8 +181,9 @@ func TestStreamHubFrozenQueueBlocksAutomaticPopUntilUnfrozen(t *testing.T) {
 	hub.EnqueueSessionMessage(rootID, sessionKey, "Session", QueuedUserMessage{
 		ID: "second",
 		PendingUserMessage: PendingUserMessage{
-			Content:   "second message",
-			Timestamp: time.Now().UTC(),
+			ModelSpecified: true,
+			Content:        "second message",
+			Timestamp:      time.Now().UTC(),
 		},
 	})
 
@@ -191,6 +214,9 @@ func TestStreamHubFrozenQueueBlocksAutomaticPopUntilUnfrozen(t *testing.T) {
 	}
 	if item.ID != "second" {
 		t.Fatalf("expected promoted item to pop first, got %q", item.ID)
+	}
+	if !item.ModelSpecified {
+		t.Fatal("expected promoted item to preserve explicit model selection")
 	}
 	if len(queue) != 1 || queue[0].ID != "first" {
 		t.Fatalf("expected remaining queue to contain first item, got %#v", queue)

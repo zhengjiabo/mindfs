@@ -344,6 +344,7 @@ func (s *AppContext) RunAgentStage(ctx context.Context, exec kanban.AgentStageEx
 		Key:             sessionKey,
 		Agent:           exec.Stage.Agent,
 		Model:           exec.Stage.Model,
+		ModelSpecified:  true,
 		Mode:            exec.Stage.Mode,
 		Effort:          exec.Stage.Effort,
 		FastService:     normalizeFastServiceValue(exec.Stage.FastService),
