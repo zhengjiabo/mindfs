@@ -10632,7 +10632,11 @@ export function App({ onGoHome }: AppProps) {
     for (const root of managedRootIds) {
       const boundKey = String(boundSessionByRootRef.current[root] || "").trim();
       const hasBound = !!boundKey && !boundKey.startsWith("pending-");
-      if (!hasBound) {
+      const pendingPrefix = rootSessionKey(root, "");
+      const hasPendingSession = Object.entries(multiProjectPendingByKey).some(
+        ([key, pending]) => pending && key.startsWith(pendingPrefix),
+      );
+      if (!hasBound && !hasPendingSession) {
         continue;
       }
       const drawer = drawerSessionByRootRef.current[root] as
@@ -10646,9 +10650,10 @@ export function App({ onGoHome }: AppProps) {
           ? ((selectedSession as any) as { pending?: boolean })
           : null;
       const pending =
+        hasPendingSession ||
         (drawer?.key === boundKey && !!drawer?.pending) ||
         !!selected?.pending;
-      next[root] = { bound: true, pending };
+      next[root] = { bound: hasBound || hasPendingSession, pending };
     }
     return next;
   }, [
@@ -10658,6 +10663,7 @@ export function App({ onGoHome }: AppProps) {
     currentRootId,
     activeBoundSessionKey,
     cacheVersion,
+    multiProjectPendingByKey,
     rootSessionKey,
   ]);
 
