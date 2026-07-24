@@ -145,3 +145,19 @@ export async function switchAgentAPIProvider(input: {
     }),
   });
 }
+
+export type CodexConfigModelResult = {
+  agent: string;
+  model: string;
+  previous_model?: string;
+  changed: boolean;
+};
+
+export async function setCodexConfigModel(model: string): Promise<CodexConfigModelResult> {
+  return protectedJSON<CodexConfigModelResult>(appPath("/api/agent-config/codex-model"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model }),
+  });
+}
+

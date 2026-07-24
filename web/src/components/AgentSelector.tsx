@@ -7,6 +7,7 @@ import React, {
 } from "react";
 import { AgentIcon } from "./AgentIcon";
 import type { AgentStatus } from "../services/agents";
+import { setCodexConfigModel } from "../services/agentConfig";
 import { useI18n } from "../i18n";
 
 type AgentSelectorProps = {
@@ -21,6 +22,7 @@ type AgentSelectorProps = {
   onEffortChange?: (effort?: string) => void;
   onFastServiceChange?: (fastService?: "" | "on" | "off") => void;
   onAgentRestart?: (agent: string) => void | Promise<void>;
+  onAgentsRefresh?: () => void | Promise<void>;
   compact?: boolean;
   warnUnavailable?: boolean;
   menuPlacement?: "top" | "bottom";
@@ -121,6 +123,7 @@ export function AgentSelector({
   onEffortChange,
   onFastServiceChange,
   onAgentRestart,
+  onAgentsRefresh,
   compact = false,
   warnUnavailable = false,
   menuPlacement = "top",
@@ -136,6 +139,12 @@ export function AgentSelector({
   const [serviceTierSectionExpanded, setServiceTierSectionExpanded] =
     useState(false);
   const [restartingAgent, setRestartingAgent] = useState<string | null>(null);
+  const [configModelDraft, setConfigModelDraft] = useState("");
+  const [configModelSaving, setConfigModelSaving] = useState(false);
+  const [configModelError, setConfigModelError] = useState("");
+  const [configModelOverride, setConfigModelOverride] = useState<string | null>(
+    null,
+  );
   const [menuBodyHeight, setMenuBodyHeight] = useState<number | null>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const agentColumnRef = useRef<HTMLDivElement>(null);
@@ -178,16 +187,18 @@ export function AgentSelector({
     if (!submenuAgentStatus || submenuAgentStatus.name !== "codex") {
       return null;
     }
-    const configModelId =
+    const configModelId = (
+      configModelOverride ||
       submenuAgentStatus.current_model_id ||
       submenuAgentStatus.default_model_id ||
-      "";
+      ""
+    ).trim();
     if (!configModelId) return null;
-    return (
-      (submenuAgentStatus.models ?? []).find((item) => item.id === configModelId) ??
-      null
+    const found = (submenuAgentStatus.models ?? []).find(
+      (item) => item.id === configModelId,
     );
-  }, [submenuAgentStatus]);
+    return found ?? { id: configModelId, name: configModelId };
+  }, [submenuAgentStatus, configModelOverride]);
   const submenuEfforts = useMemo(
     () =>
       submenuSelectedModel?.efforts ??
@@ -208,6 +219,24 @@ export function AgentSelector({
       : fallbackMode;
   }, [submenuAgentStatus, agent, mode]);
   const submenuIsCodex = submenuAgentStatus?.name === "codex";
+
+  useEffect(() => {
+    setConfigModelDraft("");
+    setConfigModelError("");
+    setConfigModelOverride(null);
+  }, [submenuAgent]);
+
+  useEffect(() => {
+    if (!configModelOverride) {
+      return;
+    }
+    const codex = agents.find((item) => item.name === "codex");
+    const live = (codex?.current_model_id || codex?.default_model_id || "").trim();
+    if (live && live === configModelOverride) {
+      setConfigModelOverride(null);
+    }
+  }, [agents, configModelOverride]);
+
   const submenuSupportsEffort = useMemo(
     () =>
       submenuEfforts.length > 0 &&
@@ -279,6 +308,52 @@ export function AgentSelector({
       ),
     );
   }, [isOpen, submenuAgent, agents.length]);
+
+  const submitConfigModel = useCallback(async () => {
+    if (!submenuIsCodex || !submenuAgentStatus || configModelSaving) {
+      return;
+    }
+    const nextModel = configModelDraft.trim();
+    if (!nextModel) {
+      setConfigModelError(t("agent.setConfigModelEmpty"));
+      return;
+    }
+    setConfigModelSaving(true);
+    setConfigModelError("");
+    try {
+      const result = await setCodexConfigModel(nextModel);
+      const written = (result.model || nextModel).trim();
+      setConfigModelDraft("");
+      setConfigModelOverride(written || nextModel);
+      // Keep follow-config empty-string semantics (do not close via handleAgentSelect).
+      onAgentChange(submenuAgentStatus.name, "");
+      if (onAgentsRefresh) {
+        try {
+          await onAgentsRefresh();
+        } catch {
+          // Probe refresh is best-effort; optimistic override covers UI.
+        }
+      }
+    } catch (err) {
+      const message =
+        err instanceof Error && err.message.trim()
+          ? err.message.trim()
+          : String(err || "unknown error");
+      setConfigModelError(
+        t("agent.setConfigModelFailed", { error: message }),
+      );
+    } finally {
+      setConfigModelSaving(false);
+    }
+  }, [
+    submenuIsCodex,
+    submenuAgentStatus,
+    configModelSaving,
+    configModelDraft,
+    t,
+    onAgentChange,
+    onAgentsRefresh,
+  ]);
 
   const handleAgentSelect = useCallback(
     (newAgent: string, nextModel?: string) => {
@@ -876,6 +951,154 @@ export function AgentSelector({
                         </span>
                       </button>
                     ) : null}
+                    {submenuIsCodex ? (
+                      <div
+                        style={{
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: "6px",
+                          padding: "8px 12px 10px",
+                          borderTop: "1px solid var(--menu-divider)",
+                        }}
+                        onMouseDown={(event) => event.stopPropagation()}
+                      >
+                        <div
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: "6px",
+                            width: "100%",
+                            minWidth: 0,
+                          }}
+                        >
+                          <input
+                            type="text"
+                            value={configModelDraft}
+                            disabled={configModelSaving}
+                            placeholder={t("agent.setConfigModelPlaceholder")}
+                            title={t("agent.setConfigModelHint")}
+                            aria-label={t("agent.setConfigModelPlaceholder")}
+                            onChange={(event) => {
+                              setConfigModelDraft(event.target.value);
+                              if (configModelError) {
+                                setConfigModelError("");
+                              }
+                            }}
+                            onKeyDown={(event) => {
+                              const native = event.nativeEvent as KeyboardEvent & {
+                                isComposing?: boolean;
+                              };
+                              if (native.isComposing || event.keyCode === 229) {
+                                return;
+                              }
+                              if (event.key === "Enter") {
+                                event.preventDefault();
+                                event.stopPropagation();
+                                void submitConfigModel();
+                                return;
+                              }
+                              if (event.key === "Escape") {
+                                event.preventDefault();
+                                event.stopPropagation();
+                                setConfigModelDraft("");
+                                setConfigModelError("");
+                              }
+                            }}
+                            style={{
+                              flex: 1,
+                              minWidth: 0,
+                              height: "30px",
+                              borderRadius: "8px",
+                              border: "1px solid var(--menu-divider)",
+                              background: "var(--bg-primary, transparent)",
+                              color: "var(--text-primary)",
+                              padding: "0 10px",
+                              fontSize: "12px",
+                              outline: "none",
+                            }}
+                          />
+                          <button
+                            type="button"
+                            disabled={configModelSaving}
+                            onClick={() => {
+                              void submitConfigModel();
+                            }}
+                            title={t("agent.setConfigModelSubmit")}
+                            aria-label={t("agent.setConfigModelSubmit")}
+                            style={{
+                              width: "30px",
+                              height: "30px",
+                              flex: "0 0 auto",
+                              borderRadius: "8px",
+                              border: "none",
+                              background: configModelSaving
+                                ? "rgba(59,130,246,0.35)"
+                                : "rgba(59,130,246,0.14)",
+                              color: "var(--accent-color, #3b82f6)",
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              cursor: configModelSaving
+                                ? "wait"
+                                : "pointer",
+                              opacity: configModelSaving ? 0.7 : 1,
+                            }}
+                          >
+                            {configModelSaving ? (
+                              <svg
+                                width="12"
+                                height="12"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="3"
+                                strokeLinecap="round"
+                                style={{ animation: "spin 1s linear infinite" }}
+                              >
+                                <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                              </svg>
+                            ) : (
+                              <svg
+                                width="14"
+                                height="14"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="2.4"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              >
+                                <polyline points="20 6 9 17 4 12" />
+                              </svg>
+                            )}
+                          </button>
+                        </div>
+                        {configModelError ? (
+                          <div
+                            style={{
+                              fontSize: "11px",
+                              color: "#ef4444",
+                              lineHeight: 1.4,
+                              whiteSpace: "normal",
+                              overflowWrap: "anywhere",
+                              wordBreak: "break-word",
+                            }}
+                          >
+                            {configModelError}
+                          </div>
+                        ) : (
+                          <div
+                            style={{
+                              fontSize: "11px",
+                              color: "var(--text-secondary)",
+                              lineHeight: 1.4,
+                            }}
+                          >
+                            {t("agent.setConfigModelHint")}
+                          </div>
+                        )}
+                      </div>
+                    ) : null}
                     {submenuModels.map((item, index) => {
                       const isSelected =
                         submenuAgentStatus.name === agent &&
@@ -889,7 +1112,7 @@ export function AgentSelector({
                           }
                           style={sectionItemStyle(
                             isSelected,
-                            submenuIsCodex || index > 0,
+                            index > 0,
                             item.hidden ? 0.66 : 1,
                           )}
                           title={item.description || item.id}

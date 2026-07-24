@@ -54,6 +54,12 @@ func discoverCodexProjectPaths() []string {
 	return paths
 }
 
+// CodexHomeDir returns the Codex home directory: $CODEX_HOME if set,
+// otherwise ~/.codex. Empty when home cannot be resolved.
+func CodexHomeDir() string {
+	return codexHomeDir()
+}
+
 func codexHomeDir() string {
 	if value := strings.TrimSpace(os.Getenv("CODEX_HOME")); value != "" {
 		return value

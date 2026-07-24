@@ -1646,6 +1646,7 @@ export function ActionBar({
                       const nextStatus = agents.find((item) => item.name === nextAgent);
                       const defaults = getAgentDefaults(nextStatus);
                       setAgent(nextAgent);
+                      // Keep empty string for Codex follow-config (do not use ||).
                       setModel(nextModel ?? defaults.model);
                       setAgentMode("");
                       setEffort(defaults.effort);
@@ -1657,6 +1658,10 @@ export function ActionBar({
                     onFastServiceChange={(nextFastService) => setFastService(nextFastService || "")}
                     onAgentRestart={async (targetAgent) => {
                       await restartAgent(targetAgent);
+                      const items = await fetchAgents(true);
+                      setAgents(items);
+                    }}
+                    onAgentsRefresh={async () => {
                       const items = await fetchAgents(true);
                       setAgents(items);
                     }}
