@@ -263,7 +263,7 @@ mindfs -agent-config /path/to/agents.json
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-addr string` | `127.0.0.1:7331` | Listen address. Use `:7331` or `0.0.0.0:7331` to allow LAN access. |
+| `-addr string` | `0.0.0.0:7331` | Listen address. Defaults to all interfaces for LAN access. Use `127.0.0.1:7331` to restrict to localhost. |
 | `-foreground` | `false` | Run the server in the foreground instead of starting a background service. |
 | `-status` | `false` | Show background service status, PID, URL, and log file path. |
 | `-version` | `false` | Show the current MindFS version. |

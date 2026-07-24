@@ -16,7 +16,7 @@ import (
 var version = "dev"
 
 func main() {
-	addr := flag.String("addr", "127.0.0.1:7331", "listen address")
+	addr := flag.String("addr", "0.0.0.0:7331", "listen address")
 	noRelayer := flag.Bool("no-relayer", false, "disable relay integration")
 	webPushFlag := flag.Bool("web-push", true, "enable PWA Web Push notifications")
 	configFlag := flag.String("config", "", "mindfs startup config file; command-line flags override file values")

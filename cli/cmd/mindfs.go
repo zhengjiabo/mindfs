@@ -61,7 +61,7 @@ func main() {
 		fmt.Fprintf(out, "  mindfs <rootid> -task 12 -next\n")
 	}
 
-	addr := flag.String("addr", "127.0.0.1:7331", "listen address")
+	addr := flag.String("addr", "0.0.0.0:7331", "listen address")
 	noRelayer := flag.Bool("no-relayer", false, "disable relay integration")
 	e2eeFlag := flag.Bool("e2ee", false, "enable end-to-end encryption for sensitive data")
 	webPushFlag := flag.Bool("web-push", true, "enable PWA Web Push notifications")
