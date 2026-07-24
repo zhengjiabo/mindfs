@@ -8,11 +8,35 @@ is treated as upstream.
 
 Any future agent working in this repo should assume:
 
-- upstream remote: `origin`
-- production remote: `zhengjiabo`
-- production branch: `main`
+- upstream remote: `origin` (**fetch only**; no push / no PR by default)
+- production remote: `zhengjiabo` (**default push target**)
+- production branch: `main` on `zhengjiabo`
 - production deployment style: installed binary under `~/.local`, not `./mindfs`
+- “push to remote” means `zhengjiabo`, not `origin`, unless the user explicitly says official/upstream
 
+
+## Git Remotes and Push Policy (MANDATORY)
+
+Default remote for **all** agent push/publish operations is **`zhengjiabo`** only.
+
+| Action | Allowed by default? | Target |
+|--------|---------------------|--------|
+| `git push` / publish commits | Yes | `zhengjiabo` (`zhengjiabo/main` or current branch on `zhengjiabo`) |
+| `git push origin ...` | **No** | — |
+| Open PR against `origin/main` / `a9gent/mindfs` | **No** | — |
+| Merge into upstream official main | **No** | — |
+
+Rules:
+
+1. When the user says “push / 推送 / 提交到远程 / 合并到远程”, interpret as **`zhengjiabo`**, never `origin`, unless they **explicitly and actively** name official/upstream (`origin`, `a9gent`, 官方, 上游).
+2. **Forbidden without explicit user instruction naming official/upstream:**
+   - `git push origin ...`
+   - `gh pr create --repo a9gent/mindfs ...` or any PR whose base is `origin/main` / upstream main
+   - force-push or direct write to `a9gent/mindfs`
+3. `origin` is **read-only upstream** for fetch/sync/compare. Pulling or fetching from `origin` is fine; writing is not.
+4. Production line remains `zhengjiabo/main`. Do not “helpfully” open upstream PRs after finishing a fix.
+
+If a task seems to require upstream contribution, **stop and ask** instead of pushing to origin or opening an origin PR.
 
 ## Production Topology
 
@@ -352,3 +376,5 @@ ssh hw 'grep -n "proxy_pass\|proxy_redirect" /etc/nginx/conf.d/bc-subdomain.conf
 - do not bind production only to `127.0.0.1` when public nginx access is required
 - do not change `hw` proxy target away from `101.34.62.93:7331`
 - do not release from `origin/main`; release from the custom production line
+- do not `git push origin` or open PRs to `origin/main` / `a9gent/mindfs` unless the user explicitly asks for official/upstream
+- default push remote is always `zhengjiabo`
