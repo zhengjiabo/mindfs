@@ -179,8 +179,29 @@ func TestHandleUnknownPlanAndContextCompactionItems(t *testing.T) {
 	}
 }
 
-func TestBuildCodexClientEnvDefaultsToCodexTUI(t *testing.T) {
+func TestBuildCodexClientEnvIncludesHostEnvironment(t *testing.T) {
+	t.Setenv("MINDFS_CODEX_ENV_MARKER", "1")
 	env := buildCodexClientEnv(nil)
+	if env == nil {
+		t.Fatal("env is nil")
+	}
+	if got := env[codexOriginatorEnvKey]; got != defaultCodexOriginator {
+		t.Fatalf("originator = %q, want %q", got, defaultCodexOriginator)
+	}
+	if got := env["MINDFS_CODEX_ENV_MARKER"]; got != "1" {
+		t.Fatalf("host env marker = %q, want 1", got)
+	}
+}
+
+func TestBuildCodexClientEnvOverlaysCustomKeys(t *testing.T) {
+	t.Setenv("MINDFS_CODEX_ENV_MARKER", "1")
+	env := buildCodexClientEnv(map[string]string{"FOO": "bar"})
+	if got := env["FOO"]; got != "bar" {
+		t.Fatalf("FOO = %q, want bar", got)
+	}
+	if got := env["MINDFS_CODEX_ENV_MARKER"]; got != "1" {
+		t.Fatalf("host env marker = %q, want 1", got)
+	}
 	if got := env[codexOriginatorEnvKey]; got != defaultCodexOriginator {
 		t.Fatalf("originator = %q, want %q", got, defaultCodexOriginator)
 	}
@@ -190,6 +211,19 @@ func TestBuildCodexClientEnvPreservesExplicitOriginator(t *testing.T) {
 	env := buildCodexClientEnv(map[string]string{codexOriginatorEnvKey: "custom-client"})
 	if got := env[codexOriginatorEnvKey]; got != "custom-client" {
 		t.Fatalf("originator = %q, want custom-client", got)
+	}
+}
+
+func TestEnvironToMapParsesEntries(t *testing.T) {
+	got := environToMap([]string{"A=1", "B=2=3", "bad", "=skip", "C="})
+	if got["A"] != "1" || got["B"] != "2=3" || got["C"] != "" {
+		t.Fatalf("environ map = %#v", got)
+	}
+	if _, ok := got[""]; ok {
+		t.Fatal("empty key should be skipped")
+	}
+	if _, ok := got["bad"]; ok {
+		t.Fatal("entry without = should be skipped")
 	}
 }
 

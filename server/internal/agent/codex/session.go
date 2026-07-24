@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"os"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -198,11 +199,29 @@ func newClient(opts OpenOptions) *codexsdk.Codex {
 }
 
 func buildCodexClientEnv(base map[string]string) map[string]string {
-	env := cloneStringMap(base)
+	// codex-go-sdk replaces the entire process environment when Env != nil.
+	// Always start from the host environment so Windows keeps PATH/USERPROFILE
+	// (and Unix keeps HOME/PATH), then overlay agent-specific keys.
+	env := environToMap(os.Environ())
+	for key, value := range base {
+		env[key] = value
+	}
 	if strings.TrimSpace(env[codexOriginatorEnvKey]) == "" {
 		env[codexOriginatorEnvKey] = defaultCodexOriginator
 	}
 	return env
+}
+
+func environToMap(environ []string) map[string]string {
+	out := make(map[string]string, len(environ))
+	for _, entry := range environ {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok || key == "" {
+			continue
+		}
+		out[key] = value
+	}
+	return out
 }
 
 func buildCodexClientInfo(command string, env map[string]string) codexsdk.ClientInfo {
