@@ -49,6 +49,10 @@ import {
   updateRateLimitRetryPreferences,
   type RateLimitRetryPreferences,
 } from "../services/rateLimitRetry";
+import {
+  rateLimitRetryAttemptSchedule,
+  recommendRateLimitRetryBaseDelay,
+} from "../services/rateLimitRetryRecommendation";
 
 type BeforeInstallPromptEvent = Event & {
   prompt: () => Promise<void>;
@@ -426,8 +430,11 @@ function RateLimitRetryMenuItem() {
     }
   };
 
-  const recommended = Number(preferences?.recommended_base_delay_seconds || 0);
-  const hasRecommendation = recommended >= 10;
+  const lastRecoverySeconds = Number(preferences?.last_recovery_seconds || 0);
+  const lastProbeSeconds = Number(preferences?.last_probe_seconds || 0);
+  const recommended = recommendRateLimitRetryBaseDelay(lastRecoverySeconds, lastProbeSeconds, increment);
+  const recommendedSchedule = rateLimitRetryAttemptSchedule(recommended, increment, lastProbeSeconds);
+  const hasRecommendation = lastRecoverySeconds > 0 && recommended >= 10;
   const recommendationAvailable = hasRecommendation && recommended !== baseDelay;
   const valid = baseDelay >= 1 && baseDelay <= 3600 && increment >= 0 && increment <= 3600;
 
@@ -495,10 +502,13 @@ function RateLimitRetryMenuItem() {
           {hasRecommendation ? (
             <div style={{ display: "flex", alignItems: "center", gap: "6px", color: "var(--text-secondary)", lineHeight: 1.35 }}>
               <span style={{ flex: 1 }}>
-                {t("rateLimitRetry.recommendation", {
+                {t(lastProbeSeconds > 0 ? "rateLimitRetry.recommendationWithProbe" : "rateLimitRetry.recommendation", {
                   seconds: recommended,
-                  elapsed: preferences?.last_recovery_seconds || 0,
+                  elapsed: lastRecoverySeconds,
                   count: preferences?.last_retry_count || 0,
+                  probe: lastProbeSeconds,
+                  attempts: recommendedSchedule.join(" / "),
+                  third: recommendedSchedule[2] || 0,
                 })}
               </span>
               {recommendationAvailable ? (

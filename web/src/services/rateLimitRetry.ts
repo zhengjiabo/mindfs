@@ -8,6 +8,7 @@ export type RateLimitRetryPreferences = {
   recommended_base_delay_seconds?: number;
   last_recovery_seconds?: number;
   last_retry_count?: number;
+  last_probe_seconds?: number;
   recovery_sample_count?: number;
 };
 

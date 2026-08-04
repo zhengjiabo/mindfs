@@ -17,9 +17,11 @@ import (
 const preferencesFileName = "preferences.json"
 
 const (
-	DefaultRateLimitRetryBaseDelaySeconds = 10
-	DefaultRateLimitRetryIncrementSeconds = 5
-	MaxRateLimitRetrySettingSeconds       = 3600
+	DefaultRateLimitRetryBaseDelaySeconds  = 10
+	DefaultRateLimitRetryIncrementSeconds  = 5
+	MaxRateLimitRetrySettingSeconds        = 3600
+	RateLimitRetryRecommendationAttempt    = 3
+	minRateLimitRetryRecommendationSeconds = 10
 )
 
 type Store struct {
@@ -40,6 +42,7 @@ type RateLimitRetryPreferences struct {
 	RecommendedBaseDelaySeconds int  `json:"recommended_base_delay_seconds,omitempty"`
 	LastRecoverySeconds         int  `json:"last_recovery_seconds,omitempty"`
 	LastRetryCount              int  `json:"last_retry_count,omitempty"`
+	LastProbeSeconds            int  `json:"last_probe_seconds,omitempty"`
 	RecoverySampleCount         int  `json:"recovery_sample_count,omitempty"`
 }
 
@@ -95,7 +98,13 @@ func (s *Store) GetRateLimitRetry() RateLimitRetryPreferences {
 	if s.data.RateLimitRetry == nil {
 		return DefaultRateLimitRetryPreferences()
 	}
-	return *s.data.RateLimitRetry
+	next := *s.data.RateLimitRetry
+	next.RecommendedBaseDelaySeconds = recommendRateLimitRetryBaseDelay(
+		next.LastRecoverySeconds,
+		next.LastProbeSeconds,
+		next.IncrementSeconds,
+	)
+	return next
 }
 
 func (s *Store) UpdateRateLimitRetry(patch RateLimitRetryPatch) error {
@@ -115,6 +124,11 @@ func (s *Store) UpdateRateLimitRetry(patch RateLimitRetryPatch) error {
 	next.Enabled = patch.Enabled
 	next.BaseDelaySeconds = patch.BaseDelaySeconds
 	next.IncrementSeconds = patch.IncrementSeconds
+	next.RecommendedBaseDelaySeconds = recommendRateLimitRetryBaseDelay(
+		next.LastRecoverySeconds,
+		next.LastProbeSeconds,
+		next.IncrementSeconds,
+	)
 	if s.data.RateLimitRetry != nil && *s.data.RateLimitRetry == next {
 		return nil
 	}
@@ -122,7 +136,34 @@ func (s *Store) UpdateRateLimitRetry(patch RateLimitRetryPatch) error {
 	return s.saveLocked()
 }
 
-func (s *Store) RecordRateLimitRecovery(elapsed time.Duration, retryCount int) error {
+func recommendRateLimitRetryBaseDelay(elapsedSeconds, probeSeconds, incrementSeconds int) int {
+	if elapsedSeconds <= 0 {
+		return 0
+	}
+	if probeSeconds < 0 {
+		probeSeconds = 0
+	}
+	if incrementSeconds < 0 {
+		incrementSeconds = 0
+	}
+
+	attempts := int64(RateLimitRetryRecommendationAttempt)
+	incrementSteps := attempts * (attempts - 1) / 2
+	priorProbeCount := attempts - 1
+	remaining := int64(elapsedSeconds) -
+		incrementSteps*int64(incrementSeconds) -
+		priorProbeCount*int64(probeSeconds)
+	recommended := remaining / attempts
+	if recommended < minRateLimitRetryRecommendationSeconds {
+		return minRateLimitRetryRecommendationSeconds
+	}
+	if recommended > MaxRateLimitRetrySettingSeconds {
+		return MaxRateLimitRetrySettingSeconds
+	}
+	return int(recommended)
+}
+
+func (s *Store) RecordRateLimitRecovery(elapsed time.Duration, retryCount int, typicalProbeDuration time.Duration) error {
 	if s == nil || elapsed <= 0 || retryCount <= 0 {
 		return nil
 	}
@@ -133,17 +174,18 @@ func (s *Store) RecordRateLimitRecovery(elapsed time.Duration, retryCount int) e
 	if s.data.RateLimitRetry != nil {
 		next = *s.data.RateLimitRetry
 	}
-	elapsedSeconds := int(math.Ceil(elapsed.Seconds()))
-	recommended := int(math.Round(elapsed.Seconds()/10.0)) * 10
-	if recommended < 10 {
-		recommended = 10
-	}
-	if recommended > MaxRateLimitRetrySettingSeconds {
-		recommended = MaxRateLimitRetrySettingSeconds
-	}
-	next.RecommendedBaseDelaySeconds = recommended
-	next.LastRecoverySeconds = elapsedSeconds
+	next.LastRecoverySeconds = int(math.Ceil(elapsed.Seconds()))
 	next.LastRetryCount = retryCount
+	if typicalProbeDuration > 0 {
+		next.LastProbeSeconds = int(math.Ceil(typicalProbeDuration.Seconds()))
+	} else {
+		next.LastProbeSeconds = 0
+	}
+	next.RecommendedBaseDelaySeconds = recommendRateLimitRetryBaseDelay(
+		next.LastRecoverySeconds,
+		next.LastProbeSeconds,
+		next.IncrementSeconds,
+	)
 	next.RecoverySampleCount++
 	s.data.RateLimitRetry = &next
 	return s.saveLocked()

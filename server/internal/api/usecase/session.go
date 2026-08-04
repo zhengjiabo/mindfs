@@ -3465,6 +3465,19 @@ func rateLimitRetryDelay(settings preferences.RateLimitRetryPreferences, attempt
 	return time.Duration(seconds) * time.Second
 }
 
+func medianDuration(values []time.Duration) time.Duration {
+	if len(values) == 0 {
+		return 0
+	}
+	ordered := append([]time.Duration(nil), values...)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i] < ordered[j] })
+	middle := len(ordered) / 2
+	if len(ordered)%2 == 1 {
+		return ordered[middle]
+	}
+	return ordered[middle-1]/2 + ordered[middle]/2
+}
+
 func (s *Service) recoverRateLimitedTurn(ctx context.Context, in RateLimitRecoveryInput) (agenttypes.Session, error) {
 	if s == nil || in.CurrentSession == nil || in.SendWithAttachment == nil {
 		return nil, errors.New("rate limit recovery not configured")
@@ -3474,6 +3487,7 @@ func (s *Service) recoverRateLimitedTurn(ctx context.Context, in RateLimitRecove
 		wait = waitForRecoveryDelay
 	}
 	startedAt := time.Now()
+	failedProbeDurations := make([]time.Duration, 0, 4)
 	for attempt := 1; ; attempt++ {
 		delay := rateLimitRetryDelay(in.Settings, attempt)
 		retryAt := time.Now().Add(delay).UTC().Format(time.RFC3339Nano)
@@ -3497,11 +3511,12 @@ func (s *Service) recoverRateLimitedTurn(ctx context.Context, in RateLimitRecove
 		err := in.SendWithAttachment(in.CurrentSession, "continue")
 		if err == nil {
 			elapsed := successfulAttemptStartedAt.Sub(startedAt)
+			typicalProbeDuration := medianDuration(failedProbeDurations)
 			log.Printf("[session/rate-limit] recovered root=%s session=%s agent=%s attempts=%d elapsed=%s", in.RootID, in.SessionKey, in.AgentName, attempt, elapsed)
 			if s.Registry != nil {
 				prefs := s.Registry.GetPreferences()
 				if prefs != nil {
-					if recordErr := prefs.RecordRateLimitRecovery(elapsed, attempt); recordErr != nil {
+					if recordErr := prefs.RecordRateLimitRecovery(elapsed, attempt, typicalProbeDuration); recordErr != nil {
 						log.Printf("[preferences] rate_limit_recovery.record.error err=%v", recordErr)
 					}
 				}
@@ -3514,6 +3529,7 @@ func (s *Service) recoverRateLimitedTurn(ctx context.Context, in RateLimitRecove
 		if !isHTTP429AgentError(err) {
 			return nil, err
 		}
+		failedProbeDurations = append(failedProbeDurations, time.Since(successfulAttemptStartedAt))
 		log.Printf("[session/rate-limit] send.rate_limited root=%s session=%s agent=%s attempt=%d err=%v", in.RootID, in.SessionKey, in.AgentName, attempt, err)
 	}
 }

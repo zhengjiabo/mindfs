@@ -1961,6 +1961,17 @@ func TestRateLimitRetryDelayUsesLinearBackoffAndCap(t *testing.T) {
 	}
 }
 
+func TestMedianDurationResistsLongProbeOutlier(t *testing.T) {
+	got := medianDuration([]time.Duration{4 * time.Second, 150 * time.Second, 3 * time.Second})
+	if got != 4*time.Second {
+		t.Fatalf("median duration = %s, want 4s", got)
+	}
+	got = medianDuration([]time.Duration{2 * time.Second, 4 * time.Second})
+	if got != 3*time.Second {
+		t.Fatalf("even median duration = %s, want 3s", got)
+	}
+}
+
 func TestRecoverRateLimitedTurnContinuesUntilSuccess(t *testing.T) {
 	runtime := &fakeUsecaseAgentSession{id: "codex-thread"}
 	service := Service{Registry: &commandTestRegistry{}}

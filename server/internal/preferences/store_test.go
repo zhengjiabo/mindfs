@@ -28,6 +28,7 @@ func TestUpdateRateLimitRetryPreservesRecoveryStats(t *testing.T) {
 			RecommendedBaseDelaySeconds: 30,
 			LastRecoverySeconds:         27,
 			LastRetryCount:              2,
+			LastProbeSeconds:            3,
 			RecoverySampleCount:         1,
 		}},
 	}
@@ -42,30 +43,59 @@ func TestUpdateRateLimitRetryPreservesRecoveryStats(t *testing.T) {
 	if got.Enabled || got.BaseDelaySeconds != 20 || got.IncrementSeconds != 0 {
 		t.Fatalf("updated settings = %#v", got)
 	}
-	if got.RecommendedBaseDelaySeconds != 30 || got.LastRecoverySeconds != 27 || got.LastRetryCount != 2 || got.RecoverySampleCount != 1 {
+	if got.RecommendedBaseDelaySeconds != 10 || got.LastRecoverySeconds != 27 || got.LastRetryCount != 2 || got.LastProbeSeconds != 3 || got.RecoverySampleCount != 1 {
 		t.Fatalf("recovery stats were not preserved: %#v", got)
 	}
 }
 
-func TestRecordRateLimitRecoveryRoundsRecommendationToNearestTenSeconds(t *testing.T) {
+func TestRecordRateLimitRecoveryTargetsThirdAttemptAtRecoveryWindow(t *testing.T) {
 	store := &Store{path: filepath.Join(t.TempDir(), preferencesFileName)}
-	if err := store.RecordRateLimitRecovery(26*time.Second, 2); err != nil {
+	if err := store.RecordRateLimitRecovery(62*time.Second, 2, 5*time.Second); err != nil {
 		t.Fatalf("RecordRateLimitRecovery: %v", err)
 	}
 	got := store.GetRateLimitRetry()
-	if got.RecommendedBaseDelaySeconds != 30 || got.LastRecoverySeconds != 26 || got.LastRetryCount != 2 || got.RecoverySampleCount != 1 {
+	if got.RecommendedBaseDelaySeconds != 12 || got.LastRecoverySeconds != 62 || got.LastRetryCount != 2 || got.LastProbeSeconds != 5 || got.RecoverySampleCount != 1 {
 		t.Fatalf("recorded recovery = %#v", got)
 	}
 }
 
-func TestRecordRateLimitRecoveryRoundsDownBelowMidpoint(t *testing.T) {
-	store := &Store{path: filepath.Join(t.TempDir(), preferencesFileName)}
-	if err := store.RecordRateLimitRecovery(24*time.Second+100*time.Millisecond, 1); err != nil {
-		t.Fatalf("RecordRateLimitRecovery: %v", err)
-	}
+func TestRateLimitRetryRecommendationMigratesLegacySample(t *testing.T) {
+	store := &Store{data: UserPreferences{RateLimitRetry: &RateLimitRetryPreferences{
+		Enabled:                     true,
+		BaseDelaySeconds:            10,
+		IncrementSeconds:            5,
+		RecommendedBaseDelaySeconds: 60,
+		LastRecoverySeconds:         62,
+		LastRetryCount:              2,
+	}}}
 	got := store.GetRateLimitRetry()
-	if got.RecommendedBaseDelaySeconds != 20 || got.LastRecoverySeconds != 25 {
-		t.Fatalf("recorded recovery = %#v", got)
+	if got.RecommendedBaseDelaySeconds != 15 {
+		t.Fatalf("legacy recommendation = %d, want 15", got.RecommendedBaseDelaySeconds)
+	}
+}
+
+func TestUpdateRateLimitRetryRecomputesRecommendationForIncrement(t *testing.T) {
+	store := &Store{
+		path: filepath.Join(t.TempDir(), preferencesFileName),
+		data: UserPreferences{RateLimitRetry: &RateLimitRetryPreferences{
+			Enabled: true, BaseDelaySeconds: 10, IncrementSeconds: 5,
+			LastRecoverySeconds: 62, LastRetryCount: 2, LastProbeSeconds: 5,
+		}},
+	}
+	if err := store.UpdateRateLimitRetry(RateLimitRetryPatch{Enabled: true, BaseDelaySeconds: 10, IncrementSeconds: 0}); err != nil {
+		t.Fatalf("UpdateRateLimitRetry: %v", err)
+	}
+	if got := store.GetRateLimitRetry().RecommendedBaseDelaySeconds; got != 17 {
+		t.Fatalf("recommendation = %d, want 17", got)
+	}
+}
+
+func TestRateLimitRetryRecommendationHasSafeBounds(t *testing.T) {
+	if got := recommendRateLimitRetryBaseDelay(20, 20, 20); got != 10 {
+		t.Fatalf("minimum recommendation = %d, want 10", got)
+	}
+	if got := recommendRateLimitRetryBaseDelay(100000, 0, 0); got != 3600 {
+		t.Fatalf("maximum recommendation = %d, want 3600", got)
 	}
 }
 
