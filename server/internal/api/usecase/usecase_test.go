@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -408,6 +409,59 @@ func TestSearchSessionsMultiRootAppliesGlobalLimit(t *testing.T) {
 	if out.Items[0].RootID == "" {
 		t.Fatal("first item root id is empty")
 	}
+}
+
+func TestListSessionsReturnsPinnedSnapshotWithAfterTime(t *testing.T) {
+	root := rootfs.NewRootInfo("mindfs", "mindfs", t.TempDir())
+	now := time.Date(2026, 7, 30, 10, 0, 0, 0, time.UTC)
+	manager := session.NewManager(root, session.WithClock(func() time.Time { return now }))
+	registry := &commandTestRegistry{root: root, manager: manager}
+	service := Service{Registry: registry}
+
+	oldPinned, err := manager.Create(context.Background(), session.CreateInput{Type: session.TypeChat, Name: "Pinned old"})
+	if err != nil {
+		t.Fatalf("create pinned session: %v", err)
+	}
+	now = now.Add(1 * time.Minute)
+	pinned, err := manager.SetPinned(context.Background(), oldPinned.Key, true)
+	if err != nil {
+		t.Fatalf("pin session: %v", err)
+	}
+	afterTime := pinned.UpdatedAt.Add(30 * time.Second)
+
+	now = afterTime.Add(1 * time.Minute)
+	fresh, err := manager.Create(context.Background(), session.CreateInput{Type: session.TypeChat, Name: "Fresh"})
+	if err != nil {
+		t.Fatalf("create fresh session: %v", err)
+	}
+
+	out, err := service.ListSessions(context.Background(), ListSessionsInput{
+		RootID:    root.ID,
+		AfterTime: afterTime,
+		Limit:     50,
+	})
+	if err != nil {
+		t.Fatalf("list sessions: %v", err)
+	}
+	if len(out.Sessions) != 1 || out.Sessions[0].Key != fresh.Key {
+		t.Fatalf("Sessions = %v, want only fresh %s", usecaseSessionKeys(out.Sessions), fresh.Key)
+	}
+	if len(out.PinnedSessions) != 1 || out.PinnedSessions[0].Key != oldPinned.Key {
+		t.Fatalf("PinnedSessions = %v, want %s", usecaseSessionKeys(out.PinnedSessions), oldPinned.Key)
+	}
+	if len(out.PinnedKeys) != 1 || out.PinnedKeys[0] != oldPinned.Key {
+		t.Fatalf("PinnedKeys = %#v, want [%s]", out.PinnedKeys, oldPinned.Key)
+	}
+}
+
+func usecaseSessionKeys(items []*session.Session) []string {
+	keys := make([]string, 0, len(items))
+	for _, item := range items {
+		if item != nil {
+			keys = append(keys, item.Key)
+		}
+	}
+	return keys
 }
 
 func TestSendCommandMessagePersistsCancelledSuggestion(t *testing.T) {
@@ -1757,6 +1811,45 @@ func TestAppendResponseChunk(t *testing.T) {
 	}
 }
 
+func TestSendMessageUserTimestampUsesInputWhenPresent(t *testing.T) {
+	fallback := time.Date(2026, 7, 29, 10, 0, 30, 0, time.UTC)
+	actual := time.Date(2026, 7, 29, 10, 0, 0, int(123*time.Millisecond), time.FixedZone("CST", 8*60*60))
+
+	got := sendMessageUserTimestamp(SendMessageInput{UserTimestamp: actual}, fallback)
+
+	if !got.Equal(actual.UTC()) {
+		t.Fatalf("sendMessageUserTimestamp = %s, want %s", got.Format(time.RFC3339Nano), actual.UTC().Format(time.RFC3339Nano))
+	}
+}
+
+func TestSendMessageUserTimestampFallsBackToStartTime(t *testing.T) {
+	fallback := time.Date(2026, 7, 29, 10, 0, 30, 0, time.UTC)
+
+	got := sendMessageUserTimestamp(SendMessageInput{}, fallback)
+
+	if !got.Equal(fallback) {
+		t.Fatalf("sendMessageUserTimestamp = %s, want fallback %s", got.Format(time.RFC3339Nano), fallback.Format(time.RFC3339Nano))
+	}
+}
+
+func TestMessageModelSpecifiedIsCapturedBeforeRuntimeDefaults(t *testing.T) {
+	in := SendMessageInput{Agent: "codex"}
+	modelSpecified := messageModelSpecified(in)
+	applyMessageRuntimeDefaultsFromStatus(&in, agent.Status{CurrentModelID: "gpt-5"}, true)
+
+	if modelSpecified {
+		t.Fatal("runtime model discovery must not turn follow-config into an explicit model selection")
+	}
+	if in.Model != "gpt-5" {
+		t.Fatalf("runtime model = %q, want %q", in.Model, "gpt-5")
+	}
+
+	explicit := SendMessageInput{Agent: "codex", ModelSpecified: true}
+	if !messageModelSpecified(explicit) {
+		t.Fatal("explicit follow-config/model selection must remain explicit")
+	}
+}
+
 func TestIsNonRecoverableAgentError(t *testing.T) {
 	testCases := []struct {
 		err  error
@@ -1775,6 +1868,39 @@ func TestIsNonRecoverableAgentError(t *testing.T) {
 		if got := isNonRecoverableAgentError(tc.err); got != tc.want {
 			t.Fatalf("isNonRecoverableAgentError(%v) = %v, want %v", tc.err, got, tc.want)
 		}
+	}
+}
+
+func TestGetSessionContextWindowFallsBackToPersistedValue(t *testing.T) {
+	rootDir := t.TempDir()
+	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
+	manager := session.NewManager(root)
+	current, err := manager.Create(context.Background(), session.CreateInput{
+		Type:  session.TypeChat,
+		Agent: "codex",
+		Name:  "chat",
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	want := agenttypes.ContextWindow{
+		TotalTokens:        321,
+		ModelContextWindow: 200000,
+	}
+	if err := manager.UpdateLastContextWindow(context.Background(), current, want); err != nil {
+		t.Fatalf("update context window: %v", err)
+	}
+
+	service := Service{Registry: &commandTestRegistry{root: root, manager: manager}}
+	got, err := service.GetSessionContextWindow(context.Background(), GetSessionContextWindowInput{
+		RootID: root.ID,
+		Key:    current.Key,
+	})
+	if err != nil {
+		t.Fatalf("get context window: %v", err)
+	}
+	if got != want {
+		t.Fatalf("context window = %#v, want %#v", got, want)
 	}
 }
 
@@ -1816,6 +1942,106 @@ func TestRecoverAgentTurnStopsOnNonRecoverableError(t *testing.T) {
 	}
 	if len(sent) != 1 || sent[0] != "continue" {
 		t.Fatalf("sent = %#v, want one continue recovery attempt", sent)
+	}
+}
+
+func TestRateLimitRetryDelayUsesLinearBackoffAndCap(t *testing.T) {
+	settings := preferences.RateLimitRetryPreferences{BaseDelaySeconds: 10, IncrementSeconds: 5}
+	for attempt, want := range map[int]time.Duration{
+		1: 10 * time.Second,
+		2: 15 * time.Second,
+		3: 20 * time.Second,
+	} {
+		if got := rateLimitRetryDelay(settings, attempt); got != want {
+			t.Fatalf("attempt %d delay = %s, want %s", attempt, got, want)
+		}
+	}
+	if got := rateLimitRetryDelay(preferences.RateLimitRetryPreferences{BaseDelaySeconds: 3600, IncrementSeconds: 3600}, 20); got != time.Hour {
+		t.Fatalf("capped delay = %s, want 1h", got)
+	}
+}
+
+func TestRecoverRateLimitedTurnContinuesUntilSuccess(t *testing.T) {
+	runtime := &fakeUsecaseAgentSession{id: "codex-thread"}
+	service := Service{Registry: &commandTestRegistry{}}
+	var delays []time.Duration
+	var sent []string
+	var statuses []agenttypes.RecoveryStatus
+	result, err := service.recoverRateLimitedTurn(context.Background(), RateLimitRecoveryInput{
+		RootID:         "root",
+		SessionKey:     "session",
+		AgentName:      "codex",
+		CurrentSession: runtime,
+		Settings: preferences.RateLimitRetryPreferences{
+			Enabled: true, BaseDelaySeconds: 10, IncrementSeconds: 5,
+		},
+		WaitForDelay: func(_ context.Context, delay time.Duration) error {
+			delays = append(delays, delay)
+			return nil
+		},
+		SendWithAttachment: func(_ agenttypes.Session, content string) error {
+			sent = append(sent, content)
+			if len(sent) < 3 {
+				return errors.New("429 Too Many Requests")
+			}
+			return nil
+		},
+		OnUpdate: func(event agenttypes.Event) {
+			status, ok := event.Data.(agenttypes.RecoveryStatus)
+			if ok {
+				statuses = append(statuses, status)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("recoverRateLimitedTurn: %v", err)
+	}
+	if result != runtime {
+		t.Fatalf("result runtime = %#v, want original runtime", result)
+	}
+	wantDelays := []time.Duration{10 * time.Second, 15 * time.Second, 20 * time.Second}
+	if !reflect.DeepEqual(delays, wantDelays) {
+		t.Fatalf("delays = %#v, want %#v", delays, wantDelays)
+	}
+	if !reflect.DeepEqual(sent, []string{"continue", "continue", "continue"}) {
+		t.Fatalf("sent = %#v", sent)
+	}
+	if len(statuses) != 3 || statuses[1].Kind != "rate_limit" || statuses[1].Attempt != 2 || statuses[1].DelaySeconds != 15 || statuses[1].RetryAt == "" {
+		t.Fatalf("statuses = %#v", statuses)
+	}
+}
+
+func TestRecoverRateLimitedTurnStopsOnCancellation(t *testing.T) {
+	runtime := &fakeUsecaseAgentSession{id: "codex-thread"}
+	service := Service{Registry: &commandTestRegistry{}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var sends int
+	_, err := service.recoverRateLimitedTurn(ctx, RateLimitRecoveryInput{
+		CurrentSession: runtime,
+		Settings:       preferences.DefaultRateLimitRetryPreferences(),
+		WaitForDelay: func(ctx context.Context, _ time.Duration) error {
+			return ctx.Err()
+		},
+		SendWithAttachment: func(agenttypes.Session, string) error {
+			sends++
+			return nil
+		},
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	if sends != 0 {
+		t.Fatalf("sends = %d, want 0", sends)
+	}
+}
+
+func TestHTTP429ClassificationExcludesPermanentUsageLimit(t *testing.T) {
+	if !isHTTP429AgentError(errors.New("last status: 429 Too Many Requests")) {
+		t.Fatal("expected explicit 429 to be classified")
+	}
+	if isHTTP429AgentError(errors.New("usage limit exceeded")) {
+		t.Fatal("permanent usage limit must not be classified as HTTP 429")
 	}
 }
 
@@ -2038,6 +2264,60 @@ func TestCancelSessionTurnCancelsTransientActiveTurn(t *testing.T) {
 	}
 	if turnCtx.Err() == nil {
 		t.Fatal("expected transient turn context to be canceled")
+	}
+	if fakeSession.cancelCalls != 1 {
+		t.Fatalf("CancelCurrentTurn calls = %d, want 1", fakeSession.cancelCalls)
+	}
+}
+
+func TestCancelSessionTurnCancelsRateLimitRecoveryContext(t *testing.T) {
+	rootDir := t.TempDir()
+	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
+	manager := session.NewManager(root)
+	current, err := manager.Create(context.Background(), session.CreateInput{Type: session.TypeChat, Agent: "codex", Name: "chat"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	service := Service{Registry: &commandTestRegistry{root: root, manager: manager}}
+	turnCtx, cancel := context.WithCancel(context.Background())
+	fakeSession := &fakeUsecaseAgentSession{}
+	registerActiveTurn(root.ID, current.Key, cancel)
+	setActiveTurnSession(root.ID, current.Key, fakeSession)
+	setActiveTurnRateLimitRecovery(root.ID, current.Key, true)
+	defer unregisterActiveTurn(root.ID, current.Key)
+
+	if err := service.CancelSessionTurn(context.Background(), CancelSessionTurnInput{RootID: root.ID, Key: current.Key}); err != nil {
+		t.Fatalf("CancelSessionTurn: %v", err)
+	}
+	if turnCtx.Err() == nil {
+		t.Fatal("expected rate limit recovery context to be canceled")
+	}
+	if fakeSession.cancelCalls != 1 {
+		t.Fatalf("CancelCurrentTurn calls = %d, want 1", fakeSession.cancelCalls)
+	}
+}
+
+func TestCancelSessionTurnKeepsParentContextForActiveRuntimeTurn(t *testing.T) {
+	rootDir := t.TempDir()
+	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
+	manager := session.NewManager(root)
+	current, err := manager.Create(context.Background(), session.CreateInput{Type: session.TypeChat, Agent: "codex", Name: "chat"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	service := Service{Registry: &commandTestRegistry{root: root, manager: manager}}
+	turnCtx, cancel := context.WithCancel(context.Background())
+	fakeSession := &fakeUsecaseAgentSession{}
+	registerActiveTurn(root.ID, current.Key, cancel)
+	setActiveTurnSession(root.ID, current.Key, fakeSession)
+	setActiveRuntimeTurn(root.ID, current.Key, true)
+	defer unregisterActiveTurn(root.ID, current.Key)
+
+	if err := service.CancelSessionTurn(context.Background(), CancelSessionTurnInput{RootID: root.ID, Key: current.Key}); err != nil {
+		t.Fatalf("CancelSessionTurn: %v", err)
+	}
+	if turnCtx.Err() != nil {
+		t.Fatalf("active runtime parent context was canceled: %v", turnCtx.Err())
 	}
 	if fakeSession.cancelCalls != 1 {
 		t.Fatalf("CancelCurrentTurn calls = %d, want 1", fakeSession.cancelCalls)

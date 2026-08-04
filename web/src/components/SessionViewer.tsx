@@ -1,6 +1,6 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSessionStream, type TimelineItem } from "../hooks/useSessionStream";
-import type { TodoUpdate } from "../services/session";
+import { sessionService, type TodoUpdate } from "../services/session";
 import { ThinkingBlock } from "./stream/ThinkingBlock";
 import { ToolCallCard, renderToolIcon } from "./stream/ToolCallCard";
 import { AgentIcon } from "./AgentIcon";
@@ -14,6 +14,7 @@ import { rootBadgeButtonStyle } from "./rootBadgeStyle";
 import { copyText } from "../services/clipboard";
 import type { AgentStatus } from "../services/agents";
 import { useI18n, type Locale } from "../i18n";
+import { formatSessionDuration } from "../services/sessionDuration";
 
 type SessionItem = {
   key?: string;
@@ -325,6 +326,16 @@ function ContextWindowBadge({
       </span>
     </span>
   );
+}
+
+function previousUserTimestamp(timeline: TimelineItem[], index: number): string {
+  for (let i = index - 1; i >= 0; i -= 1) {
+    const item = timeline[i];
+    if (item.type === "user_text") {
+      return item.timestamp || "";
+    }
+  }
+  return "";
 }
 
 const formatTime = (isoString: string | undefined, locale: Locale) => {
@@ -955,35 +966,6 @@ function timelineItemSpacing(
   return "16px";
 }
 
-function collectAssistantFlowMarkdown(
-  timeline: TimelineItem[],
-  startIndex: number,
-): string {
-  const segments: string[] = [];
-
-  for (let index = startIndex; index >= 0; index -= 1) {
-    const item = timeline[index];
-    if (item.type === "user_text") {
-      break;
-    }
-    if (item.type === "assistant_text" && item.content) {
-      segments.unshift(item.content);
-    }
-  }
-
-  for (let index = startIndex + 1; index < timeline.length; index += 1) {
-    const item = timeline[index];
-    if (item.type === "user_text") {
-      break;
-    }
-    if (item.type === "assistant_text" && item.content) {
-      segments.push(item.content);
-    }
-  }
-
-  return segments.join("").trim();
-}
-
 function shouldDefaultCollapseRelatedFiles(
   isMobile: boolean,
   relatedFileCount: number,
@@ -1061,13 +1043,34 @@ function SessionViewerInner({
   const sessionKey = session?.key || session?.session_key || null;
   const exchanges = Array.isArray(session?.exchanges) ? session.exchanges : [];
   const isAwaiting = !!(session as any)?.pending;
-  const { timeline, isStreaming, streamVersion, streamStatusText } = useSessionStream(
+  const { timeline, isStreaming, streamVersion, streamStatusText, recoveryStatus } = useSessionStream(
     sessionKey,
     exchanges,
     session?.exchange_aux || {},
     session?.context_window,
     isAwaiting,
   );
+  const rateLimitRetryAt = recoveryStatus?.kind === "rate_limit" ? Date.parse(recoveryStatus.retry_at || "") : Number.NaN;
+  const [countdownNow, setCountdownNow] = useState(() => Date.now());
+  const [cancellingRecovery, setCancellingRecovery] = useState(false);
+  useEffect(() => {
+    if (!Number.isFinite(rateLimitRetryAt)) {
+      setCancellingRecovery(false);
+      return;
+    }
+    setCountdownNow(Date.now());
+    const timer = window.setInterval(() => setCountdownNow(Date.now()), 250);
+    return () => window.clearInterval(timer);
+  }, [rateLimitRetryAt]);
+  const rateLimitCountdownSeconds = Number.isFinite(rateLimitRetryAt)
+    ? Math.max(0, Math.ceil((rateLimitRetryAt - countdownNow) / 1000))
+    : 0;
+  const cancelRateLimitRecovery = useCallback(async () => {
+    if (!rootId || !sessionKey || cancellingRecovery) return;
+    setCancellingRecovery(true);
+    const sent = await sessionService.cancelMessage(rootId, sessionKey);
+    if (!sent) setCancellingRecovery(false);
+  }, [cancellingRecovery, rootId, sessionKey]);
   const shouldStickToBottomRef = useRef(true);
   const lastSessionKeyRef = useRef<string | null>(null);
   const targetSeqScrollKeyRef = useRef("");
@@ -1720,11 +1723,12 @@ if (useInnerScrollContainer && !container) {
     const userMessageWidth =
       imageAttachments.length > 0 ? "min(320px, 100%)" : "auto";
     const hasRichUserAttachments = imageAttachments.length > 0;
-    const assistantMarkdownContent = !isUser
-      ? collectAssistantFlowMarkdown(timeline, idx)
-      : "";
+    const assistantMarkdownContent = !isUser ? (item.content || "").trim() : "";
     const assistantExchangeMeta = !isUser
       ? formatAssistantExchangeMeta(item, agents)
+      : "";
+    const assistantDurationLabel = !isUser
+      ? formatSessionDuration(previousUserTimestamp(timeline, idx), item.timestamp)
       : "";
     const canForkAgentMessage = !isUser && Number(item.seq || 0) > 0 && !!onForkAgentMessage;
     return (
@@ -2149,7 +2153,7 @@ if (useInnerScrollContainer && !container) {
                 {assistantExchangeMeta ? (
                   <span>{assistantExchangeMeta}</span>
                 ) : null}
-                <span>{time}</span>
+                <span>{time}{assistantDurationLabel ? ` ${assistantDurationLabel}` : ""}</span>
                 <ContextWindowBadge contextWindow={item.contextWindow} />
               </span>
             )}
@@ -2480,6 +2484,7 @@ if (useInnerScrollContainer && !container) {
                   marginTop: "16px",
                   display: "flex",
                   alignItems: "center",
+                  flexWrap: "wrap",
                   gap: "6px",
                   fontSize: "12px",
                   color: "var(--text-secondary)",
@@ -2492,11 +2497,38 @@ if (useInnerScrollContainer && !container) {
                     borderRadius: "50%",
                     background: "var(--accent-color)",
                     animation: "pulse 1s infinite",
+                    flexShrink: 0,
                   }}
                 />
-                {isStreaming
-                  ? streamStatusText || t("session.generating")
-                  : t("session.sentWaiting")}
+                <span style={{ minWidth: 0, overflowWrap: "anywhere" }}>
+                  {recoveryStatus?.kind === "rate_limit"
+                    ? t("session.rateLimitRetryCountdown", {
+                        attempt: recoveryStatus.attempt || 1,
+                        seconds: rateLimitCountdownSeconds,
+                      })
+                    : isStreaming
+                      ? streamStatusText || t("session.generating")
+                      : t("session.sentWaiting")}
+                </span>
+                {recoveryStatus?.kind === "rate_limit" ? (
+                  <button
+                    type="button"
+                    disabled={cancellingRecovery}
+                    onClick={() => void cancelRateLimitRecovery()}
+                    style={{
+                      border: "1px solid var(--border-color)",
+                      borderRadius: "6px",
+                      background: "transparent",
+                      color: "#ef4444",
+                      padding: "3px 7px",
+                      fontSize: "11px",
+                      cursor: cancellingRecovery ? "wait" : "pointer",
+                      flexShrink: 0,
+                    }}
+                  >
+                    {t("common.cancel")}
+                  </button>
+                ) : null}
               </div>
             )}
 

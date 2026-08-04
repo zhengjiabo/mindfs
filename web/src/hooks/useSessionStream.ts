@@ -4,6 +4,7 @@ import {
   type CompactNotice,
   type ExchangeAux,
   type PlanUpdate,
+  type RecoveryStatus,
   type TodoUpdate,
   type ToolCall,
 } from "../services/session";
@@ -62,6 +63,7 @@ type UseSessionStreamResult = {
   isStreaming: boolean;
   streamVersion: number;
   streamStatusText: string;
+  recoveryStatus: RecoveryStatus | null;
 };
 
 type ContextWindowLike = {
@@ -463,6 +465,7 @@ export function useSessionStream(
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamVersion, setStreamVersion] = useState(0);
   const [streamStatusText, setStreamStatusText] = useState("");
+  const [recoveryStatus, setRecoveryStatus] = useState<RecoveryStatus | null>(null);
 
   const baseTimeline = useMemo(
     () =>
@@ -476,6 +479,7 @@ export function useSessionStream(
   useEffect(() => {
     setStreamVersion(0);
     setStreamStatusText("");
+    setRecoveryStatus(null);
     if (!sessionKey) {
       setIsStreaming(false);
       return;
@@ -489,9 +493,11 @@ export function useSessionStream(
         setStreamVersion((value) => value + 1);
         if (event.type === "recovery") {
           setStreamStatusText(event.data?.message || translateNow("session.recovering"));
+          setRecoveryStatus(event.data || null);
           setIsStreaming(true);
           return;
         }
+        setRecoveryStatus(null);
         if (event.type === "message_chunk") {
           setStreamStatusText("");
         }
@@ -507,10 +513,12 @@ export function useSessionStream(
       },
       onDone: () => {
         setStreamStatusText("");
+        setRecoveryStatus(null);
         setIsStreaming(false);
       },
       onError: () => {
         setStreamStatusText("");
+        setRecoveryStatus(null);
         setIsStreaming(false);
       },
     });
@@ -525,5 +533,6 @@ export function useSessionStream(
     isStreaming,
     streamVersion,
     streamStatusText,
+    recoveryStatus,
   };
 }

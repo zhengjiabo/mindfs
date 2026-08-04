@@ -47,8 +47,10 @@ type ListSessionsInput struct {
 }
 
 type ListSessionsOutput struct {
-	Sessions   []*session.Session
-	TotalCount int
+	Sessions       []*session.Session
+	PinnedSessions []*session.Session
+	PinnedKeys     []string
+	TotalCount     int
 }
 
 type ListMultiRootSessionsInput struct {
@@ -60,6 +62,8 @@ type SessionRootGroup struct {
 	RootName          string
 	LatestSessionTime time.Time
 	Sessions          []*session.Session
+	PinnedSessions    []*session.Session
+	PinnedKeys        []string
 	TotalCount        int
 }
 
@@ -135,10 +139,16 @@ func (s *Service) ListSessions(ctx context.Context, in ListSessionsInput) (ListS
 			return ListSessionsOutput{}, err
 		}
 	}
-	if err := fillCommandShells(ctx, manager, items); err != nil {
+	pinnedItems, err := manager.ListPinned(ctx, session.ListOptions{TopLevelOnly: in.TopLevelOnly})
+	if err != nil {
 		return ListSessionsOutput{}, err
 	}
-	return ListSessionsOutput{Sessions: items, TotalCount: totalCount}, nil
+	pinnedKeys := pinnedSessionKeys(pinnedItems)
+	allForShells := append(append([]*session.Session{}, items...), pinnedItems...)
+	if err := fillCommandShells(ctx, manager, allForShells); err != nil {
+		return ListSessionsOutput{}, err
+	}
+	return ListSessionsOutput{Sessions: items, PinnedSessions: pinnedItems, PinnedKeys: pinnedKeys, TotalCount: totalCount}, nil
 }
 
 func (s *Service) ListMultiRootSessions(ctx context.Context, in ListMultiRootSessionsInput) (ListMultiRootSessionsOutput, error) {
@@ -170,7 +180,13 @@ func (s *Service) ListMultiRootSessions(ctx context.Context, in ListMultiRootSes
 		if err != nil {
 			return ListMultiRootSessionsOutput{}, err
 		}
-		if err := fillCommandShells(ctx, manager, items); err != nil {
+		pinnedItems, err := manager.ListPinned(ctx, session.ListOptions{TopLevelOnly: true})
+		if err != nil {
+			return ListMultiRootSessionsOutput{}, err
+		}
+		pinnedKeys := pinnedSessionKeys(pinnedItems)
+		allForShells := append(append([]*session.Session{}, items...), pinnedItems...)
+		if err := fillCommandShells(ctx, manager, allForShells); err != nil {
 			return ListMultiRootSessionsOutput{}, err
 		}
 		latest := time.Time{}
@@ -182,6 +198,8 @@ func (s *Service) ListMultiRootSessions(ctx context.Context, in ListMultiRootSes
 			RootName:          root.Name,
 			LatestSessionTime: latest,
 			Sessions:          items,
+			PinnedSessions:    pinnedItems,
+			PinnedKeys:        pinnedKeys,
 			TotalCount:        totalCount,
 		})
 	}
@@ -189,6 +207,17 @@ func (s *Service) ListMultiRootSessions(ctx context.Context, in ListMultiRootSes
 		return groups[i].LatestSessionTime.After(groups[j].LatestSessionTime)
 	})
 	return ListMultiRootSessionsOutput{Groups: groups}, nil
+}
+
+func pinnedSessionKeys(items []*session.Session) []string {
+	keys := make([]string, 0, len(items))
+	for _, item := range items {
+		if item == nil || strings.TrimSpace(item.Key) == "" {
+			continue
+		}
+		keys = append(keys, item.Key)
+	}
+	return keys
 }
 
 func (s *Service) ListChildSessions(ctx context.Context, in ListChildSessionsInput) (ListSessionsOutput, error) {
@@ -739,17 +768,24 @@ func (s *Service) GetSessionContextWindow(ctx context.Context, in GetSessionCont
 	}
 	pool := s.Registry.GetAgentPool()
 	if pool == nil {
-		return agenttypes.ContextWindow{}, nil
+		return current.LastContextWindow, nil
 	}
 	agentName := strings.TrimSpace(session.InferAgentFromSession(current))
 	if agentName == "" {
-		return agenttypes.ContextWindow{}, nil
+		return current.LastContextWindow, nil
 	}
 	sess, ok := pool.Get(agentPoolSessionKey(in.Key, agentName))
 	if !ok || sess == nil {
-		return agenttypes.ContextWindow{}, nil
+		return current.LastContextWindow, nil
 	}
-	return sess.ContextWindow(ctx)
+	contextWindow, err := sess.ContextWindow(ctx)
+	if err != nil {
+		return agenttypes.ContextWindow{}, err
+	}
+	if contextWindow.TotalTokens <= 0 || contextWindow.ModelContextWindow <= 0 {
+		return current.LastContextWindow, nil
+	}
+	return contextWindow, nil
 }
 
 type GetSessionRelatedFilesInput struct {
@@ -989,6 +1025,23 @@ func (s *Service) RenameSession(ctx context.Context, in RenameSessionInput) (*se
 	return manager.Rename(ctx, in.Key, in.Name)
 }
 
+type PinSessionInput struct {
+	RootID string
+	Key    string
+	Pinned bool
+}
+
+func (s *Service) PinSession(ctx context.Context, in PinSessionInput) (*session.Session, error) {
+	if err := s.ensureRegistry(); err != nil {
+		return nil, err
+	}
+	manager, err := s.Registry.GetSessionManager(in.RootID)
+	if err != nil {
+		return nil, err
+	}
+	return manager.SetPinned(ctx, in.Key, in.Pinned)
+}
+
 type BuildPromptInput struct {
 	Session        *session.Session
 	Manager        *session.Manager
@@ -1047,12 +1100,77 @@ type SendMessageInput struct {
 	Shell                  string
 	TerminalCols           int
 	Content                string
+	UserTimestamp          time.Time
 	ClientCtx              ClientContext
-	OnStart                func()
+	OnStart                func(MessageStart)
 	OnUpdate               func(agenttypes.Event)
 	OnSubSessionCreated    func(*session.Session)
 	OnSubSessionUpdate     func(sessionKey string, update agenttypes.Event)
 	OnAgentDefaultsChanged func(agentName string)
+}
+
+type MessageStart struct {
+	Model       string
+	Mode        string
+	Effort      string
+	FastService string
+}
+
+func applyMessageRuntimeDefaultsFromStatus(
+	in *SendMessageInput,
+	status agent.Status,
+	statusOK bool,
+) {
+	if in == nil || strings.TrimSpace(in.Model) != "" {
+		return
+	}
+	in.Model = ""
+	in.Effort = strings.TrimSpace(in.Effort)
+	in.FastService = strings.TrimSpace(in.FastService)
+	if !statusOK {
+		return
+	}
+	in.Model = strings.TrimSpace(status.DefaultModelID)
+	if in.Model == "" {
+		in.Model = strings.TrimSpace(status.CurrentModelID)
+	}
+	if in.Effort == "" {
+		in.Effort = strings.TrimSpace(status.DefaultEffort)
+	}
+	if in.FastService == "" {
+		in.FastService = strings.TrimSpace(status.DefaultFastService)
+	}
+}
+
+func (s *Service) applyMessageRuntimeDefaults(in *SendMessageInput) {
+	if in == nil || strings.TrimSpace(in.Model) != "" {
+		return
+	}
+	if s == nil || s.Registry == nil || s.Registry.GetProber() == nil {
+		applyMessageRuntimeDefaultsFromStatus(in, agent.Status{}, false)
+		return
+	}
+	status, ok := s.Registry.GetProber().GetStatus(strings.TrimSpace(in.Agent))
+	if ok {
+		if prefs := s.Registry.GetPreferences(); prefs != nil {
+			status = prefs.ApplyAgentDefaults([]agent.Status{status})[0]
+		}
+	}
+	applyMessageRuntimeDefaultsFromStatus(in, status, ok)
+}
+
+func sendMessageUserTimestamp(in SendMessageInput, fallback time.Time) time.Time {
+	if !in.UserTimestamp.IsZero() {
+		return in.UserTimestamp.UTC()
+	}
+	if fallback.IsZero() {
+		return time.Now().UTC()
+	}
+	return fallback.UTC()
+}
+
+func messageModelSpecified(in SendMessageInput) bool {
+	return in.ModelSpecified || strings.TrimSpace(in.Model) != ""
 }
 
 type RunTransientSlashCommandInput struct {
@@ -1093,6 +1211,7 @@ const (
 	sessionNameMinMessageLen = 12
 	sessionRecoveryAttempts  = 3
 	sessionRecoveryDelay     = 30 * time.Second
+	maxRateLimitRetryDelay   = time.Hour
 )
 
 type SuggestSessionNameInput struct {
@@ -1112,8 +1231,10 @@ var (
 )
 
 type activeTurnState struct {
-	cancel  context.CancelFunc
-	session agenttypes.Session
+	cancel                  context.CancelFunc
+	session                 agenttypes.Session
+	runtimeTurnActive       bool
+	rateLimitRecoveryActive bool
 }
 
 func getSessionSendLock(sessionKey string) *sync.Mutex {
@@ -1152,6 +1273,30 @@ func setActiveTurnSession(rootID, sessionKey string, sess agenttypes.Session) {
 	activeTurnsMu.Unlock()
 }
 
+func setActiveTurnRateLimitRecovery(rootID, sessionKey string, active bool) {
+	if strings.TrimSpace(rootID) == "" || strings.TrimSpace(sessionKey) == "" {
+		return
+	}
+	activeTurnsMu.Lock()
+	state := activeTurns[activeTurnKey(rootID, sessionKey)]
+	if state != nil {
+		state.rateLimitRecoveryActive = active
+	}
+	activeTurnsMu.Unlock()
+}
+
+func setActiveRuntimeTurn(rootID, sessionKey string, active bool) {
+	if strings.TrimSpace(rootID) == "" || strings.TrimSpace(sessionKey) == "" {
+		return
+	}
+	activeTurnsMu.Lock()
+	state := activeTurns[activeTurnKey(rootID, sessionKey)]
+	if state != nil {
+		state.runtimeTurnActive = active
+	}
+	activeTurnsMu.Unlock()
+}
+
 func unregisterActiveTurn(rootID, sessionKey string) {
 	if strings.TrimSpace(rootID) == "" || strings.TrimSpace(sessionKey) == "" {
 		return
@@ -1164,7 +1309,12 @@ func unregisterActiveTurn(rootID, sessionKey string) {
 func getActiveTurn(rootID, sessionKey string) *activeTurnState {
 	activeTurnsMu.Lock()
 	defer activeTurnsMu.Unlock()
-	return activeTurns[activeTurnKey(rootID, sessionKey)]
+	state := activeTurns[activeTurnKey(rootID, sessionKey)]
+	if state == nil {
+		return nil
+	}
+	copy := *state
+	return &copy
 }
 
 func agentPoolSessionKey(sessionKey, agentName string) string {
@@ -1458,6 +1608,14 @@ func isNonRecoverableAgentError(err error) bool {
 		}
 	}
 	return false
+}
+
+func isHTTP429AgentError(err error) bool {
+	if err == nil {
+		return false
+	}
+	value := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(value, "429") || strings.Contains(value, "too many requests")
 }
 
 func cancelRuntimeAfterNonRecoverableError(sess agenttypes.Session, pool *agent.Pool, agentName string, cause error) {
@@ -1956,15 +2114,15 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 	if err := s.ensureRegistry(); err != nil {
 		return err
 	}
+	userTimestamp := sendMessageUserTimestamp(in, time.Now().UTC())
+	modelSpecified := messageModelSpecified(in)
 	sendLock := getSessionSendLock(in.Key)
 	sendLock.Lock()
 	defer sendLock.Unlock()
 	turnCtx, turnCancel := context.WithCancel(ctx)
 	registerActiveTurn(in.RootID, in.Key, turnCancel)
 	defer unregisterActiveTurn(in.RootID, in.Key)
-	if in.OnStart != nil {
-		in.OnStart()
-	}
+	s.applyMessageRuntimeDefaults(&in)
 	manager, err := s.Registry.GetSessionManager(in.RootID)
 	if err != nil {
 		return err
@@ -1978,10 +2136,19 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 			return err
 		}
 	}
+	resolvedMode := resolveRuntimeMode(current, in.Mode)
+	resolvedFastService := resolveRuntimeFastService(in.Agent, current, in.FastService)
+	if in.OnStart != nil {
+		in.OnStart(MessageStart{
+			Model:       in.Model,
+			Mode:        resolvedMode,
+			Effort:      in.Effort,
+			FastService: resolvedFastService,
+		})
+	}
 	if current.Type == session.TypeCommand {
 		return s.sendCommandMessage(turnCtx, in, manager, current)
 	}
-	modelSpecified := in.ModelSpecified || strings.TrimSpace(in.Model) != ""
 	if err := s.validateAgentModel(in.Agent, in.Model); err != nil {
 		log.Printf("[session/model] validate.error root=%s session=%s agent=%s model=%q err=%v", in.RootID, in.Key, strings.TrimSpace(in.Agent), strings.TrimSpace(in.Model), err)
 		return err
@@ -2021,6 +2188,7 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 	})
 	var responseText string
 	sawAssistantChunk := false
+	var lastContextWindow agenttypes.ContextWindow
 	plannedAssistantSeq := len(current.Exchanges) + 2
 	auxBuffer := make([]session.ExchangeAux, 0, 8)
 	defer manager.ClearPendingExchangeAux(context.Background(), current.Key)
@@ -2155,6 +2323,10 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 					responseText = appendResponseChunk(responseText, lastResponseUpdateType, chunk.Content)
 					lastResponseUpdateType = string(update.Type)
 				}
+			} else if update.Type == agenttypes.EventTypeMessageDone {
+				if done, ok := update.Data.(agenttypes.MessageDone); ok {
+					lastContextWindow = done.ContextWindow
+				}
 			} else if update.Type == agenttypes.EventTypeThoughtChunk ||
 				update.Type == agenttypes.EventTypeToolCall ||
 				update.Type == agenttypes.EventTypeToolUpdate ||
@@ -2173,11 +2345,38 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 	}
 	sendWithAttachedUpdates := func(runtime agenttypes.Session, content string) error {
 		attachSessionUpdates(runtime)
+		setActiveRuntimeTurn(in.RootID, current.Key, true)
+		defer setActiveRuntimeTurn(in.RootID, current.Key, false)
 		return runtime.SendMessage(turnCtx, content)
 	}
 	sendErr := sendWithAttachedUpdates(sess, prompt)
 	if sendErr != nil && !isCanceledTurnError(sendErr) {
-		if isNonRecoverableAgentError(sendErr) {
+		rateLimitSettings := preferences.DefaultRateLimitRetryPreferences()
+		if prefs := s.Registry.GetPreferences(); prefs != nil {
+			rateLimitSettings = prefs.GetRateLimitRetry()
+		}
+		if isHTTP429AgentError(sendErr) && rateLimitSettings.Enabled {
+			setActiveTurnRateLimitRecovery(in.RootID, current.Key, true)
+			recoveredSess, recoveredErr := s.recoverRateLimitedTurn(turnCtx, RateLimitRecoveryInput{
+				RootID:             in.RootID,
+				SessionKey:         current.Key,
+				AgentName:          in.Agent,
+				CurrentSession:     sess,
+				Settings:           rateLimitSettings,
+				SendWithAttachment: sendWithAttachedUpdates,
+				OnUpdate:           in.OnUpdate,
+			})
+			setActiveTurnRateLimitRecovery(in.RootID, current.Key, false)
+			if recoveredErr != nil {
+				sendErr = recoveredErr
+				if !isCanceledTurnError(recoveredErr) && isNonRecoverableAgentError(recoveredErr) && !isHTTP429AgentError(recoveredErr) {
+					cancelRuntimeAfterNonRecoverableError(sess, agentPool, in.Agent, recoveredErr)
+				}
+			} else {
+				sess = recoveredSess
+				sendErr = nil
+			}
+		} else if isNonRecoverableAgentError(sendErr) {
 			log.Printf("[session] turn.send.non_recoverable root=%s session=%s agent=%s action=fail_without_recovery err=%v", in.RootID, current.Key, in.Agent, sendErr)
 			cancelRuntimeAfterNonRecoverableError(sess, agentPool, in.Agent, sendErr)
 		} else if !sawAssistantChunk {
@@ -2221,7 +2420,7 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 	}
 	resolvedModel := resolveEffectiveRuntimeModel(in.Agent, current, sess, in.Model, modelSpecified)
 	resolvedEffort := resolveRuntimeEffort(in.Agent, current, in.Effort)
-	resolvedFastService := resolveRuntimeFastService(in.Agent, current, in.FastService)
+	resolvedFastService = resolveRuntimeFastService(in.Agent, current, in.FastService)
 	preferredModel := strings.TrimSpace(in.Model)
 	var modelPatch *string
 	if modelSpecified {
@@ -2241,6 +2440,8 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 			}
 		}
 	}
+	modelDisplayName := s.resolveExchangeModelDisplayName(in.Agent, resolvedModel)
+	exchangeCtx := session.WithExchangeModelDisplayName(ctx, modelDisplayName)
 	if strings.TrimSpace(in.Agent) == "codex" {
 		if modelSpecified {
 			if err := manager.UpdateModel(ctx, current, preferredModel); err != nil {
@@ -2250,15 +2451,15 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 	} else if err := manager.UpdateModel(ctx, current, resolvedModel); err != nil {
 		return err
 	}
-	resolvedMode := resolveRuntimeMode(current, in.Mode)
-	modelDisplayName := s.resolveExchangeModelDisplayName(in.Agent, resolvedModel)
-	exchangeCtx := session.WithExchangeModelDisplayName(ctx, modelDisplayName)
-	if err := manager.AddExchangeForAgent(exchangeCtx, current, "user", in.Content, in.Agent, resolvedMode, resolvedEffort, resolvedFastService); err != nil {
+	if err := manager.AddExchangeForAgentAt(exchangeCtx, current, "user", in.Content, in.Agent, resolvedMode, resolvedEffort, resolvedFastService, userTimestamp); err != nil {
 		log.Printf("[session] persist.user.error root=%s session=%s agent=%s err=%v", in.RootID, current.Key, in.Agent, err)
 		return err
 	}
 	if err := manager.AddExchangeForAgent(exchangeCtx, current, "agent", responseText, in.Agent, resolvedMode, resolvedEffort, resolvedFastService); err != nil {
 		log.Printf("[session] persist.agent.error root=%s session=%s agent=%s err=%v", in.RootID, current.Key, in.Agent, err)
+		return err
+	}
+	if err := manager.UpdateLastContextWindow(ctx, current, lastContextWindow); err != nil {
 		return err
 	}
 	for _, aux := range dedupeExchangeAuxBuffer(auxBuffer) {
@@ -2966,6 +3167,7 @@ func (s *Service) sendCommandMessage(ctx context.Context, in SendMessageInput, m
 	if strings.TrimSpace(in.Content) == "" {
 		return errors.New("command required")
 	}
+	userTimestamp := sendMessageUserTimestamp(in, time.Now().UTC())
 	root := manager.Root()
 	rootAbs, err := root.RootDir()
 	if err != nil {
@@ -3013,7 +3215,7 @@ func (s *Service) sendCommandMessage(ctx context.Context, in SendMessageInput, m
 			in.OnUpdate(agenttypes.Event{Type: agenttypes.EventTypeToolUpdate, Data: final})
 			in.OnUpdate(agenttypes.Event{Type: agenttypes.EventTypeMessageDone, Data: agenttypes.MessageDone{}})
 		}
-		if persistErr := persistCommandTurn(ctx, manager, current, in.Content, final, plannedAssistantSeq); persistErr != nil {
+		if persistErr := persistCommandTurn(ctx, manager, current, in.Content, final, plannedAssistantSeq, userTimestamp); persistErr != nil {
 			return persistErr
 		}
 		return err
@@ -3095,7 +3297,7 @@ func (s *Service) sendCommandMessage(ctx context.Context, in SendMessageInput, m
 		in.OnUpdate(agenttypes.Event{Type: agenttypes.EventTypeToolUpdate, Data: final})
 		in.OnUpdate(agenttypes.Event{Type: agenttypes.EventTypeMessageDone, Data: agenttypes.MessageDone{}})
 	}
-	if err := persistCommandTurn(context.Background(), manager, current, in.Content, final, plannedAssistantSeq); err != nil {
+	if err := persistCommandTurn(context.Background(), manager, current, in.Content, final, plannedAssistantSeq, userTimestamp); err != nil {
 		log.Printf("[command] persist.error root=%s session=%s call=%s err=%v", in.RootID, current.Key, callID, err)
 		return err
 	}
@@ -3188,8 +3390,8 @@ func configuredShells(registry Registry) []commandexec.ShellSpec {
 	return shells
 }
 
-func persistCommandTurn(ctx context.Context, manager *session.Manager, current *session.Session, command string, final agenttypes.ToolCall, plannedAssistantSeq int) error {
-	if err := manager.AddExchangeForAgent(ctx, current, "user", command, "", "", "", ""); err != nil {
+func persistCommandTurn(ctx context.Context, manager *session.Manager, current *session.Session, command string, final agenttypes.ToolCall, plannedAssistantSeq int, userTimestamp time.Time) error {
+	if err := manager.AddExchangeForAgentAt(ctx, current, "user", command, "", "", "", "", userTimestamp); err != nil {
 		return err
 	}
 	if err := manager.AddExchangeForAgent(ctx, current, "agent", "", "", "", "", ""); err != nil {
@@ -3226,6 +3428,94 @@ type SendRecoveryInput struct {
 	Prompt             string
 	SawAssistantChunk  bool
 	SendWithAttachment func(agenttypes.Session, string) error
+}
+
+type RateLimitRecoveryInput struct {
+	RootID             string
+	SessionKey         string
+	AgentName          string
+	CurrentSession     agenttypes.Session
+	Settings           preferences.RateLimitRetryPreferences
+	SendWithAttachment func(agenttypes.Session, string) error
+	OnUpdate           func(agenttypes.Event)
+	WaitForDelay       func(context.Context, time.Duration) error
+}
+
+func rateLimitRetryDelay(settings preferences.RateLimitRetryPreferences, attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	maxSeconds := int64(maxRateLimitRetryDelay / time.Second)
+	base := int64(settings.BaseDelaySeconds)
+	increment := int64(settings.IncrementSeconds)
+	if base < 1 {
+		base = 1
+	}
+	if base >= maxSeconds {
+		return maxRateLimitRetryDelay
+	}
+	seconds := base
+	if increment > 0 {
+		stepCount := int64(attempt - 1)
+		if stepCount > (maxSeconds-base)/increment {
+			return maxRateLimitRetryDelay
+		}
+		seconds += stepCount * increment
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func (s *Service) recoverRateLimitedTurn(ctx context.Context, in RateLimitRecoveryInput) (agenttypes.Session, error) {
+	if s == nil || in.CurrentSession == nil || in.SendWithAttachment == nil {
+		return nil, errors.New("rate limit recovery not configured")
+	}
+	wait := in.WaitForDelay
+	if wait == nil {
+		wait = waitForRecoveryDelay
+	}
+	startedAt := time.Now()
+	for attempt := 1; ; attempt++ {
+		delay := rateLimitRetryDelay(in.Settings, attempt)
+		retryAt := time.Now().Add(delay).UTC().Format(time.RFC3339Nano)
+		log.Printf("[session/rate-limit] wait root=%s session=%s agent=%s attempt=%d delay=%s", in.RootID, in.SessionKey, in.AgentName, attempt, delay)
+		if in.OnUpdate != nil {
+			in.OnUpdate(agenttypes.Event{
+				Type: agenttypes.EventTypeRecovery,
+				Data: agenttypes.RecoveryStatus{
+					Kind:         "rate_limit",
+					Attempt:      attempt,
+					DelaySeconds: int(delay / time.Second),
+					RetryAt:      retryAt,
+				},
+			})
+		}
+		if err := wait(ctx, delay); err != nil {
+			return nil, err
+		}
+		log.Printf("[session/rate-limit] send.start root=%s session=%s agent=%s attempt=%d action=continue", in.RootID, in.SessionKey, in.AgentName, attempt)
+		successfulAttemptStartedAt := time.Now()
+		err := in.SendWithAttachment(in.CurrentSession, "continue")
+		if err == nil {
+			elapsed := successfulAttemptStartedAt.Sub(startedAt)
+			log.Printf("[session/rate-limit] recovered root=%s session=%s agent=%s attempts=%d elapsed=%s", in.RootID, in.SessionKey, in.AgentName, attempt, elapsed)
+			if s.Registry != nil {
+				prefs := s.Registry.GetPreferences()
+				if prefs != nil {
+					if recordErr := prefs.RecordRateLimitRecovery(elapsed, attempt); recordErr != nil {
+						log.Printf("[preferences] rate_limit_recovery.record.error err=%v", recordErr)
+					}
+				}
+			}
+			return in.CurrentSession, nil
+		}
+		if isCanceledTurnError(err) || ctx.Err() != nil {
+			return nil, err
+		}
+		if !isHTTP429AgentError(err) {
+			return nil, err
+		}
+		log.Printf("[session/rate-limit] send.rate_limited root=%s session=%s agent=%s attempt=%d err=%v", in.RootID, in.SessionKey, in.AgentName, attempt, err)
+	}
 }
 
 func (s *Service) recoverAgentTurn(ctx context.Context, in SendRecoveryInput) (agenttypes.Session, error) {
@@ -3749,6 +4039,13 @@ func (s *Service) CancelSessionTurn(ctx context.Context, in CancelSessionTurnInp
 	}
 	active := getActiveTurn(in.RootID, current.Key)
 	if active == nil {
+		return nil
+	}
+	if active.rateLimitRecoveryActive || !active.runtimeTurnActive {
+		active.cancel()
+		if active.session != nil {
+			_ = active.session.CancelCurrentTurn()
+		}
 		return nil
 	}
 	if active.session != nil {

@@ -5,9 +5,79 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"mindfs/server/internal/agent"
 )
+
+func TestRateLimitRetryDefaults(t *testing.T) {
+	store := &Store{}
+	got := store.GetRateLimitRetry()
+	if !got.Enabled || got.BaseDelaySeconds != 10 || got.IncrementSeconds != 5 {
+		t.Fatalf("defaults = %#v, want enabled with 10s base and 5s increment", got)
+	}
+}
+
+func TestUpdateRateLimitRetryPreservesRecoveryStats(t *testing.T) {
+	store := &Store{
+		path: filepath.Join(t.TempDir(), preferencesFileName),
+		data: UserPreferences{RateLimitRetry: &RateLimitRetryPreferences{
+			Enabled:                     true,
+			BaseDelaySeconds:            10,
+			IncrementSeconds:            5,
+			RecommendedBaseDelaySeconds: 30,
+			LastRecoverySeconds:         27,
+			LastRetryCount:              2,
+			RecoverySampleCount:         1,
+		}},
+	}
+	if err := store.UpdateRateLimitRetry(RateLimitRetryPatch{
+		Enabled:          false,
+		BaseDelaySeconds: 20,
+		IncrementSeconds: 0,
+	}); err != nil {
+		t.Fatalf("UpdateRateLimitRetry: %v", err)
+	}
+	got := store.GetRateLimitRetry()
+	if got.Enabled || got.BaseDelaySeconds != 20 || got.IncrementSeconds != 0 {
+		t.Fatalf("updated settings = %#v", got)
+	}
+	if got.RecommendedBaseDelaySeconds != 30 || got.LastRecoverySeconds != 27 || got.LastRetryCount != 2 || got.RecoverySampleCount != 1 {
+		t.Fatalf("recovery stats were not preserved: %#v", got)
+	}
+}
+
+func TestRecordRateLimitRecoveryRoundsRecommendationToNearestTenSeconds(t *testing.T) {
+	store := &Store{path: filepath.Join(t.TempDir(), preferencesFileName)}
+	if err := store.RecordRateLimitRecovery(26*time.Second, 2); err != nil {
+		t.Fatalf("RecordRateLimitRecovery: %v", err)
+	}
+	got := store.GetRateLimitRetry()
+	if got.RecommendedBaseDelaySeconds != 30 || got.LastRecoverySeconds != 26 || got.LastRetryCount != 2 || got.RecoverySampleCount != 1 {
+		t.Fatalf("recorded recovery = %#v", got)
+	}
+}
+
+func TestRecordRateLimitRecoveryRoundsDownBelowMidpoint(t *testing.T) {
+	store := &Store{path: filepath.Join(t.TempDir(), preferencesFileName)}
+	if err := store.RecordRateLimitRecovery(24*time.Second+100*time.Millisecond, 1); err != nil {
+		t.Fatalf("RecordRateLimitRecovery: %v", err)
+	}
+	got := store.GetRateLimitRetry()
+	if got.RecommendedBaseDelaySeconds != 20 || got.LastRecoverySeconds != 25 {
+		t.Fatalf("recorded recovery = %#v", got)
+	}
+}
+
+func TestUpdateRateLimitRetryValidatesRange(t *testing.T) {
+	store := &Store{}
+	if err := store.UpdateRateLimitRetry(RateLimitRetryPatch{Enabled: true, BaseDelaySeconds: 0, IncrementSeconds: 5}); err == nil {
+		t.Fatal("expected zero base delay to fail validation")
+	}
+	if err := store.UpdateRateLimitRetry(RateLimitRetryPatch{Enabled: true, BaseDelaySeconds: 10, IncrementSeconds: -1}); err == nil {
+		t.Fatal("expected negative increment to fail validation")
+	}
+}
 
 func TestUpdateAgentDefaultsClearsEmptyModel(t *testing.T) {
 	dir := t.TempDir()

@@ -44,6 +44,11 @@ import {
   webPushReasonLabel,
   type WebPushStatus,
 } from "../services/webPush";
+import {
+  getRateLimitRetryPreferences,
+  updateRateLimitRetryPreferences,
+  type RateLimitRetryPreferences,
+} from "../services/rateLimitRetry";
 
 type BeforeInstallPromptEvent = Event & {
   prompt: () => Promise<void>;
@@ -166,7 +171,8 @@ type FileTreeProps = {
   onGitDiffSideBySideChange?: (enabled: boolean) => void;
   multiProjectSessionsEnabled?: boolean;
   onMultiProjectSessionsChange?: (enabled: boolean) => void;
-  onRunAgentLifecycleCommand?: (agentName: string, action: "install" | "update", commands: string[]) => void | Promise<void>;
+  onRunAgentLifecycleCommand?: (agentName: string, action: AgentLifecycleCommandAction, commands: string[]) => void | Promise<void>;
+  onRestartAgent?: (agentName: string) => void | Promise<void>;
   onGoHome?: () => void;
   footerTopContent?: React.ReactNode;
 };
@@ -176,6 +182,7 @@ type AgentConfigStep = "agent" | "details" | "confirm";
 type AgentConfigAddTab = "backup" | "api";
 type AgentConfigSwitchTab = "backup" | "api_provider";
 type AgentConfigSwitchSelection = { type: "backup" | "api_provider"; id: string };
+type AgentLifecycleCommandAction = "install" | "update";
 
 function isAgentConfigBackupConflict(error: unknown): boolean {
   const maybeError = error as { status?: unknown; message?: unknown; payload?: { error?: unknown; message?: unknown } } | null;
@@ -362,6 +369,160 @@ function WebPushMenuItem() {
   );
 }
 
+function RateLimitRetryMenuItem() {
+  const { t } = useI18n();
+  const [preferences, setPreferences] = React.useState<RateLimitRetryPreferences | null>(null);
+  const [enabled, setEnabled] = React.useState(true);
+  const [baseDelay, setBaseDelay] = React.useState(10);
+  const [increment, setIncrement] = React.useState(5);
+  const [expanded, setExpanded] = React.useState(false);
+  const [busy, setBusy] = React.useState(false);
+  const [message, setMessage] = React.useState("");
+
+  const applyPreferences = React.useCallback((next: RateLimitRetryPreferences) => {
+    setPreferences(next);
+    setEnabled(next.enabled);
+    setBaseDelay(next.base_delay_seconds);
+    setIncrement(next.increment_seconds);
+  }, []);
+
+  const refresh = React.useCallback(async () => {
+    try {
+      applyPreferences(await getRateLimitRetryPreferences());
+      setMessage("");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : t("rateLimitRetry.loadFailed"));
+    }
+  }, [applyPreferences, t]);
+
+  React.useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  React.useEffect(() => {
+    if (typeof window === "undefined") return;
+    const handleFocus = () => void refresh();
+    window.addEventListener("focus", handleFocus);
+    return () => window.removeEventListener("focus", handleFocus);
+  }, [refresh]);
+
+  const save = async (recommendedBaseDelay?: number) => {
+    if (busy) return;
+    const nextBaseDelay = recommendedBaseDelay ?? baseDelay;
+    setBusy(true);
+    setMessage("");
+    try {
+      const next = await updateRateLimitRetryPreferences({
+        enabled,
+        base_delay_seconds: nextBaseDelay,
+        increment_seconds: increment,
+      });
+      applyPreferences(next);
+      setMessage(t("rateLimitRetry.saved"));
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : t("rateLimitRetry.saveFailed"));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const recommended = Number(preferences?.recommended_base_delay_seconds || 0);
+  const hasRecommendation = recommended >= 10;
+  const recommendationAvailable = hasRecommendation && recommended !== baseDelay;
+  const valid = baseDelay >= 1 && baseDelay <= 3600 && increment >= 0 && increment <= 3600;
+
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => {
+          setExpanded((value) => !value);
+          if (!expanded) void refresh();
+        }}
+        style={{
+          ...fileTreeMenuButtonStyle,
+          color: enabled ? "var(--accent-color)" : "var(--text-primary)",
+        }}
+        aria-expanded={expanded}
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M12 2v4" />
+          <path d="m19.07 4.93-2.83 2.83" />
+          <path d="M22 12h-4" />
+          <path d="M6 12a6 6 0 1 0 6-6" />
+          <path d="m8.5 15.5 3-3" />
+        </svg>
+        <span style={{ flex: 1 }}>{t("rateLimitRetry.title")}</span>
+        <span style={{ color: "var(--text-secondary)", fontSize: "11px" }}>
+          {enabled ? t("rateLimitRetry.on") : t("rateLimitRetry.off")}
+        </span>
+        <ChevronRight isOpen={expanded} />
+      </button>
+      {expanded ? (
+        <div style={{ padding: "4px 10px 8px 32px", display: "flex", flexDirection: "column", gap: "8px", fontSize: "11px" }}>
+          <label style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", color: "var(--text-primary)" }}>
+            <span>{t("rateLimitRetry.enabled")}</span>
+            <input type="checkbox" checked={enabled} disabled={busy} onChange={(event) => setEnabled(event.target.checked)} />
+          </label>
+          <label style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) 72px", alignItems: "center", gap: "8px", color: "var(--text-primary)" }}>
+            <span>{t("rateLimitRetry.baseDelay")}</span>
+            <input
+              type="number"
+              min={1}
+              max={3600}
+              step={1}
+              value={baseDelay}
+              disabled={busy}
+              onChange={(event) => setBaseDelay(Number(event.target.value))}
+              style={{ width: "100%", boxSizing: "border-box", border: "1px solid var(--border-color)", borderRadius: "6px", background: "var(--input-bg, transparent)", color: "var(--text-primary)", padding: "4px 6px", fontSize: "11px" }}
+              aria-label={t("rateLimitRetry.baseDelay")}
+            />
+          </label>
+          <label style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) 72px", alignItems: "center", gap: "8px", color: "var(--text-primary)" }}>
+            <span>{t("rateLimitRetry.increment")}</span>
+            <input
+              type="number"
+              min={0}
+              max={3600}
+              step={1}
+              value={increment}
+              disabled={busy}
+              onChange={(event) => setIncrement(Number(event.target.value))}
+              style={{ width: "100%", boxSizing: "border-box", border: "1px solid var(--border-color)", borderRadius: "6px", background: "var(--input-bg, transparent)", color: "var(--text-primary)", padding: "4px 6px", fontSize: "11px" }}
+              aria-label={t("rateLimitRetry.increment")}
+            />
+          </label>
+          {hasRecommendation ? (
+            <div style={{ display: "flex", alignItems: "center", gap: "6px", color: "var(--text-secondary)", lineHeight: 1.35 }}>
+              <span style={{ flex: 1 }}>
+                {t("rateLimitRetry.recommendation", {
+                  seconds: recommended,
+                  elapsed: preferences?.last_recovery_seconds || 0,
+                  count: preferences?.last_retry_count || 0,
+                })}
+              </span>
+              {recommendationAvailable ? (
+                <button type="button" disabled={busy} onClick={() => void save(recommended)} style={{ border: "1px solid var(--border-color)", borderRadius: "6px", background: "transparent", color: "var(--accent-color)", padding: "3px 7px", cursor: busy ? "wait" : "pointer", fontSize: "11px", flexShrink: 0 }}>
+                  {t("rateLimitRetry.apply")}
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+          {message ? <div style={{ color: "var(--text-secondary)", lineHeight: 1.35 }}>{message}</div> : null}
+          <button
+            type="button"
+            disabled={busy || !valid}
+            onClick={() => void save()}
+            style={{ ...fileTreeMenuButtonStyle, minHeight: "28px", padding: "5px 8px", justifyContent: "center", color: "var(--accent-color)", border: "1px solid var(--border-color)", opacity: busy || !valid ? 0.55 : 1, cursor: busy ? "wait" : valid ? "pointer" : "not-allowed" }}
+          >
+            {busy ? t("common.saving") : t("common.save")}
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 const ChevronRight = ({ isOpen }: { isOpen: boolean }) => (
   <svg
     width="14"
@@ -381,6 +542,24 @@ const ChevronRight = ({ isOpen }: { isOpen: boolean }) => (
     <polyline points="9 18 15 12 9 6" />
   </svg>
 );
+
+function RestartSpinner() {
+  return (
+    <span
+      aria-label="restarting"
+      style={{
+        width: "12px",
+        height: "12px",
+        border: "1.5px solid currentColor",
+        borderTopColor: "transparent",
+        borderRadius: "50%",
+        animation: "mindfs-update-spin 0.8s linear infinite",
+        display: "inline-block",
+        boxSizing: "border-box",
+      }}
+    />
+  );
+}
 
 function DirectoryIconSlot({ entry, isOpen }: { entry: FileEntry; isOpen: boolean }) {
   const showSymlinkBadge = entry.is_dir && entry.is_symlink;
@@ -582,6 +761,7 @@ function AgentConfigPopover({
   selectedAPIProviderID,
   confirmMessage,
   busy,
+  restartingAgent,
   error,
   onChooseAgent,
   onAddTabChange,
@@ -598,6 +778,7 @@ function AgentConfigPopover({
   onDeleteAPIProvider,
   onSave,
   onSwitch,
+  onRestartAgent,
   onConfirm,
   onCancel,
 }: {
@@ -619,6 +800,7 @@ function AgentConfigPopover({
   selectedAPIProviderID: string;
   confirmMessage: string;
   busy: boolean;
+  restartingAgent: string;
   error: string;
   onChooseAgent: (name: string) => void;
   onAddTabChange: (tab: AgentConfigAddTab) => void;
@@ -635,6 +817,7 @@ function AgentConfigPopover({
   onDeleteAPIProvider: (id: string) => void;
   onSave: () => void;
   onSwitch: () => void;
+  onRestartAgent?: (agentName: string) => void | Promise<void>;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -681,25 +864,69 @@ function AgentConfigPopover({
               maxHeight="220px"
               renderEnd={(agent) => {
                 const name = String(agent.last_config_selection?.name || "").trim();
-                if (!name) {
-                  return null;
+                const restarting = agent.name === restartingAgent;
+                if (flow !== "switch" || !onRestartAgent) {
+                  if (!name) {
+                    return null;
+                  }
+                  return (
+                    <span
+                      title={t("agentConfig.lastSelected", { name })}
+                      style={{
+                        maxWidth: "120px",
+                        minWidth: 0,
+                        flexShrink: 1,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                        fontSize: "11px",
+                        color: agent.name === selectedAgent ? "var(--accent-color)" : "var(--text-secondary)",
+                      }}
+                    >
+                      {name}
+                    </span>
+                  );
                 }
                 return (
-                  <span
-                    title={t("agentConfig.lastSelected", { name })}
-                    style={{
-                      maxWidth: "120px",
-                      minWidth: 0,
-                      flexShrink: 1,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                      fontSize: "11px",
-                      color: agent.name === selectedAgent ? "var(--accent-color)" : "var(--text-secondary)",
-                    }}
-                  >
-                    {name}
-                  </span>
+                  <>
+                    {name ? (
+                      <span
+                        title={t("agentConfig.lastSelected", { name })}
+                        style={{
+                          maxWidth: "86px",
+                          minWidth: 0,
+                          flexShrink: 1,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                          fontSize: "11px",
+                          color: agent.name === selectedAgent ? "var(--accent-color)" : "var(--text-secondary)",
+                        }}
+                      >
+                        {name}
+                      </span>
+                    ) : null}
+                    <button
+                      type="button"
+                      disabled={busy || restartingAgent !== ""}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void onRestartAgent(agent.name);
+                      }}
+                      style={{
+                        ...agentConfigSecondaryButtonStyle(busy || restartingAgent !== ""),
+                        padding: "2px 6px",
+                        minWidth: "36px",
+                        height: "18px",
+                        lineHeight: "12px",
+                        fontSize: "11px",
+                        borderRadius: "5px",
+                        flexShrink: 0,
+                      }}
+                    >
+                      {restarting ? <RestartSpinner /> : t("agentConfig.restart")}
+                    </button>
+                  </>
                 );
               }}
               onSelect={onChooseAgent}
@@ -1277,6 +1504,7 @@ export function FileTree({
   multiProjectSessionsEnabled = false,
   onMultiProjectSessionsChange,
   onRunAgentLifecycleCommand,
+  onRestartAgent,
   onGoHome,
   footerTopContent,
 }: FileTreeProps) {
@@ -1331,6 +1559,7 @@ export function FileTree({
   const [agentConfigPreferredProviderIDs, setAgentConfigPreferredProviderIDs] = React.useState<string[]>([]);
   const [agentConfigConfirmMessage, setAgentConfigConfirmMessage] = React.useState("");
   const [agentConfigBusy, setAgentConfigBusy] = React.useState(false);
+  const [agentConfigRestartingAgent, setAgentConfigRestartingAgent] = React.useState("");
   const [agentConfigError, setAgentConfigError] = React.useState("");
   const [agentLifecycleOpen, setAgentLifecycleOpen] = React.useState(false);
   const [relayServicesOpen, setRelayServicesOpen] = React.useState(false);
@@ -1787,6 +2016,7 @@ export function FileTree({
     setAgentConfigPreferredProviderIDs([]);
     setAgentConfigConfirmMessage("");
     setAgentConfigError("");
+    setAgentConfigRestartingAgent("");
     setIsMenuOpen(false);
     setAgentConfigBusy(true);
     fetchAgents(true)
@@ -1826,6 +2056,7 @@ export function FileTree({
     setAgentConfigPreferredProviderIDs(providerIDs);
     setAgentConfigConfirmMessage("");
     setAgentConfigError("");
+    setAgentConfigRestartingAgent("");
     setIsMenuOpen(false);
     setAgentConfigBusy(true);
     fetchAgents(true)
@@ -1845,6 +2076,7 @@ export function FileTree({
     setAgentConfigConfirmMessage("");
     setAgentConfigSwitchSelection(null);
     setAgentConfigSwitchTab("backup");
+    setAgentConfigRestartingAgent("");
   }, []);
 
   const openAgentLifecycleFlow = React.useCallback(() => {
@@ -1916,7 +2148,7 @@ export function FileTree({
     setRelayServicesEditing(false);
   }, []);
 
-  const runAgentLifecycleCommand = React.useCallback(async (agent: AgentStatus, action: "install" | "update") => {
+  const runAgentLifecycleCommand = React.useCallback(async (agent: AgentStatus, action: AgentLifecycleCommandAction) => {
     const commands = action === "install" ? agent.install_commands || [] : agent.update_commands || [];
     if (commands.length === 0) {
       setAgentLifecycleError(t("agentConfig.noCommand"));
@@ -1935,6 +2167,21 @@ export function FileTree({
       setAgentLifecycleRunningAgent("");
     }
   }, [closeAgentLifecycleFlow, onRunAgentLifecycleCommand, t]);
+
+  const restartAgentFromConfigList = React.useCallback(async (agentName: string) => {
+    if (!agentName || !onRestartAgent || agentConfigRestartingAgent) {
+      return;
+    }
+    setAgentConfigRestartingAgent(agentName);
+    setAgentConfigError("");
+    try {
+      await onRestartAgent(agentName);
+    } catch (error) {
+      setAgentConfigError(error instanceof Error ? error.message : t("agentConfig.restartFailed"));
+    } finally {
+      setAgentConfigRestartingAgent("");
+    }
+  }, [agentConfigRestartingAgent, onRestartAgent, t]);
 
   const chooseAgentForConfig = React.useCallback(async (agentName: string) => {
     setAgentConfigAgent(agentName);
@@ -2600,6 +2847,7 @@ export function FileTree({
                   <span>{t("fileTree.relayLocalServices")}</span>
                 </button>
                 {!isNativeApp ? <WebPushMenuItem /> : null}
+                <RateLimitRetryMenuItem />
                 <div style={{ height: "1px", background: "var(--border-color)", margin: "6px 4px" }} />
                 <button
                   type="button"
@@ -2962,6 +3210,7 @@ export function FileTree({
               selectedAPIProviderID={selectedAgentAPIProviderID}
               confirmMessage={agentConfigConfirmMessage}
               busy={agentConfigBusy}
+              restartingAgent={agentConfigRestartingAgent}
               error={agentConfigError}
               onChooseAgent={(name) => {
                 void chooseAgentForConfig(name);
@@ -2992,6 +3241,7 @@ export function FileTree({
               onSwitch={() => {
                 void runAgentConfigSwitch(false);
               }}
+              onRestartAgent={agentConfigFlow === "switch" ? restartAgentFromConfigList : undefined}
               onConfirm={() => {
                 if (agentConfigFlow === "backup") {
                   void saveAgentConfigBackup(true);

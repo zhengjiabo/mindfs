@@ -3,16 +3,24 @@ package preferences
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"mindfs/server/internal/agent"
 	"mindfs/server/internal/config"
 )
 
 const preferencesFileName = "preferences.json"
+
+const (
+	DefaultRateLimitRetryBaseDelaySeconds = 10
+	DefaultRateLimitRetryIncrementSeconds = 5
+	MaxRateLimitRetrySettingSeconds       = 3600
+)
 
 type Store struct {
 	mu   sync.RWMutex
@@ -21,7 +29,24 @@ type Store struct {
 }
 
 type UserPreferences struct {
-	Agents map[string]AgentDefaults `json:"agents,omitempty"`
+	Agents         map[string]AgentDefaults   `json:"agents,omitempty"`
+	RateLimitRetry *RateLimitRetryPreferences `json:"rate_limit_retry,omitempty"`
+}
+
+type RateLimitRetryPreferences struct {
+	Enabled                     bool `json:"enabled"`
+	BaseDelaySeconds            int  `json:"base_delay_seconds"`
+	IncrementSeconds            int  `json:"increment_seconds"`
+	RecommendedBaseDelaySeconds int  `json:"recommended_base_delay_seconds,omitempty"`
+	LastRecoverySeconds         int  `json:"last_recovery_seconds,omitempty"`
+	LastRetryCount              int  `json:"last_retry_count,omitempty"`
+	RecoverySampleCount         int  `json:"recovery_sample_count,omitempty"`
+}
+
+type RateLimitRetryPatch struct {
+	Enabled          bool
+	BaseDelaySeconds int
+	IncrementSeconds int
 }
 
 type AgentDefaults struct {
@@ -41,6 +66,87 @@ type AgentDefaultsPatch struct {
 	Model       *string
 	Effort      string
 	FastService string
+}
+
+func DefaultRateLimitRetryPreferences() RateLimitRetryPreferences {
+	return RateLimitRetryPreferences{
+		Enabled:          true,
+		BaseDelaySeconds: DefaultRateLimitRetryBaseDelaySeconds,
+		IncrementSeconds: DefaultRateLimitRetryIncrementSeconds,
+	}
+}
+
+func validateRateLimitRetryPatch(patch RateLimitRetryPatch) error {
+	if patch.BaseDelaySeconds < 1 || patch.BaseDelaySeconds > MaxRateLimitRetrySettingSeconds {
+		return errors.New("base delay must be between 1 and 3600 seconds")
+	}
+	if patch.IncrementSeconds < 0 || patch.IncrementSeconds > MaxRateLimitRetrySettingSeconds {
+		return errors.New("increment must be between 0 and 3600 seconds")
+	}
+	return nil
+}
+
+func (s *Store) GetRateLimitRetry() RateLimitRetryPreferences {
+	if s == nil {
+		return DefaultRateLimitRetryPreferences()
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.data.RateLimitRetry == nil {
+		return DefaultRateLimitRetryPreferences()
+	}
+	return *s.data.RateLimitRetry
+}
+
+func (s *Store) UpdateRateLimitRetry(patch RateLimitRetryPatch) error {
+	if s == nil {
+		return nil
+	}
+	if err := validateRateLimitRetryPatch(patch); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	next := DefaultRateLimitRetryPreferences()
+	if s.data.RateLimitRetry != nil {
+		next = *s.data.RateLimitRetry
+	}
+	next.Enabled = patch.Enabled
+	next.BaseDelaySeconds = patch.BaseDelaySeconds
+	next.IncrementSeconds = patch.IncrementSeconds
+	if s.data.RateLimitRetry != nil && *s.data.RateLimitRetry == next {
+		return nil
+	}
+	s.data.RateLimitRetry = &next
+	return s.saveLocked()
+}
+
+func (s *Store) RecordRateLimitRecovery(elapsed time.Duration, retryCount int) error {
+	if s == nil || elapsed <= 0 || retryCount <= 0 {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	next := DefaultRateLimitRetryPreferences()
+	if s.data.RateLimitRetry != nil {
+		next = *s.data.RateLimitRetry
+	}
+	elapsedSeconds := int(math.Ceil(elapsed.Seconds()))
+	recommended := int(math.Round(elapsed.Seconds()/10.0)) * 10
+	if recommended < 10 {
+		recommended = 10
+	}
+	if recommended > MaxRateLimitRetrySettingSeconds {
+		recommended = MaxRateLimitRetrySettingSeconds
+	}
+	next.RecommendedBaseDelaySeconds = recommended
+	next.LastRecoverySeconds = elapsedSeconds
+	next.LastRetryCount = retryCount
+	next.RecoverySampleCount++
+	s.data.RateLimitRetry = &next
+	return s.saveLocked()
 }
 
 func NewStore() (*Store, error) {
