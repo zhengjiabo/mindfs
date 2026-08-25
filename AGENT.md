@@ -170,14 +170,15 @@ Claude Code CLI, the SDK default produces `User-Agent: claude-cli/... (external,
 and `cc_entrypoint=sdk-go`; native Claude Code stream-json mode uses `sdk-cli`.
 
 The runtime in `server/internal/agent/claude/session.go` must therefore remove
-SDK identity markers at the subprocess boundary and pin
-`CLAUDE_CODE_ENTRYPOINT=sdk-cli`. It also removes
-`CLAUDE_AGENT_SDK_CLIENT_APP` so host or provider configuration cannot silently
-change the client identity.
+SDK identity markers at the subprocess boundary without setting a replacement
+entrypoint. This lets the installed Claude Code CLI select its own native
+identity; the current CLI selects `sdk-cli` for stream-json mode. The wrapper
+also removes `CLAUDE_AGENT_SDK_CLIENT_APP` so host or provider configuration
+cannot silently change the client identity.
 
-Do not remove this transport wrapper or restore the SDK-provided `sdk-go`
-identity unless the production provider is intentionally meant to see an
-Agent SDK client instead of Claude Code.
+Do not remove this transport wrapper, pin a replacement entrypoint, or restore
+the SDK-provided `sdk-go` identity unless the production provider is
+intentionally meant to see an Agent SDK client instead of Claude Code.
 
 
 ## Git Model

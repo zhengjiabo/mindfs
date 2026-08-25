@@ -58,7 +58,7 @@ func TestClaudeCodeIdentityRunnerKeepsNativeCLIIdentity(t *testing.T) {
 	defer stdout.Close()
 	defer stderr.Close()
 
-	want := []string{"PATH=/usr/bin", "CLAUDE_CODE_ENTRYPOINT=sdk-cli"}
+	want := []string{"PATH=/usr/bin"}
 	if !reflect.DeepEqual(delegate.StartEnv, want) {
 		t.Fatalf("Claude Code env = %#v, want %#v", delegate.StartEnv, want)
 	}

@@ -20,8 +20,6 @@ import (
 
 const chunkFlushThreshold = 24
 
-const claudeCodeCLIEntrypoint = "sdk-cli"
-
 type deltaType string
 
 const (
@@ -76,7 +74,7 @@ func (r *claudeCodeIdentityRunner) Start(
 }
 
 func claudeCodeIdentityEnv(env []string) []string {
-	out := make([]string, 0, len(env)+1)
+	out := make([]string, 0, len(env))
 	for _, entry := range env {
 		key, _, ok := strings.Cut(entry, "=")
 		if ok && (strings.EqualFold(key, "CLAUDE_CODE_ENTRYPOINT") ||
@@ -86,7 +84,7 @@ func claudeCodeIdentityEnv(env []string) []string {
 		}
 		out = append(out, entry)
 	}
-	return append(out, "CLAUDE_CODE_ENTRYPOINT="+claudeCodeCLIEntrypoint)
+	return out
 }
 
 func appendClaudeCodeIdentityTransport(options []claudeagent.Option) ([]claudeagent.Option, error) {
