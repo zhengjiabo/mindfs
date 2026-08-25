@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"path/filepath"
 	"strconv"
@@ -18,6 +19,8 @@ import (
 )
 
 const chunkFlushThreshold = 24
+
+const claudeCodeCLIEntrypoint = "sdk-cli"
 
 type deltaType string
 
@@ -58,6 +61,49 @@ type OpenOptions struct {
 }
 
 type Runtime struct{}
+
+type claudeCodeIdentityRunner struct {
+	claudeagent.SubprocessRunner
+}
+
+func (r *claudeCodeIdentityRunner) Start(
+	ctx context.Context,
+	args []string,
+	env []string,
+	cwd string,
+) (io.WriteCloser, io.ReadCloser, io.ReadCloser, error) {
+	return r.SubprocessRunner.Start(ctx, args, claudeCodeIdentityEnv(env), cwd)
+}
+
+func claudeCodeIdentityEnv(env []string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, entry := range env {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok && (strings.EqualFold(key, "CLAUDE_CODE_ENTRYPOINT") ||
+			strings.EqualFold(key, "CLAUDE_AGENT_SDK_VERSION") ||
+			strings.EqualFold(key, "CLAUDE_AGENT_SDK_CLIENT_APP")) {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return append(out, "CLAUDE_CODE_ENTRYPOINT="+claudeCodeCLIEntrypoint)
+}
+
+func appendClaudeCodeIdentityTransport(options []claudeagent.Option) ([]claudeagent.Option, error) {
+	transportOptions := claudeagent.DefaultOptions()
+	for _, apply := range options {
+		apply(&transportOptions)
+	}
+	cliPath, err := claudeagent.DiscoverCLIPath(&transportOptions)
+	if err != nil {
+		return nil, err
+	}
+	runner := &claudeCodeIdentityRunner{
+		SubprocessRunner: claudeagent.NewLocalSubprocessRunner(cliPath),
+	}
+	transport := claudeagent.NewSubprocessTransportWithRunner(runner, &transportOptions)
+	return append(options, claudeagent.WithTransport(transport)), nil
+}
 
 func NewRuntime() *Runtime {
 	return &Runtime{}
@@ -120,6 +166,10 @@ func (r *Runtime) OpenSession(ctx context.Context, opts OpenOptions) (types.Sess
 	}
 	if opts.PlanMode {
 		optionList = append(optionList, claudeagent.WithPermissionMode(claudeagent.PermissionModePlan))
+	}
+	optionList, err := appendClaudeCodeIdentityTransport(optionList)
+	if err != nil {
+		return nil, err
 	}
 
 	client, err := claudeagent.NewClient(optionList...)

@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"context"
 	"encoding/json"
 	"reflect"
 	"strings"
@@ -36,6 +37,30 @@ func TestAppendClaudeDeveloperInstructionsUsesCLIAppendSystemPrompt(t *testing.T
 	value, ok := options.ExtraArgs["append-system-prompt"]
 	if !ok || value == nil || *value != "render markdown" {
 		t.Fatalf("append-system-prompt extra arg = %#v", value)
+	}
+}
+
+func TestClaudeCodeIdentityRunnerKeepsNativeCLIIdentity(t *testing.T) {
+	delegate := claudeagent.NewMockSubprocessRunner()
+	runner := &claudeCodeIdentityRunner{SubprocessRunner: delegate}
+	stdin, stdout, stderr, err := runner.Start(context.Background(), nil, []string{
+		"PATH=/usr/bin",
+		"CLAUDE_CODE_ENTRYPOINT=from-parent",
+		"CLAUDE_AGENT_SDK_VERSION=parent-version",
+		"CLAUDE_AGENT_SDK_CLIENT_APP=mindfs",
+		"CLAUDE_CODE_ENTRYPOINT=sdk-go",
+		"CLAUDE_AGENT_SDK_VERSION=0.1.0",
+	}, "")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer stdin.Close()
+	defer stdout.Close()
+	defer stderr.Close()
+
+	want := []string{"PATH=/usr/bin", "CLAUDE_CODE_ENTRYPOINT=sdk-cli"}
+	if !reflect.DeepEqual(delegate.StartEnv, want) {
+		t.Fatalf("Claude Code env = %#v, want %#v", delegate.StartEnv, want)
 	}
 }
 

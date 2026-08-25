@@ -157,6 +157,29 @@ Quick live verification used in this environment:
 - after the client-identity fix and restart, a fresh MindFS Codex request succeeded again against that config
 
 
+## Claude Code Runtime Notes
+
+MindFS uses `claude-agent-sdk-go` to launch the installed Claude Code CLI in
+stream-json mode. The SDK currently injects these subprocess markers:
+
+- `CLAUDE_CODE_ENTRYPOINT=sdk-go`
+- `CLAUDE_AGENT_SDK_VERSION=0.1.0`
+
+Those markers change the identity sent to the upstream API. With the installed
+Claude Code CLI, the SDK default produces `User-Agent: claude-cli/... (external, sdk-go)`
+and `cc_entrypoint=sdk-go`; native Claude Code stream-json mode uses `sdk-cli`.
+
+The runtime in `server/internal/agent/claude/session.go` must therefore remove
+SDK identity markers at the subprocess boundary and pin
+`CLAUDE_CODE_ENTRYPOINT=sdk-cli`. It also removes
+`CLAUDE_AGENT_SDK_CLIENT_APP` so host or provider configuration cannot silently
+change the client identity.
+
+Do not remove this transport wrapper or restore the SDK-provided `sdk-go`
+identity unless the production provider is intentionally meant to see an
+Agent SDK client instead of Claude Code.
+
+
 ## Git Model
 
 Repository model:
