@@ -10,7 +10,11 @@ import { Renderer } from "./renderer/Renderer";
 import {
   clearCachedSessionsForRoot,
   deleteCachedSession,
+  getCachedMultiRootSessionList,
   getCachedSession,
+  getCachedSessionList,
+  saveCachedMultiRootSessionList,
+  saveCachedSessionList,
   sessionService,
   setCachedSessionRelatedFiles,
   syncSession,
@@ -79,6 +83,10 @@ import {
   type GitWorktreeItem,
 } from "./services/git";
 import {
+  relatedFileStatKey,
+  useRelatedFileStats,
+} from "./hooks/useRelatedFileStats";
+import {
   DEFAULT_DIRECTORY_SORT_MODE,
   type DirectorySortMode,
   type FileEntry,
@@ -98,6 +106,7 @@ import {
   saveTrustedPluginSet,
 } from "./plugins/trust";
 import { appPath, appURL, isRelayNodePage } from "./services/base";
+import { useRefreshSpin } from "./hooks";
 import { copyText } from "./services/clipboard";
 import { triggerUpdate, type UpdateState } from "./services/update";
 import {
@@ -113,7 +122,11 @@ import {
 // 直接导入标准组件
 import { AppShell } from "./layout/AppShell";
 import { ModeIcon } from "./components/ModeIcon";
-import { FileTree, type AgentConfigSwitchRequest } from "./components/FileTree";
+import {
+  FileTree,
+  type AgentConfigSwitchRequest,
+  type ProjectTreeTab,
+} from "./components/FileTree";
 import { FileViewer } from "./components/FileViewer";
 import { GitDiffViewer } from "./components/GitDiffViewer";
 import { GitHistoryPanel } from "./components/GitHistoryPanel";
@@ -131,6 +144,9 @@ import { ToastContainer } from "./components/Toast";
 import { BottomSheet } from "./components/BottomSheet";
 import { ScheduledAgentTaskDialog } from "./components/ScheduledAgentTaskDialog";
 import { TaskTemplateDialog } from "./components/TaskTemplateDialog";
+import { OnboardingTour } from "./components/OnboardingTour";
+import { WorktreeBranchSelector } from "./components/WorktreeBranchSelector";
+import { NoWorktreeIcon } from "./components/NoWorktreeIcon";
 import { renderToolIcon } from "./components/stream/ToolCallCard";
 import TokenEditor, { type TokenEditorHandle } from "./components/editor/TokenEditor";
 import {
@@ -158,8 +174,14 @@ import {
   type StageTemplate,
   type TaskTemplate,
 } from "./services/tasks";
+import { shouldApplyTaskDetail } from "./services/taskDetailOrder";
 import { mergeRelatedFileGroups, taskIdsForUpdatedSession } from "./services/taskRelatedFiles";
 import { useI18n, type MessageKey, type MessageParams } from "./i18n";
+import {
+  completeOnboarding,
+  dismissOnboarding,
+  shouldAutoStartOnboarding,
+} from "./services/onboarding";
 
 // 类型定义
 type SessionMode = "chat" | "plugin" | "command";
@@ -1627,6 +1649,9 @@ export function App({ onGoHome }: AppProps) {
     null,
   );
   const [selectedSessionLoading, setSelectedSessionLoading] = useState(false);
+  const [drawerLoadingSessionByRoot, setDrawerLoadingSessionByRoot] = useState<
+    Record<string, string>
+  >({});
   const [activeBoundSessionKey, setActiveBoundSessionKey] = useState<
     string | null
   >(null);
@@ -1645,6 +1670,7 @@ export function App({ onGoHome }: AppProps) {
     "main",
   );
   const [agentsVersion, setAgentsVersion] = useState(0);
+  const [codexRateLimitsRefreshToken, setCodexRateLimitsRefreshToken] = useState(0);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const { isMobile, isTablet } = useResponsive();
   const [mobileEnterKeySends, setMobileEnterKeySends] = useState(loadMobileEnterKeySends);
@@ -1654,6 +1680,8 @@ export function App({ onGoHome }: AppProps) {
   const [isRightOpen, setIsRightOpen] = useState(
     () => window.innerWidth >= 768,
   );
+  const [onboardingOpen, setOnboardingOpen] = useState(false);
+  const onboardingAutoStartRef = useRef(false);
   const [currentRootId, setCurrentRootId] = useState<string | null>(null);
   const currentRootIdRef = useRef<string | null>(null);
 
@@ -1835,36 +1863,47 @@ export function App({ onGoHome }: AppProps) {
   }, [currentRootId, taskInlineActiveToken, taskTemplateFilter, taskTemplates]);
 
   const applyTaskDetails = useCallback((rootId: string, details: TaskDetail[], persist = true) => {
-    const valid = details.filter((detail) => detail?.task?.id);
-    if (valid.length === 0) return;
+    const accepted = details.filter(
+      (detail) =>
+        detail?.task?.id &&
+        shouldApplyTaskDetail(taskDetailsByIdRef.current[detail.task.id], detail),
+    );
+    if (accepted.length === 0) return;
+    const nextSnapshot = { ...taskDetailsByIdRef.current };
+    accepted.forEach((detail) => {
+      nextSnapshot[detail.task.id] = detail;
+    });
+    taskDetailsByIdRef.current = nextSnapshot;
     setTaskDetailsById((prev) => {
       const next = { ...prev };
-      valid.forEach((detail) => {
-        next[detail.task.id] = detail;
+      accepted.forEach((detail) => {
+        if (shouldApplyTaskDetail(next[detail.task.id], detail)) {
+          next[detail.task.id] = detail;
+        }
       });
       return next;
     });
     setTaskFirstInputById((prev) => {
       const next = { ...prev };
-      valid.forEach((detail) => {
+      accepted.forEach((detail) => {
         next[detail.task.id] = firstTaskInputFromDetail(detail);
       });
       return next;
     });
     setTaskSessionKeysById((prev) => {
       const next = { ...prev };
-      valid.forEach((detail) => {
+      accepted.forEach((detail) => {
         next[detail.task.id] = taskSessionKeysFromDetail(detail);
       });
       return next;
     });
     setKanbanTaskCountItems((prev) => {
       const byId = new Map(prev.map((task) => [task.id, task]));
-      valid.forEach((detail) => byId.set(detail.task.id, detail.task));
+      accepted.forEach((detail) => byId.set(detail.task.id, detail.task));
       return Array.from(byId.values()).sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")));
     });
     if (persist) {
-      void upsertCachedTaskDetails(rootId, valid);
+      void upsertCachedTaskDetails(rootId, accepted);
     }
   }, []);
 
@@ -1886,14 +1925,19 @@ export function App({ onGoHome }: AppProps) {
       const cached = await getCachedTaskDetails(targetRoot);
       if (cached.length > 0) {
         applyTaskDetails(targetRoot, cached, false);
+        setKanbanTasksLoading(false);
       }
       const meta = await getCachedTaskMeta(targetRoot);
-      const details = await fetchTaskDetails(targetRoot, force ? undefined : { after: meta?.newestUpdatedAt || "" });
+      const [details, recent] = await Promise.all([
+        fetchTaskDetails(targetRoot, force ? undefined : { after: meta?.newestUpdatedAt || "" }),
+        !force && meta?.newestUpdatedAt
+          ? fetchTaskDetails(targetRoot, { limit: 20 })
+          : Promise.resolve([]),
+      ]);
       if (details.length > 0) {
         applyTaskDetails(targetRoot, details);
       }
-      if (!force && meta?.newestUpdatedAt) {
-        const recent = await fetchTaskDetails(targetRoot, { limit: 20 });
+      if (recent.length > 0) {
         applyTaskDetails(targetRoot, recent);
       }
     } catch (err) {
@@ -1902,6 +1946,8 @@ export function App({ onGoHome }: AppProps) {
       setKanbanTasksLoading(false);
     }
   }, [applyTaskDetails, t]);
+
+  const kanbanRefreshSpin = useRefreshSpin(() => loadKanbanTasks(currentRootId));
 
 	  useEffect(() => {
 	    void loadKanbanTasks(currentRootId);
@@ -2199,7 +2245,7 @@ export function App({ onGoHome }: AppProps) {
           onProgress: setTaskInlineUploadProgress,
           signal: uploadAbort.signal,
         });
-        attachmentTokens = uploaded.map((file) => `[file: ${file.path}]`).join("\n");
+        attachmentTokens = uploaded.map((file) => `[file: ${file.agent_path || file.path}]`).join("\n");
       }
       const payload = [edit.text.trim(), attachmentTokens].filter(Boolean).join("\n");
       const taskCanCreateWorktree = managedRootByIdRef.current[rootId]?.is_git_repo === true;
@@ -2373,6 +2419,26 @@ export function App({ onGoHome }: AppProps) {
   const [e2eeState, setE2eeState] = useState<E2EEState>(() =>
     e2eeService.snapshot(),
   );
+  useEffect(() => {
+    if (
+      isMobile ||
+      onboardingAutoStartRef.current ||
+      !currentRootId ||
+      bootstrapState.phase !== "ready" ||
+      (e2eeState.required && !e2eeState.unlocked)
+    ) {
+      return;
+    }
+    onboardingAutoStartRef.current = true;
+    if (!shouldAutoStartOnboarding()) return;
+    const timer = window.setTimeout(() => setOnboardingOpen(true), 700);
+    return () => window.clearTimeout(timer);
+  }, [bootstrapState.phase, currentRootId, e2eeState.required, e2eeState.unlocked, isMobile]);
+  useEffect(() => {
+    if (isMobile && onboardingOpen) {
+      setOnboardingOpen(false);
+    }
+  }, [isMobile, onboardingOpen]);
   const [e2eeSecretInput, setE2eeSecretInput] = useState("");
   const [e2eePromptError, setE2eePromptError] = useState("");
   const [e2eePromptBusy, setE2eePromptBusy] = useState(false);
@@ -2460,10 +2526,10 @@ export function App({ onGoHome }: AppProps) {
   );
   const [showHiddenFiles, setShowHiddenFiles] = useState(false);
   const [projectTreeTabRequest, setProjectTreeTabRequest] = useState<{
-    tab: "files" | "git" | "worktrees" | "related";
+    tab: ProjectTreeTab;
     nonce: number;
   } | null>(null);
-  const [projectTreeTab, setProjectTreeTab] = useState<"files" | "git" | "worktrees" | "related">("files");
+  const [projectTreeTab, setProjectTreeTab] = useState<ProjectTreeTab>("files");
   const [worktreeItemsByRoot, setWorktreeItemsByRoot] = useState<Record<string, GitWorktreeItem[]>>({});
   const [worktreeLoadingByRoot, setWorktreeLoadingByRoot] = useState<Record<string, boolean>>({});
   const [worktreeErrorByRoot, setWorktreeErrorByRoot] = useState<Record<string, string>>({});
@@ -2853,6 +2919,31 @@ export function App({ onGoHome }: AppProps) {
     const target = `${window.location.pathname}${search}`;
     window.history.replaceState(null, "", target);
   }, []);
+
+  const handleOnboardingStepChange = useCallback((stepId: string) => {
+    const showingSidebar = stepId === "sidebar-menu" || stepId === "project-tabs";
+    const showingSessions = stepId === "session-actions";
+    const showingTasks = stepId === "project-home" || stepId === "main-menu" || stepId === "task-templates" || stepId === "task-template-menu" || stepId === "tasks";
+
+    if (showingTasks && currentRootId) {
+      selectedSessionRef.current = null;
+      setSelectedSession(null);
+      setSelectedSessionLoading(false);
+      setFile(null);
+      setGitDiff(null);
+      setSelectedDir(currentRootId);
+      handleMainContentViewChange("task-kanban");
+      replaceURLState({ root: currentRootId, file: "", session: "", cursor: 0, pluginQuery: {} });
+    }
+
+    if (!isMobile) {
+      setIsLeftOpen(true);
+      setIsRightOpen(true);
+      return;
+    }
+    setIsLeftOpen(showingSidebar);
+    setIsRightOpen(showingSessions);
+  }, [currentRootId, handleMainContentViewChange, isMobile, replaceURLState]);
 
   const redirectToRelayLogin = useCallback(() => {
     const next = encodeURIComponent(
@@ -3371,6 +3462,11 @@ export function App({ onGoHome }: AppProps) {
         return null;
       }
       const cacheKey = rootSessionKey(resolvedRoot, resolvedKey);
+      const cachedBeforeSync = sessionCacheRef.current[cacheKey];
+      const resumeCursor = sessionService.getEventCursor(
+        resolvedRoot,
+        resolvedKey,
+      );
       const inflight = loadingSessionRef.current[cacheKey];
       const request =
         inflight ||
@@ -3381,9 +3477,35 @@ export function App({ onGoHome }: AppProps) {
         loadingSessionRef.current[cacheKey] = request;
       }
       const syncResult = await request;
-      const fullSession = syncResult?.session;
+      let fullSession = syncResult?.session;
       if (!fullSession) {
         return null;
+      }
+      if (resumeCursor) {
+        const incomingExchanges = Array.isArray((fullSession as any).exchanges)
+          ? ((fullSession as any).exchanges as Exchange[])
+          : [];
+        const hasPendingTurn = incomingExchanges.some(
+          (exchange) => Number((exchange as any)?.seq || 0) === 0,
+        );
+        const localTransient = Array.isArray((cachedBeforeSync as any)?.exchanges)
+          ? (((cachedBeforeSync as any).exchanges as Exchange[]).filter(
+              (exchange) => Number((exchange as any)?.seq || 0) === 0,
+            ))
+          : [];
+        if (hasPendingTurn && localTransient.length > 0) {
+          fullSession = {
+            ...(fullSession as any),
+            exchanges: [
+              ...incomingExchanges.filter(
+                (exchange) => Number((exchange as any)?.seq || 0) > 0,
+              ),
+              ...localTransient,
+            ],
+          } as Session;
+        } else {
+          sessionService.clearEventCursor(resolvedRoot, resolvedKey);
+        }
       }
       const serverPending =
         typeof (fullSession as any)?.pending === "boolean"
@@ -4038,10 +4160,12 @@ export function App({ onGoHome }: AppProps) {
         const isUserShellStream =
           incomingMeta.source === "userShell" && incomingMeta.phase === "stream";
         if (isUserShellStream) {
-          const mergedContent = [
-            ...((existing?.content || []) as any[]),
-            ...((incoming?.content || []) as any[]),
-          ];
+          const mergedContent = incomingMeta.replaySnapshot === true
+            ? [...((incoming?.content || []) as any[])]
+            : [
+                ...((existing?.content || []) as any[]),
+                ...((incoming?.content || []) as any[]),
+              ];
           const totalText = mergedContent.map((item) => item?.text || "").join("");
           if (totalText.length > 256 * 1024) {
             merged.content = [{ type: "text", text: totalText.slice(-256 * 1024) }];
@@ -4503,7 +4627,10 @@ export function App({ onGoHome }: AppProps) {
     }
   }, []);
 
-  const refreshGitHistory = useCallback(async (rootID: string, options?: { force?: boolean }) => {
+  const refreshGitHistory = useCallback(async (
+    rootID: string,
+    options?: { force?: boolean; waitForIncremental?: boolean },
+  ) => {
     if (!rootID) {
       setGitHistory(null);
       setGitHistoryLoading(false);
@@ -4518,27 +4645,33 @@ export function App({ onGoHome }: AppProps) {
         }
         const newest = cachedHead.items[0]?.hash || "";
         if (newest) {
-          void fetchGitHistory(rootID, { afterCommit: newest })
-            .then((next) => {
-              if (next.commit_missing) {
+          const refreshAfterNewest = async () => {
+            try {
+              const next = await fetchGitHistory(rootID, { afterCommit: newest });
+              if (next.commit_missing || (next.items || []).length > 0) {
                 clearGitHistoryCache(rootID);
-                return fetchGitHistory(rootID, { force: true });
+                const fresh = await fetchGitHistory(rootID, { force: true });
+                setGitHistoryByRoot((prev) => ({ ...prev, [rootID]: fresh }));
+                if (currentRootIdRef.current === rootID) {
+                  setGitHistory(fresh);
+                }
+                return fresh;
               }
-              if ((next.items || []).length > 0) {
-                clearGitHistoryCache(rootID);
-                return fetchGitHistory(rootID, { force: true });
-              }
-              return getCachedGitHistoryHead(rootID) || next;
-            })
-            .then((fresh) => {
+              const fresh = getCachedGitHistoryHead(rootID) || next;
               setGitHistoryByRoot((prev) => ({ ...prev, [rootID]: fresh }));
               if (currentRootIdRef.current === rootID) {
                 setGitHistory(fresh);
               }
-            })
-            .catch((err) => {
+              return fresh;
+            } catch (err) {
               console.error("[git.history.after] failed", { rootID, afterCommit: newest, err });
-            });
+              return cachedHead;
+            }
+          };
+          if (options?.waitForIncremental) {
+            return refreshAfterNewest();
+          }
+          void refreshAfterNewest();
         }
         return cachedHead;
       }
@@ -4643,6 +4776,23 @@ export function App({ onGoHome }: AppProps) {
       },
     ) => {
       try {
+        const shouldReplace = options?.replace || (!options?.beforeTime && !options?.afterTime);
+        if (shouldReplace) {
+          const cached = await getCachedSessionList(rootID);
+          if (cached && (options?.force || currentRootIdRef.current === rootID)) {
+            const cachedItems = [...cached.items, ...cached.pinnedItems]
+              .map((item) => toSessionItem(rootID, item))
+              .filter((item): item is SessionItem => !!item);
+            setHasMoreSessions(cached.totalCount > cached.items.length);
+            setSessions(
+              applyPinnedSnapshotToSessions(
+                mergeSessionItems([], cachedItems),
+                rootID,
+                cached.pinnedKeys,
+              ),
+            );
+          }
+        }
         const payload = await sessionService.fetchSessions(rootID, {
           beforeTime: options?.beforeTime,
           afterTime: options?.afterTime,
@@ -4653,8 +4803,9 @@ export function App({ onGoHome }: AppProps) {
         ].map((item) => toSessionItem(rootID, item)).filter((item): item is SessionItem => !!item);
         if (!options?.force && currentRootIdRef.current !== rootID) return;
         setHasMoreSessions(payload.totalCount > payload.items.length);
-        if (options?.replace || (!options?.beforeTime && !options?.afterTime)) {
+        if (shouldReplace) {
           setSessions(applyPinnedSnapshotToSessions(mergeSessionItems([], next), rootID, payload.pinnedKeys));
+          void saveCachedSessionList(rootID, payload);
           return;
         }
         setSessions((prev) =>
@@ -4709,6 +4860,30 @@ export function App({ onGoHome }: AppProps) {
     }
     setMultiProjectSessionsLoading(true);
     try {
+      const cachedGroups = await getCachedMultiRootSessionList();
+      if (cachedGroups?.length) {
+        setMultiProjectSessionGroups(
+          applyPendingToMultiProjectGroups(
+            cachedGroups.map((group): MultiProjectSessionGroup => ({
+              rootId: group.rootId,
+              rootName: group.rootName || managedRootByIdRef.current[group.rootId]?.display_name || group.rootId,
+              latestSessionTime: group.latestSessionTime,
+              sessions: applyPinnedSnapshotToSessions(
+                mergeSessionItems(
+                  [],
+                  [...group.items, ...group.pinnedItems]
+                    .map((item) => toSessionItem(group.rootId, { ...(item as any), root_id: group.rootId }))
+                    .filter((item): item is SessionItem => !!item),
+                ),
+                group.rootId,
+                group.pinnedKeys,
+              ),
+              totalCount: group.totalCount,
+            })),
+            multiProjectPendingRef.current,
+          ),
+        );
+      }
       const groups = await sessionService.fetchMultiRootSessions(MULTI_PROJECT_SESSION_LIMIT);
       const nextGroups = groups.map((group: MultiRootSessionGroup): MultiProjectSessionGroup => ({
         rootId: group.rootId,
@@ -4730,6 +4905,7 @@ export function App({ onGoHome }: AppProps) {
       setMultiProjectSessionGroups(
         applyPendingToMultiProjectGroups(nextGroups, multiProjectPendingRef.current),
       );
+      void saveCachedMultiRootSessionList(groups);
     } finally {
       setMultiProjectSessionsLoading(false);
     }
@@ -5138,11 +5314,17 @@ export function App({ onGoHome }: AppProps) {
   );
 
   const handleSelectSession = useCallback(
-    async (session: any) => {
+    async (
+      session: any,
+      options?: { preserveTaskSelection?: boolean },
+    ) => {
       const key = session?.key || session?.session_key;
       const targetRoot =
         (session?.root_id as string | undefined) || currentRootIdRef.current;
       if (!targetRoot || !key) return;
+      if (!options?.preserveTaskSelection) {
+        setSelectedKanbanTaskId("");
+      }
       if (currentRootIdRef.current !== targetRoot) {
         setCurrentRootId(targetRoot);
       }
@@ -7638,9 +7820,9 @@ export function App({ onGoHome }: AppProps) {
     }
   }, [t]);
 
-  const loadProjectTreeWorktrees = useCallback(async (rootID: string) => {
+  const loadProjectTreeWorktrees = useCallback(async (rootID: string): Promise<GitWorktreeItem[]> => {
     if (!rootID) {
-      return;
+      return [];
     }
     setWorktreeLoadingByRoot((prev) => ({ ...prev, [rootID]: true }));
     setWorktreeErrorByRoot((prev) => ({ ...prev, [rootID]: "" }));
@@ -7651,16 +7833,19 @@ export function App({ onGoHome }: AppProps) {
           knownTaskWorktreePathsRef.current.add(item.path);
         }
       });
+      const items = (payload.items || []).filter((item) => !!item.branch);
       setWorktreeItemsByRoot((prev) => ({
         ...prev,
-        [rootID]: (payload.items || []).filter((item) => !!item.branch),
+        [rootID]: items,
       }));
+      return items;
     } catch (error) {
       setWorktreeItemsByRoot((prev) => ({ ...prev, [rootID]: [] }));
       setWorktreeErrorByRoot((prev) => ({
         ...prev,
         [rootID]: error instanceof Error ? error.message : t("worktree.loadFailed"),
       }));
+      return [];
     } finally {
       setWorktreeLoadingByRoot((prev) => ({ ...prev, [rootID]: false }));
     }
@@ -8515,6 +8700,10 @@ export function App({ onGoHome }: AppProps) {
         root_id: root,
         task_id: taskId || "",
       };
+      setDrawerLoadingSessionByRoot((prev) => ({
+        ...prev,
+        [root]: hasSessionExchanges(initial) ? "" : key,
+      }));
       setDrawerSessionForRoot(root, {
         ...(initial as any),
         key,
@@ -8526,20 +8715,59 @@ export function App({ onGoHome }: AppProps) {
       interactionModeRef.current = "drawer";
       setInteractionMode("drawer");
       setDrawerOpenForRoot(root, true);
-      void restoreActiveSession(root, key).then((restored) => {
-        if (!restored) return;
+      const applyDrawerSession = (session: Session) => {
+        const activeDrawer = drawerSessionByRootRef.current[root];
+        if ((activeDrawer?.key || activeDrawer?.session_key) !== key) return;
+        setDrawerLoadingSessionByRoot((prev) =>
+          prev[root] === key ? { ...prev, [root]: "" } : prev,
+        );
         setDrawerSessionForRoot(root, {
-          ...(restored as any),
+          ...(activeDrawer as any),
+          ...(session as any),
           key,
           session_key: key,
           root_id: root,
-          task_id: (restored as any)?.task_id || taskId || "",
+          task_id: (session as any)?.task_id || taskId || "",
         } as Session);
+      };
+      void (async () => {
+        const restorePromise = restoreActiveSession(root, key);
+        if (!hasSessionExchanges(cached)) {
+          const persisted = await getCachedSession(root, key);
+          const latest = sessionCacheRef.current[cacheKey];
+          const immediate = hasSessionExchanges(latest) ? latest : persisted;
+          if (immediate) {
+            sessionCacheRef.current[cacheKey] = {
+              ...(immediate as any),
+              key,
+            } as Session;
+            bumpCacheVersion();
+            applyDrawerSession(immediate);
+          }
+        }
+        const restored = await restorePromise;
+        if (!restored) {
+          setDrawerLoadingSessionByRoot((prev) =>
+            prev[root] === key ? { ...prev, [root]: "" } : prev,
+          );
+          return;
+        }
+        applyDrawerSession(restored);
         loadedSessionRef.current[cacheKey] = true;
         clearSessionStale(root, key);
+      })().catch((error) => {
+        setDrawerLoadingSessionByRoot((prev) =>
+          prev[root] === key ? { ...prev, [root]: "" } : prev,
+        );
+        console.error("[task.session] failed to open drawer session", {
+          root,
+          sessionKey: key,
+          error,
+        });
       });
     },
     [
+      bumpCacheVersion,
       clearSessionStale,
       restoreActiveSession,
       rootSessionKey,
@@ -9135,6 +9363,7 @@ export function App({ onGoHome }: AppProps) {
             event.data?.contextWindow,
           );
           tokenStationRefreshRef.current?.();
+          setCodexRateLimitsRefreshToken((value) => value + 1);
           break;
         case "error":
           reportError(
@@ -9954,14 +10183,12 @@ export function App({ onGoHome }: AppProps) {
             if (detail?.task?.id) {
               applyTaskDetails(payload.root_id, [detail]);
             } else {
-              setTaskDetailsById((prev) => ({
-                ...prev,
-                [nextTask.id]: {
-                  task: nextTask,
-                  stage_runs: prev[nextTask.id]?.stage_runs || [],
-                  events: prev[nextTask.id]?.events || [],
-                },
-              }));
+              const current = taskDetailsByIdRef.current[nextTask.id];
+              applyTaskDetails(payload.root_id, [{
+                task: nextTask,
+                stage_runs: current?.stage_runs || [],
+                events: current?.events || [],
+              }]);
             }
             if (nextTask.worktree_path) {
               void refreshTaskWorktree(payload.root_id, nextTask.worktree_path, false);
@@ -11198,6 +11425,12 @@ export function App({ onGoHome }: AppProps) {
     );
   };
   const currentRootSlashCommandResult = slashCommandResultForSession(currentRootId, null);
+  const sessionViewerComposerOverlayInset =
+    String((actionBarSession as any)?.agent || "").toLowerCase() === "codex" ||
+    (actionBarSession as any)?.plan_mode ||
+    pendingPlanMode
+      ? 20
+      : 0;
   const sessionView = (
     <SessionViewer
       session={selectedSessionSnapshot}
@@ -11208,6 +11441,7 @@ export function App({ onGoHome }: AppProps) {
       )}
       targetSeq={selectedSession?.search_seq}
       targetSeqRequestKey={selectedSession?.search_target_id}
+      composerOverlayInset={sessionViewerComposerOverlayInset}
       loading={selectedSessionLoading}
       rootId={selectedSession?.root_id || currentRootId}
       rootPath={
@@ -11451,24 +11685,103 @@ export function App({ onGoHome }: AppProps) {
     gitHistoryLoading || (gitHistoryAvailable && (gitHistory?.items.length || 0) > 0);
   const activePendingPluginTrust =
     pendingPluginTrust && pendingPluginTrust.rootId === currentRootId ? pendingPluginTrust : null;
-	  const relatedSessionSnapshot =
-	    selectedKanbanTaskSessionSnapshot ||
-	    selectedSessionSnapshot ||
-	    drawerSessionSnapshot ||
-	    lastMainSessionSnapshotRef.current;
-	  const relatedSessionRootId =
-	    (relatedSessionSnapshot?.root_id as string | undefined) ||
-	    selectedKanbanTask?.root_id ||
-	    (selectedSession?.root_id as string | undefined) ||
-	    currentRootId;
-	  const relatedSessionKey = relatedSessionSnapshot?.key || relatedSessionSnapshot?.session_key;
-	  const relatedSelectedPath = gitDiff?.path || file?.path || "";
-	  const relatedWorktree = selectedKanbanTask?.worktree_path
-	    ? {
-	        root_id: selectedKanbanTask.root_id,
-	        path: selectedKanbanTask.worktree_path,
-	      }
-	    : relatedSessionSnapshot?.related_worktree || null;
+  const relatedSessionSnapshot =
+    selectedKanbanTaskSessionSnapshot ||
+    selectedSessionSnapshot ||
+    drawerSessionSnapshot ||
+    lastMainSessionSnapshotRef.current;
+  const relatedSessionRootId =
+    (relatedSessionSnapshot?.root_id as string | undefined) ||
+    selectedKanbanTask?.root_id ||
+    (selectedSession?.root_id as string | undefined) ||
+    currentRootId;
+  const relatedSessionKey = relatedSessionSnapshot?.key || relatedSessionSnapshot?.session_key;
+  const relatedSelectedPath = gitDiff?.path || file?.path || "";
+  const relatedWorktree = selectedKanbanTask?.worktree_path
+    ? {
+        root_id: selectedKanbanTask.root_id,
+        path: selectedKanbanTask.worktree_path,
+      }
+    : relatedSessionSnapshot?.related_worktree || null;
+
+  const refreshProjectTreeRelatedFiles = useCallback(async () => {
+    try {
+      if (selectedKanbanTask) {
+        const root = selectedKanbanTask.root_id || relatedSessionRootId || currentRootId || "";
+        const taskId = String(selectedKanbanTask.id || "");
+        const sessionKeys = Array.from(new Set(
+          [
+            ...(taskSessionKeysByIdRef.current[taskId] || []),
+            selectedKanbanTask.main_session_key,
+          ]
+            .map((key) => String(key || "").trim())
+            .filter(Boolean),
+        ));
+        if (root && taskId && sessionKeys.length > 0) {
+          await refreshTaskRelatedFiles(root, taskId, sessionKeys);
+        }
+        return;
+      }
+      const root = relatedSessionRootId || currentRootId || "";
+      const sessionKey = String(relatedSessionKey || "").trim();
+      if (!root || !sessionKey) {
+        return;
+      }
+      const relatedFiles = await sessionService.getSessionRelatedFiles(root, sessionKey);
+      await setCachedSessionRelatedFiles(root, sessionKey, relatedFiles);
+      updateSessionRelatedFilesForKey(root, sessionKey, relatedFiles);
+    } catch (error) {
+      console.error("[session.related_files] manual refresh failed", { error });
+    }
+  }, [
+    currentRootId,
+    refreshTaskRelatedFiles,
+    relatedSessionKey,
+    relatedSessionRootId,
+    selectedKanbanTask,
+    updateSessionRelatedFilesForKey,
+  ]);
+
+  const handleProjectTreeRefresh = useCallback(async (tab: ProjectTreeTab) => {
+    const root = currentRootIdRef.current;
+    if (!root) {
+      return;
+    }
+    switch (tab) {
+      case "files": {
+        const dir = selectedDirRef.current === root ? "." : (selectedDirRef.current || ".");
+        await refreshTreeDir(root, dir, true);
+        return;
+      }
+      case "git":
+        await Promise.all([
+          refreshGitStatus(root),
+          refreshGitHistory(root, { waitForIncremental: true }),
+        ]);
+        return;
+      case "worktrees": {
+        const items = await loadProjectTreeWorktrees(root);
+        const expandedPath = expandedWorktreeByRoot[root] || "";
+        if (expandedPath && items.some((item) => item.path === expandedPath)) {
+          await loadProjectTreeWorktreeStatus(expandedPath);
+        }
+        return;
+      }
+      case "related":
+        await Promise.all([
+          refreshProjectTreeRelatedFiles(),
+          refreshGitStatus(root),
+        ]);
+    }
+  }, [
+    expandedWorktreeByRoot,
+    loadProjectTreeWorktreeStatus,
+    loadProjectTreeWorktrees,
+    refreshGitHistory,
+    refreshGitStatus,
+    refreshProjectTreeRelatedFiles,
+    refreshTreeDir,
+  ]);
 
   useEffect(() => {
     const rootID = String(relatedWorktree?.root_id || "");
@@ -11752,6 +12065,19 @@ export function App({ onGoHome }: AppProps) {
     },
     [currentRootId, relatedSessionRootId, selectedSessionRelatedFiles],
   );
+  const gitStatsRefreshKey = useMemo(
+    () =>
+      Object.entries(gitFileStatsByPath)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([path, stats]) => `${path}:${stats.status}:${stats.additions}:${stats.deletions}`)
+        .join("|"),
+    [gitFileStatsByPath],
+  );
+  const selectedRelatedFileStatsByKey = useRelatedFileStats(
+    relatedSessionRootId || currentRootId,
+    selectedSessionRelatedFiles,
+    gitStatsRefreshKey,
+  );
   const renderRootRelatedContent = (root: string): React.ReactNode => {
     if (!root || root !== currentRootId || root !== relatedSessionRootId) {
       return null;
@@ -11800,12 +12126,14 @@ export function App({ onGoHome }: AppProps) {
                 </div>
               ) : null}
               {group.files.map((file) => {
-          const stats = gitFileStatsByPath[file.path];
-          const fileSelectionKey = relatedFileSelectionKey(file);
-          const isSelected = relatedSelectedFileKey
-            ? fileSelectionKey === relatedSelectedFileKey
-            : file.path === relatedSelectedPath;
-          return (
+                const stats =
+                  selectedRelatedFileStatsByKey[relatedFileStatKey(file)] ||
+                  gitFileStatsByPath[file.path];
+                const fileSelectionKey = relatedFileSelectionKey(file);
+                const isSelected = relatedSelectedFileKey
+                  ? fileSelectionKey === relatedSelectedFileKey
+                  : file.path === relatedSelectedPath;
+                return (
             <div key={`${file.head || "legacy"}:${file.path}`} style={{ display: "flex", alignItems: "center", gap: "4px", minWidth: 0 }}>
               <button
                 type="button"
@@ -12124,6 +12452,7 @@ export function App({ onGoHome }: AppProps) {
   kanbanStageColumns.sort((a, b) => a.index - b.index);
 	  const kanbanTaskPanel = currentRootId ? (
 	    <div
+	      data-onboarding="task-board"
 	      style={{
 	        maxHeight: "calc(100dvh - 92px)",
 	        overflow: "visible",
@@ -12137,7 +12466,7 @@ export function App({ onGoHome }: AppProps) {
 	          display: "flex",
           alignItems: "center",
 	          justifyContent: "space-between",
-	          gap: "10px",
+	          gap: 0,
 	          padding: "0 0 8px",
 	          flexShrink: 0,
 	        }}
@@ -12153,6 +12482,7 @@ export function App({ onGoHome }: AppProps) {
         >
           <div
             role="tablist"
+            data-onboarding="task-templates"
             aria-label={t("task.templates")}
             style={{
               display: "flex",
@@ -12256,6 +12586,7 @@ export function App({ onGoHome }: AppProps) {
           <div ref={taskTemplateActionMenuRef} style={{ position: "relative", flexShrink: 0 }}>
             <button
               type="button"
+              data-onboarding="task-template-menu"
               aria-label={t("task.templateMenu")}
               title={t("task.templateMenu")}
               onClick={() => setTaskTemplateActionMenuOpen((open) => !open)}
@@ -12383,11 +12714,15 @@ export function App({ onGoHome }: AppProps) {
         </div>
         <button
           type="button"
+          data-onboarding="task-refresh"
           title={t("task.refresh")}
           aria-label={t("task.refresh")}
-          onClick={() => void loadKanbanTasks(currentRootId)}
+          onClick={() => void kanbanRefreshSpin.handleClick()}
+          onMouseDown={() => kanbanRefreshSpin.setPressed(true)}
+          onMouseUp={() => kanbanRefreshSpin.setPressed(false)}
+          onMouseLeave={() => kanbanRefreshSpin.setPressed(false)}
           style={{
-            width: "28px",
+            width: "22px",
             height: "28px",
             borderRadius: "8px",
             border: "none",
@@ -12395,17 +12730,33 @@ export function App({ onGoHome }: AppProps) {
             color: "var(--text-color)",
             display: "inline-flex",
             alignItems: "center",
-            justifyContent: "center",
+            justifyContent: "flex-end",
             cursor: "pointer",
             flexShrink: 0,
             padding: 0,
           }}
         >
-          <SyncIcon />
+          <span
+            data-task-refresh-visual
+            style={{
+              width: "18px",
+              height: "28px",
+              borderRadius: "8px",
+              background: kanbanRefreshSpin.pressed || kanbanRefreshSpin.refreshing ? "rgba(0, 0, 0, 0.06)" : "transparent",
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <SyncIcon
+              style={kanbanRefreshSpin.refreshing ? { animation: "mindfs-update-spin 0.8s linear infinite" } : undefined}
+            />
+          </span>
         </button>
         <div ref={taskCreateTemplateMenuRef} style={{ position: "relative", flexShrink: 0 }}>
           <button
             type="button"
+            data-onboarding="task-create"
             title={t("task.create")}
             aria-label={t("task.create")}
             disabled={!isAllTaskTemplateFilter && !selectedTaskTemplateForFilter}
@@ -12706,10 +13057,19 @@ export function App({ onGoHome }: AppProps) {
                             fontSize: "12px",
                             lineHeight: "18px",
                             fontWeight: firstInput ? 700 : 500,
+                            ...(!isAllTaskTemplateFilter
+                              ? {
+                                  display: "flex",
+                                  alignItems: "flex-start",
+                                  gap: "6px",
+                                  minWidth: 0,
+                                }
+                              : {}),
                           }}
                         >
                           <div
                             style={{
+                              ...(!isAllTaskTemplateFilter ? { flex: "1 1 auto", minWidth: 0 } : {}),
                               whiteSpace: "pre-wrap",
                               wordBreak: "break-word",
                               ...(!inputExpanded
@@ -12722,21 +13082,21 @@ export function App({ onGoHome }: AppProps) {
                                 : {}),
                             }}
                           >
-                            {!isAllTaskTemplateFilter ? (
-                              <span
-                                title={taskWorktreeEnabled ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
-                                aria-label={taskWorktreeEnabled ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
-                                style={{ ...taskWorktreeTagStyle(taskWorktreeEnabled), float: "right", marginLeft: "6px" }}
-                              >
-                                {taskWorktreeEnabled ? null : <NoWorktreeIcon />}
-                                worktree
-                              </span>
-                            ) : null}
                             {!isAllTaskTemplateFilter && taskNumberLabel ? (
                               <span style={{ color: "#0ea5e9", fontWeight: 800, marginRight: "6px" }}>{taskNumberLabel}</span>
                             ) : null}
                             {firstInput ? <InlineTokenText content={firstInput} /> : <span>{t("task.noInput")}</span>}
                           </div>
+                          {!isAllTaskTemplateFilter ? (
+                            <span
+                              title={taskWorktreeEnabled ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
+                              aria-label={taskWorktreeEnabled ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
+                              style={taskWorktreeTagStyle(taskWorktreeEnabled)}
+                            >
+                              {taskWorktreeEnabled ? null : <NoWorktreeIcon />}
+                              worktree
+                            </span>
+                          ) : null}
                         </div>
                         <div style={{ marginTop: "8px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "4px" }}>
                           <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
@@ -13959,6 +14319,7 @@ export function App({ onGoHome }: AppProps) {
             showHiddenFiles={showHiddenFiles}
             onSortModeChange={setTreeSortMode}
             onShowHiddenFilesChange={setShowHiddenFiles}
+            onRefresh={handleProjectTreeRefresh}
             selectedDirKey={selectedDirKey}
             selectedPath={file?.path}
             rootId={currentRootId}
@@ -13968,6 +14329,7 @@ export function App({ onGoHome }: AppProps) {
             }
             creatingRootBusy={creatingRootBusy}
             onOpenProjectAdd={handleOpenProjectAdd}
+            onStartOnboarding={isMobile ? undefined : () => setOnboardingOpen(true)}
             onCreateRootStart={handleCreateRootStart}
             onCreateRootNameChange={setCreatingRootName}
             onCreateRootSubmit={() => {
@@ -14002,6 +14364,11 @@ export function App({ onGoHome }: AppProps) {
             renderRootRelatedContent={renderRootRelatedContent}
             projectTreeTabRequest={projectTreeTabRequest}
             agentConfigSwitchRequest={agentConfigSwitchRequest}
+            onAgentConfigSwitched={(agentName) => {
+              if (agentName.trim().toLowerCase() === "codex") {
+                setCodexRateLimitsRefreshToken((value) => value + 1);
+              }
+            }}
             onProjectTreeTabChange={setProjectTreeTab}
             relayActionLabel={relayActionLabel}
             relayActionDisabled={relayActionDisabled}
@@ -14036,6 +14403,7 @@ export function App({ onGoHome }: AppProps) {
         rightSidebar={sessionSidebar}
         main={
           <div
+            data-onboarding="workspace"
             style={{
               width: "100%",
               flex: 1,
@@ -14105,6 +14473,7 @@ export function App({ onGoHome }: AppProps) {
             <ActionBar
               status={status}
               agentsVersion={agentsVersion}
+              codexRateLimitsRefreshToken={codexRateLimitsRefreshToken}
               currentRootId={currentRootId}
               currentRootIsGitRepo={managedRootByIdRef.current[currentRootId || ""]?.is_git_repo === true}
               currentSession={actionBarSession}
@@ -14161,7 +14530,11 @@ export function App({ onGoHome }: AppProps) {
               setDrawerOpenForRoot(currentRootIdRef.current, false);
             }}
             onExpand={() => {
-              handleSelectSession(currentSession);
+              handleSelectSession(currentSession, {
+                preserveTaskSelection:
+                  !!currentSession?.task_id &&
+                  currentSession.task_id === selectedKanbanTaskId,
+              });
               setDrawerOpenForRoot(currentRootIdRef.current, false);
             }}
           >
@@ -14175,7 +14548,11 @@ export function App({ onGoHome }: AppProps) {
                 )}
                 targetSeq={currentSession?.search_seq}
                 targetSeqRequestKey={currentSession?.search_target_id}
-                loading={false}
+                composerOverlayInset={sessionViewerComposerOverlayInset}
+                loading={
+                  drawerLoadingSessionByRoot[currentRootId || ""] ===
+                  (drawerSessionSnapshot.key || drawerSessionSnapshot.session_key)
+                }
                 rootId={currentRootId}
                 rootPath={
                   managedRootByIdRef.current[currentRootId || ""]?.root_path ||
@@ -14221,6 +14598,27 @@ export function App({ onGoHome }: AppProps) {
           </BottomSheet>
         }
       />
+      {!isMobile ? <OnboardingTour
+        open={onboardingOpen}
+        isMobile={isMobile}
+        onStepChange={handleOnboardingStepChange}
+        onComplete={() => {
+          completeOnboarding();
+          setOnboardingOpen(false);
+          if (isMobile) {
+            setIsLeftOpen(false);
+            setIsRightOpen(false);
+          }
+        }}
+        onDismiss={() => {
+          dismissOnboarding();
+          setOnboardingOpen(false);
+          if (isMobile) {
+            setIsLeftOpen(false);
+            setIsRightOpen(false);
+          }
+        }}
+      /> : null}
       {bootstrapState.phase === "needs_pairing" &&
         e2eeState.required &&
         !e2eeState.unlocked ? (
@@ -14381,62 +14779,51 @@ export function App({ onGoHome }: AppProps) {
 	                        setTaskInlineEdit((prev) => prev ? { ...prev, createWorktree: !prev.createWorktree } : prev);
 	                      }}
 	                      disabled={taskInlineSaving || !taskWorktreeControlsEditable}
+                      aria-label={taskInlineEdit.createWorktree ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
+                      title={taskInlineEdit.createWorktree ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
                       style={{
                         height: "26px",
                         borderRadius: "6px",
-                        border: taskInlineEdit.createWorktree ? "1px solid var(--accent-color)" : "1px solid var(--border-color)",
-                        background: taskInlineEdit.createWorktree ? "rgba(37, 99, 235, 0.10)" : "rgba(100, 116, 139, 0.10)",
-                        color: taskInlineEdit.createWorktree ? "var(--accent-color)" : "var(--text-secondary)",
-                        padding: "0 8px",
+                        border: taskInlineEdit.createWorktree ? "1px solid rgba(22, 163, 74, 0.28)" : "1px solid var(--border-color)",
+                        background: taskInlineEdit.createWorktree ? "rgba(22, 163, 74, 0.08)" : "rgba(100, 116, 139, 0.10)",
+                        color: taskInlineEdit.createWorktree ? "#15803d" : "var(--text-secondary)",
+                        padding: taskInlineEdit.createWorktree ? "0 8px" : "0 8px 0 5px",
                         fontSize: "12px",
                         fontWeight: 800,
 	                        cursor: taskInlineSaving || !taskWorktreeControlsEditable ? "not-allowed" : "pointer",
 	                        whiteSpace: "nowrap",
 	                        opacity: taskInlineSaving || !taskWorktreeControlsEditable ? 0.72 : 1,
+                        display: "inline-flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        gap: "3px",
                       }}
                     >
-                      {taskInlineEdit.createWorktree ? t("worktree.enableNew") : t("worktree.disableNew")}
+                      {taskInlineEdit.createWorktree ? "worktree" : (
+                        <>
+                          <NoWorktreeIcon size={12} />
+                          worktree
+                        </>
+                      )}
                     </button>
                     {taskInlineEdit.createWorktree ? (
                       <div style={{ display: "flex", alignItems: "center", gap: "6px", minWidth: 0 }}>
-	                        <select
-	                          value={taskInlineEdit.worktreeBranchMode === "new" ? "__new__" : taskInlineEdit.worktreeBranch}
-	                          disabled={taskInlineSaving || !taskWorktreeControlsEditable}
-                          onChange={(event) => {
-                            const value = event.target.value;
+	                        <WorktreeBranchSelector
+	                          branchMode={taskInlineEdit.worktreeBranchMode}
+	                          branch={taskInlineEdit.worktreeBranch}
+	                          branches={taskWorktreeBranches.branches}
+                          disabled={taskInlineSaving || !taskWorktreeControlsEditable}
+                          height={26}
+                          maxWidth={isMobile ? 160 : 240}
+                          menuAlign={isMobile ? "left" : "right"}
+                          menuPlacement="bottom"
+                          onChange={(nextMode, nextBranch) => {
                             setTaskInlineEdit((prev) => {
                               if (!prev) return prev;
-                              if (value === "__new__") {
-                                return { ...prev, worktreeBranchMode: "new", worktreeBranch: "" };
-                              }
-                              return { ...prev, worktreeBranchMode: "existing", worktreeBranch: value };
+                              return { ...prev, worktreeBranchMode: nextMode, worktreeBranch: nextBranch };
                             });
                           }}
-                          style={{
-                            height: "26px",
-                            width: "auto",
-                            minWidth: "92px",
-                            maxWidth: isMobile ? "160px" : "240px",
-                            borderRadius: "6px",
-                            border: "1px solid var(--border-color)",
-                            background: "var(--menu-bg)",
-                            color: "var(--text-primary)",
-                            fontSize: "12px",
-                            fontWeight: 700,
-                            padding: "0 7px",
-                            outline: "none",
-	                          }}
-	                        >
-	                          <option value="__new__">{t("worktree.createBranch")}</option>
-	                          {!taskWorktreeControlsEditable && taskInlineEdit.worktreeBranchMode === "existing" && taskInlineEdit.worktreeBranch ? (
-	                            <option value={taskInlineEdit.worktreeBranch}>{taskInlineEdit.worktreeBranch}</option>
-	                          ) : null}
-	                          {taskWorktreeBranches.branches.map((branch) => (
-	                            <option key={branch.name} value={branch.name}>
-                              {branch.current ? `${branch.name} ${t("worktree.current")}` : branch.name}
-                            </option>
-                          ))}
-                        </select>
+                        />
                         {taskWorktreeBranchesLoading ? (
                           <span style={{ fontSize: "11px", color: "var(--text-secondary)", whiteSpace: "nowrap" }}>{t("common.loading")}</span>
                         ) : taskWorktreeBranchError ? (
@@ -14957,25 +15344,6 @@ function TaskSessionErrorIcon() {
   );
 }
 
-function NoWorktreeIcon() {
-  return (
-    <svg
-      width="8"
-      height="8"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2.4"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <circle cx="12" cy="12" r="8" />
-      <path d="M7 17L17 7" />
-    </svg>
-  );
-}
-
 function DeleteIcon() {
   return (
     <svg
@@ -15160,7 +15528,7 @@ function RunNowIcon() {
   );
 }
 
-function SyncIcon() {
+function SyncIcon({ style }: { style?: React.CSSProperties }) {
   return (
     <svg
       xmlns="http://www.w3.org/2000/svg"
@@ -15168,6 +15536,7 @@ function SyncIcon() {
       height="13"
       viewBox="0 0 24 24"
       aria-hidden="true"
+      style={style}
     >
       <path
         fill="currentColor"

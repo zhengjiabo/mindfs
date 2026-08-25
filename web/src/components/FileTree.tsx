@@ -18,8 +18,10 @@ import {
   type AppearanceMode,
 } from "../services/appearance";
 import { useI18n, type Locale, type MessageKey } from "../i18n";
+import { useRefreshSpin } from "../hooks";
 import { AgentMenuList } from "./AgentMenuList";
 import { AgentIcon } from "./AgentIcon";
+import { AgentSelector } from "./AgentSelector";
 import { SymlinkBadge } from "./SymlinkBadge";
 import { RelayLocalServicesDialog } from "./RelayLocalServicesDialog";
 import { fetchAgentCatalog, fetchAgents, type AgentStatus } from "../services/agents";
@@ -53,6 +55,15 @@ import {
   rateLimitRetryAttemptSchedule,
   recommendRateLimitRetryBaseDelay,
 } from "../services/rateLimitRetryRecommendation";
+import {
+  fetchIdleSessionResourceReleasePreference,
+  fetchNewProjectMetaLocationPreference,
+  fetchSessionNamingPreference,
+  updateIdleSessionResourceReleasePreference,
+  updateNewProjectMetaLocationPreference,
+  updateSessionNamingPreference,
+  type NewProjectMetaLocation,
+} from "../services/preferences";
 
 type BeforeInstallPromptEvent = Event & {
   prompt: () => Promise<void>;
@@ -106,7 +117,7 @@ type RootSessionIndicator = {
   pending?: boolean;
 };
 
-type ProjectTreeTab = "files" | "git" | "worktrees" | "related";
+export type ProjectTreeTab = "files" | "git" | "worktrees" | "related";
 export type AgentConfigSwitchRequest = {
   nonce: number;
   providerIDs?: string[];
@@ -134,6 +145,7 @@ type FileTreeProps = {
   activeSessionKey?: string | null;
   onSortModeChange?: (mode: DirectorySortMode) => void;
   onShowHiddenFilesChange?: (show: boolean) => void;
+  onRefresh?: (tab: ProjectTreeTab) => void | Promise<void>;
   onSelectFile?: (entry: FileEntry, rootId: string) => void;
   onSelectRoot?: (entry: FileEntry, rootId: string) => void;
   onToggleDir?: (entry: FileEntry, rootId: string) => void;
@@ -142,6 +154,7 @@ type FileTreeProps = {
   renderRootRelatedContent?: (rootId: string) => React.ReactNode;
   projectTreeTabRequest?: { tab: ProjectTreeTab; nonce: number } | null;
   agentConfigSwitchRequest?: AgentConfigSwitchRequest | null;
+  onAgentConfigSwitched?: (agent: string) => void;
   onProjectTreeTabChange?: (tab: ProjectTreeTab) => void;
   creatingRootName?: string | null;
   creatingRootBusy?: boolean;
@@ -149,6 +162,7 @@ type FileTreeProps = {
   creatingRootSubmitOnBlur?: boolean;
   onCreateRootStart?: () => void;
   onOpenProjectAdd?: () => void;
+  onStartOnboarding?: () => void;
   onCreateRootNameChange?: (name: string) => void;
   onCreateRootSubmit?: () => void;
   onCreateRootCancel?: () => void;
@@ -657,6 +671,15 @@ function TrashIcon() {
       <path d="M19 6l-1 14H6L5 6" />
       <path d="M10 11v5" />
       <path d="M14 11v5" />
+    </svg>
+  );
+}
+
+function OnboardingGuideIcon() {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 2048 2048" aria-hidden="true">
+      <path d="M0 0h2048v2048H0z" fill="none" />
+      <path fill="currentColor" d="M2048 512v1536H0V512h517q-2-16-3-32t-2-32q0-93 35-174t96-143t142-96T960 0q93 0 174 35t143 96t96 142t35 175q0 16-1 32t-4 32zM960 128q-66 0-124 25t-102 69t-69 102t-25 124t25 124t68 102t102 69t125 25t124-25t101-68t69-102t26-125t-25-124t-69-101t-102-69t-124-26m960 512h-555q-25 52-62 97t-85 77q103 40 186 106t140 152t89 188t31 212v64h-128v-64q0-123-44-228t-121-183t-182-121t-229-44q-111 0-210 38t-176 107t-126 162t-61 205h648l-230-230l91-90l384 384l-384 384l-91-90l230-230H256v-64q0-110 31-211t90-187t141-152t185-107q-98-69-148-175H128v1280h1792z" />
     </svg>
   );
 }
@@ -1472,6 +1495,7 @@ export function FileTree({
   activeSessionKey,
   onSortModeChange,
   onShowHiddenFilesChange,
+  onRefresh,
   onSelectFile,
   onSelectRoot,
   onToggleDir,
@@ -1480,6 +1504,7 @@ export function FileTree({
   renderRootRelatedContent,
   projectTreeTabRequest = null,
   agentConfigSwitchRequest = null,
+  onAgentConfigSwitched,
   onProjectTreeTabChange,
   creatingRootName = null,
   creatingRootBusy = false,
@@ -1487,6 +1512,7 @@ export function FileTree({
   creatingRootSubmitOnBlur = true,
   onCreateRootStart,
   onOpenProjectAdd,
+  onStartOnboarding,
   onCreateRootNameChange,
   onCreateRootSubmit,
   onCreateRootCancel,
@@ -1536,9 +1562,31 @@ export function FileTree({
       return "files";
     }
   });
+  const handleTabRefresh = React.useCallback(
+    () => onRefresh?.(projectTreeTab),
+    [onRefresh, projectTreeTab],
+  );
+  const {
+    refreshing: treeRefreshing,
+    pressed: treePressed,
+    setPressed: setTreePressed,
+    handleClick: handleRefreshClick,
+  } = useRefreshSpin(handleTabRefresh);
   const [isAppearanceMenuOpen, setIsAppearanceMenuOpen] = React.useState(false);
   const [isLocaleMenuOpen, setIsLocaleMenuOpen] = React.useState(false);
   const [isSortMenuOpen, setIsSortMenuOpen] = React.useState(false);
+  const [sessionNamingOpen, setSessionNamingOpen] = React.useState(false);
+  const [sessionNamingAgents, setSessionNamingAgents] = React.useState<AgentStatus[]>([]);
+  const [sessionNamingAgent, setSessionNamingAgent] = React.useState("");
+  const [sessionNamingModel, setSessionNamingModel] = React.useState("");
+  const [sessionNamingBusy, setSessionNamingBusy] = React.useState(false);
+  const [sessionNamingError, setSessionNamingError] = React.useState("");
+  const [idleReleaseOpen, setIdleReleaseOpen] = React.useState(false);
+  const [idleReleaseHours, setIdleReleaseHours] = React.useState("72");
+  const [idleReleaseBusy, setIdleReleaseBusy] = React.useState(false);
+  const [idleReleaseError, setIdleReleaseError] = React.useState("");
+  const [newProjectMetaLocation, setNewProjectMetaLocation] = React.useState<NewProjectMetaLocation>("project");
+  const [newProjectMetaLocationBusy, setNewProjectMetaLocationBusy] = React.useState(false);
   const [appearanceMode, setAppearanceModeState] = React.useState<AppearanceMode>(() => getAppearanceMode());
   const [isUpdateNotesOpen, setIsUpdateNotesOpen] = React.useState(false);
   const [deferredInstallPrompt, setDeferredInstallPrompt] = React.useState<BeforeInstallPromptEvent | null>(null);
@@ -1937,6 +1985,24 @@ export function FileTree({
   }, []);
 
   React.useEffect(() => {
+    if (!protectedAPIReady) return;
+    let cancelled = false;
+    fetchIdleSessionResourceReleasePreference()
+      .then((preference) => {
+        if (!cancelled) setIdleReleaseHours(String(preference.hours));
+      })
+      .catch(() => {});
+    fetchNewProjectMetaLocationPreference()
+      .then((location) => {
+        if (!cancelled) setNewProjectMetaLocation(location);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [protectedAPIReady]);
+
+  React.useEffect(() => {
     let cancelled = false;
     const controller = new AbortController();
 
@@ -2006,6 +2072,7 @@ export function FileTree({
   }, [isMenuOpen]);
 
   const openAgentConfigFlow = React.useCallback((flow: AgentConfigFlow) => {
+	setIdleReleaseOpen(false);
     setAgentLifecycleOpen(false);
     setAgentConfigFlow(flow);
     setAgentConfigStep("agent");
@@ -2038,6 +2105,84 @@ export function FileTree({
       })
       .finally(() => setAgentConfigBusy(false));
   }, [t]);
+
+  const openSessionNaming = React.useCallback(() => {
+	setIdleReleaseOpen(false);
+    setAgentConfigFlow(null);
+    setAgentLifecycleOpen(false);
+    setRelayServicesOpen(false);
+    setIsMenuOpen(false);
+    setSessionNamingOpen(true);
+    setSessionNamingBusy(true);
+    setSessionNamingError("");
+    Promise.all([fetchAgents(true), fetchSessionNamingPreference()])
+      .then(([items, preference]) => {
+        const installed = items.filter((item) => item.installed);
+        setSessionNamingAgents(installed);
+        const selected = installed.find((item) => item.name === preference.agent) || installed[0];
+        const selectedModel = selected?.models?.find((item) => item.id === preference.model)?.id || "";
+        setSessionNamingAgent(selected?.name || "");
+        setSessionNamingModel(selectedModel);
+      })
+      .catch((error) => {
+        setSessionNamingError(error instanceof Error ? error.message : t("sessionNaming.loadFailed"));
+      })
+      .finally(() => setSessionNamingBusy(false));
+  }, [t]);
+
+  const saveSessionNaming = React.useCallback(async () => {
+    if (!sessionNamingAgent || sessionNamingBusy) return;
+    setSessionNamingBusy(true);
+    setSessionNamingError("");
+    try {
+      await updateSessionNamingPreference({
+        agent: sessionNamingAgent,
+        model: sessionNamingModel,
+      });
+      setSessionNamingOpen(false);
+    } catch (error) {
+      setSessionNamingError(error instanceof Error ? error.message : t("sessionNaming.saveFailed"));
+    } finally {
+      setSessionNamingBusy(false);
+    }
+  }, [sessionNamingAgent, sessionNamingBusy, sessionNamingModel, t]);
+
+  const openIdleSessionResourceRelease = React.useCallback(() => {
+    setAgentConfigFlow(null);
+    setAgentLifecycleOpen(false);
+    setRelayServicesOpen(false);
+    setSessionNamingOpen(false);
+    setIsMenuOpen(false);
+    setIdleReleaseOpen(true);
+    setIdleReleaseBusy(true);
+    setIdleReleaseError("");
+    fetchIdleSessionResourceReleasePreference()
+      .then((preference) => setIdleReleaseHours(String(preference.hours)))
+      .catch((error) => {
+        setIdleReleaseError(error instanceof Error ? error.message : t("idleSessionResourceRelease.loadFailed"));
+      })
+      .finally(() => setIdleReleaseBusy(false));
+  }, [t]);
+
+  const saveIdleSessionResourceRelease = React.useCallback(async () => {
+    if (idleReleaseBusy) return;
+    const hours = Number(idleReleaseHours);
+    if (!Number.isInteger(hours) || hours <= 0) {
+      setIdleReleaseError(t("idleSessionResourceRelease.invalidHours"));
+      return;
+    }
+    setIdleReleaseBusy(true);
+    setIdleReleaseError("");
+    try {
+      const preference = await updateIdleSessionResourceReleasePreference({ hours });
+      setIdleReleaseHours(String(preference.hours));
+      setIdleReleaseOpen(false);
+    } catch (error) {
+      setIdleReleaseError(error instanceof Error ? error.message : t("idleSessionResourceRelease.saveFailed"));
+    } finally {
+      setIdleReleaseBusy(false);
+    }
+  }, [idleReleaseBusy, idleReleaseHours, t]);
 
   React.useEffect(() => {
     if (!agentConfigSwitchRequest) {
@@ -2303,6 +2448,7 @@ export function FileTree({
     try {
       if (agentConfigSwitchSelection.type === "api_provider") {
         await switchAgentAPIProvider({ agent: agentConfigAgent, providerID: agentConfigSwitchSelection.id });
+        onAgentConfigSwitched?.(agentConfigAgent);
         closeAgentConfigFlow();
         return;
       }
@@ -2312,13 +2458,14 @@ export function FileTree({
         setAgentConfigStep("confirm");
         return;
       }
+      onAgentConfigSwitched?.(agentConfigAgent);
       closeAgentConfigFlow();
     } catch (error) {
       setAgentConfigError(error instanceof Error ? error.message : t("agentConfig.switchFailed"));
     } finally {
       setAgentConfigBusy(false);
     }
-  }, [agentConfigAgent, agentConfigSwitchSelection, closeAgentConfigFlow, t]);
+  }, [agentConfigAgent, agentConfigSwitchSelection, closeAgentConfigFlow, onAgentConfigSwitched, t]);
 
   const deleteSelectedAgentConfigBackup = React.useCallback(async (id: string) => {
     const trimmedID = String(id || "").trim();
@@ -2659,10 +2806,11 @@ export function FileTree({
 
   return (
     <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-      <div style={{ position: "relative", height: "36px", padding: "0 3px", borderBottom: "1px solid var(--border-color)", display: "flex", justifyContent: "space-between", alignItems: "center", background: "var(--mindfs-topbar-bg, transparent)", boxSizing: "border-box", flexShrink: 0, gap: 6, overflow: "visible" }}>
-        <div style={{ display: "flex", alignItems: "center", minWidth: 0, flex: "1 1 auto", maxWidth: "calc(100% - 34px)" }}>
+      <div style={{ position: "relative", height: "36px", padding: "0 3px", borderBottom: "1px solid var(--border-color)", display: "flex", justifyContent: "space-between", alignItems: "center", background: "var(--mindfs-topbar-bg, transparent)", boxSizing: "border-box", flexShrink: 0, gap: 0, overflow: "visible" }}>
+        <div style={{ display: "flex", alignItems: "center", minWidth: 0, flex: "1 1 auto", maxWidth: "calc(100% - 56px)", marginRight: "6px" }}>
           <div
             role="tablist"
+            data-onboarding="project-tabs"
             aria-label={t("fileTree.projectTabs")}
             style={{
               display: "flex",
@@ -2726,9 +2874,62 @@ export function FileTree({
             })}
           </div>
         </div>
+        <button
+          type="button"
+          data-onboarding="sidebar-refresh"
+          onClick={() => void handleRefreshClick()}
+          onMouseDown={() => setTreePressed(true)}
+          onMouseUp={() => setTreePressed(false)}
+          onMouseLeave={() => setTreePressed(false)}
+          aria-label={t("common.refresh")}
+          title={t("common.refresh")}
+          style={{
+            width: "22px",
+            height: "28px",
+            borderRadius: "8px",
+            border: "none",
+            background: "transparent",
+            color: "var(--text-secondary)",
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "flex-end",
+            cursor: "pointer",
+            outline: "none",
+            flexShrink: 0,
+            padding: 0,
+          }}
+        >
+          <span
+            data-refresh-visual
+            style={{
+              width: "18px",
+              height: "28px",
+              borderRadius: "8px",
+              background: treePressed || treeRefreshing ? "rgba(0, 0, 0, 0.06)" : "transparent",
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width="13"
+              height="13"
+              viewBox="0 0 24 24"
+              aria-hidden="true"
+              style={treeRefreshing ? { animation: "mindfs-update-spin 0.8s linear infinite" } : undefined}
+            >
+              <path
+                fill="currentColor"
+                d="M19.91 15.51h-4.53a1 1 0 0 0 0 2h2.4A8 8 0 0 1 4 12a1 1 0 0 0-2 0a10 10 0 0 0 16.88 7.23V21a1 1 0 0 0 2 0v-4.5a1 1 0 0 0-.97-.99M12 2a10 10 0 0 0-6.88 2.77V3a1 1 0 0 0-2 0v4.5a1 1 0 0 0 1 1h4.5a1 1 0 0 0 0-2h-2.4A8 8 0 0 1 20 12a1 1 0 0 0 2 0A10 10 0 0 0 12 2"
+              />
+            </svg>
+          </span>
+        </button>
         <div ref={menuRef} style={{ position: "relative", flexShrink: 0 }}>
           <button
             type="button"
+            data-onboarding="sidebar-menu"
             onClick={() => {
               setIsMenuOpen((open) => {
                 const nextOpen = !open;
@@ -2767,8 +2968,11 @@ export function FileTree({
                 position: "absolute",
                 top: "calc(100% + 6px)",
                 right: 0,
-                minWidth: "164px",
+                width: "var(--mindfs-file-menu-width, 182px)",
+                maxWidth: "calc(100vw - 16px)",
                 padding: "6px",
+                boxSizing: "border-box",
+                whiteSpace: "nowrap",
                 borderRadius: "10px",
                 border: "1px solid var(--border-color)",
                 background: "var(--menu-bg)",
@@ -2833,6 +3037,40 @@ export function FileTree({
                 >
                   <AgentInstallIcon />
                   <span>{t("fileTree.agentInstallUpdate")}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={openSessionNaming}
+                  style={fileTreeMenuButtonStyle}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M4 6h16" />
+                    <path d="M4 12h10" />
+                    <path d="M4 18h7" />
+                    <path d="m17 16 2 2 3-4" />
+                  </svg>
+                  <span>{t("fileTree.sessionNamingAgent")}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={openIdleSessionResourceRelease}
+                  style={fileTreeMenuButtonStyle}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <circle cx="12" cy="12" r="9" />
+                    <path d="M12 7v5l3 2" />
+                  </svg>
+                  <span>{t("fileTree.idleSessionResourceRelease")}</span>
+                  <span
+                    style={{
+                      marginLeft: "auto",
+                      color: "var(--text-secondary)",
+                      fontSize: "11px",
+                      fontVariantNumeric: "tabular-nums",
+                    }}
+                  >
+                    {idleReleaseHours || "72"}h
+                  </span>
                 </button>
                 <button
                   type="button"
@@ -3048,6 +3286,22 @@ export function FileTree({
                 );
               }) : null}
               <div style={{ height: "1px", background: "var(--border-color)", margin: "6px 4px" }} />
+              {onStartOnboarding ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onStartOnboarding();
+                    setIsMenuOpen(false);
+                    setIsAppearanceMenuOpen(false);
+                    setIsLocaleMenuOpen(false);
+                    setIsSortMenuOpen(false);
+                  }}
+                  style={fileTreeMenuButtonStyle}
+                >
+                  <OnboardingGuideIcon />
+                  <span>{t("onboarding.menu")}</span>
+                </button>
+              ) : null}
               <button
                 type="button"
                 onClick={() => {
@@ -3072,6 +3326,41 @@ export function FileTree({
               >
                 <span>{t("fileTree.showHiddenFiles")}</span>
                 <span style={{ fontSize: "11px", opacity: showHiddenFiles ? 1 : 0 }}>✓</span>
+              </button>
+              <button
+                type="button"
+                disabled={newProjectMetaLocationBusy}
+                onClick={() => {
+                  if (newProjectMetaLocationBusy) return;
+                  const previous = newProjectMetaLocation;
+                  const next = previous === "home" ? "project" : "home";
+                  setNewProjectMetaLocation(next);
+                  setNewProjectMetaLocationBusy(true);
+                  updateNewProjectMetaLocationPreference(next)
+                    .then(setNewProjectMetaLocation)
+                    .catch(() => setNewProjectMetaLocation(previous))
+                    .finally(() => setNewProjectMetaLocationBusy(false));
+                }}
+                style={{
+                  width: "100%",
+                  border: "none",
+                  background: "transparent",
+                  color: "var(--text-primary)",
+                  borderRadius: "8px",
+                  padding: "8px 10px",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "8px",
+                  textAlign: "left",
+                  cursor: newProjectMetaLocationBusy ? "default" : "pointer",
+                  fontSize: "12px",
+                  opacity: newProjectMetaLocationBusy ? 0.65 : 1,
+                }}
+              >
+                <span style={{ flex: 1 }}>{t("fileTree.newProjectMetaLocation")}</span>
+                <span style={{ color: "var(--text-secondary)", fontSize: "11px" }}>
+                  {t(newProjectMetaLocation === "home" ? "fileTree.metaLocationHome" : "fileTree.metaLocationProject")}
+                </span>
               </button>
               <button
                 type="button"
@@ -3261,6 +3550,166 @@ export function FileTree({
               }}
               onCancel={closeAgentConfigFlow}
             />
+          </div>
+        ) : null}
+        {idleReleaseOpen ? (
+          <div
+            style={{
+              position: "absolute",
+              top: "calc(100% + 6px)",
+              left: "8px",
+              right: "3px",
+              zIndex: 40,
+              padding: "14px",
+              borderRadius: "12px",
+              border: "1px solid var(--border-color)",
+              background: "var(--menu-bg)",
+              boxShadow: "0 16px 36px rgba(15, 23, 42, 0.18)",
+            }}
+          >
+            <div style={{ fontSize: "13px", fontWeight: 700, color: "var(--text-primary)" }}>
+              {t("idleSessionResourceRelease.title")}
+            </div>
+            <div style={{ marginTop: "6px", fontSize: "11px", lineHeight: 1.5, color: "var(--text-secondary)" }}>
+              {t("idleSessionResourceRelease.description")}
+            </div>
+            <label
+              style={{
+                marginTop: "12px",
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+                color: "var(--text-primary)",
+                fontSize: "12px",
+              }}
+            >
+              <input
+                type="number"
+                min="1"
+                step="1"
+                inputMode="numeric"
+                value={idleReleaseHours}
+                disabled={idleReleaseBusy}
+                onChange={(event) => setIdleReleaseHours(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    void saveIdleSessionResourceRelease();
+                  }
+                }}
+                style={{
+                  width: "96px",
+                  boxSizing: "border-box",
+                  padding: "8px 10px",
+                  borderRadius: "8px",
+                  border: "1px solid var(--border-color)",
+                  background: "var(--content-bg)",
+                  color: "var(--text-primary)",
+                  outline: "none",
+                }}
+              />
+              <span>{t("idleSessionResourceRelease.hours")}</span>
+            </label>
+            {idleReleaseError ? (
+              <div style={{ marginTop: "8px", color: "#dc2626", fontSize: "11px", lineHeight: 1.4 }}>
+                {idleReleaseError}
+              </div>
+            ) : null}
+            <div style={{ ...agentConfigActionRowStyle, marginTop: "12px" }}>
+              <button
+                type="button"
+                disabled={idleReleaseBusy}
+                onClick={() => setIdleReleaseOpen(false)}
+                style={agentConfigSecondaryButtonStyle(idleReleaseBusy)}
+              >
+                {t("common.cancel")}
+              </button>
+              <button
+                type="button"
+                disabled={idleReleaseBusy}
+                onClick={() => void saveIdleSessionResourceRelease()}
+                style={agentConfigPrimaryButtonStyle(idleReleaseBusy)}
+              >
+                {idleReleaseBusy ? t("common.saving") : t("common.save")}
+              </button>
+            </div>
+          </div>
+        ) : null}
+        {sessionNamingOpen ? (
+          <div
+            style={{
+              position: "absolute",
+              top: "calc(100% + 6px)",
+              left: "8px",
+              right: "3px",
+              zIndex: 40,
+              padding: "14px",
+              borderRadius: "12px",
+              border: "1px solid var(--border-color)",
+              background: "var(--menu-bg)",
+              boxShadow: "0 16px 36px rgba(15, 23, 42, 0.18)",
+            }}
+          >
+            <div style={{ fontSize: "13px", fontWeight: 700, color: "var(--text-primary)" }}>
+              {t("sessionNaming.title")}
+            </div>
+            <div
+              style={{
+                marginTop: "12px",
+                minHeight: "42px",
+                padding: "6px 8px",
+                border: "1px solid var(--border-color)",
+                borderRadius: "10px",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "flex-start",
+                gap: "8px",
+              }}
+            >
+              {sessionNamingAgent ? (
+                <AgentSelector
+                  agent={sessionNamingAgent}
+                  model={sessionNamingModel}
+                  agents={sessionNamingAgents}
+                  onAgentChange={(agent, model) => {
+                    setSessionNamingAgent(agent);
+                    setSessionNamingModel(model || "");
+                  }}
+                  compact
+                  showChevron
+                  menuPlacement="bottom"
+                  defaultExpandOptions
+                  viewportMenu
+                  allowDefaultModel
+                />
+              ) : null}
+              <span style={{ minWidth: 0, marginLeft: "auto", fontSize: "12px", color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {sessionNamingBusy ? t("common.loading") : sessionNamingModel || t("agent.defaultModel")}
+              </span>
+            </div>
+            {sessionNamingError ? (
+              <div style={{ marginTop: "8px", color: "#dc2626", fontSize: "11px", lineHeight: 1.4 }}>
+                {sessionNamingError}
+              </div>
+            ) : null}
+            <div style={{ ...agentConfigActionRowStyle, marginTop: "12px" }}>
+              <button
+                type="button"
+                disabled={sessionNamingBusy}
+                onClick={() => setSessionNamingOpen(false)}
+                style={agentConfigSecondaryButtonStyle(sessionNamingBusy)}
+              >
+                {t("common.cancel")}
+              </button>
+              <button
+                type="button"
+                disabled={sessionNamingBusy || !sessionNamingAgent}
+                onClick={() => void saveSessionNaming()}
+                style={agentConfigPrimaryButtonStyle(sessionNamingBusy || !sessionNamingAgent)}
+              >
+                {sessionNamingBusy ? t("common.saving") : t("common.save")}
+              </button>
+            </div>
           </div>
         ) : null}
         {relayServicesOpen ? (

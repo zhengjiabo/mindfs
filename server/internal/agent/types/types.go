@@ -103,18 +103,19 @@ type ContextWindow struct {
 }
 
 type OpenSessionInput struct {
-	SessionKey     string
-	AgentName      string
-	Model          string
-	Mode           string
-	Effort         string
-	FastService    string
-	PlanMode       bool
-	Probe          bool
-	RootPath       string
-	AgentSessionID string
-	AgentCtxSeq    int
-	ForkPoint      ResolveForkPointOutput
+	SessionKey            string
+	AgentName             string
+	Model                 string
+	Mode                  string
+	Effort                string
+	FastService           string
+	PlanMode              bool
+	Probe                 bool
+	RootPath              string
+	DeveloperInstructions string
+	AgentSessionID        string
+	AgentCtxSeq           int
+	ForkPoint             ResolveForkPointOutput
 }
 
 type RuntimeDefaults struct {
@@ -160,6 +161,13 @@ type ImportExternalSessionInput struct {
 	Agent          string
 	AgentSessionID string
 	AfterTimestamp time.Time
+	Cursor         ExternalSessionCursor
+}
+
+type ExternalSessionCursor struct {
+	SourcePath      string
+	Offset          int64
+	ModTimeUnixNano int64
 }
 
 type ImportedExchange struct {
@@ -186,6 +194,7 @@ type ImportedExternalSession struct {
 	Title          string
 	Exchanges      []ImportedExchange
 	Subagents      []ImportedSubagentSession
+	Cursor         ExternalSessionCursor
 }
 
 // ImportedSubagentSession describes an externally persisted child agent session.

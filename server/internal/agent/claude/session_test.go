@@ -2,6 +2,7 @@ package claude
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -9,6 +10,34 @@ import (
 
 	"mindfs/server/internal/agent/types"
 )
+
+func TestClaudeModelInfoSupportsEffortWithoutModelNameWhitelist(t *testing.T) {
+	want := []string{"low", "medium", "high", "xhigh", "max"}
+	got := claudeModelInfo(claudeagent.ModelInfo{
+		Value:       "custom-provider-model",
+		DisplayName: "Custom Model",
+	})
+	if !got.SupportEffort {
+		t.Fatal("custom model should support CLI effort selection")
+	}
+	if !reflect.DeepEqual(got.Efforts, want) {
+		t.Fatalf("custom model efforts = %v, want %v", got.Efforts, want)
+	}
+}
+
+func TestAppendClaudeDeveloperInstructionsUsesCLIAppendSystemPrompt(t *testing.T) {
+	options := claudeagent.DefaultOptions()
+	for _, apply := range appendClaudeDeveloperInstructions(nil, "render markdown") {
+		apply(&options)
+	}
+	if options.SystemPrompt != "" {
+		t.Fatalf("custom system prompt = %q, want empty", options.SystemPrompt)
+	}
+	value, ok := options.ExtraArgs["append-system-prompt"]
+	if !ok || value == nil || *value != "render markdown" {
+		t.Fatalf("append-system-prompt extra arg = %#v", value)
+	}
+}
 
 func TestClaudeCompactBoundaryEmitsCompactNotice(t *testing.T) {
 	var got types.Event
@@ -166,6 +195,29 @@ func TestClaudeLocalBashTaskLifecycleIsIgnored(t *testing.T) {
 
 	if len(events) != 0 {
 		t.Fatalf("events = %#v, want none", events)
+	}
+}
+
+func TestSummarizeExecuteToolCallPrefersNaturalLanguageDescription(t *testing.T) {
+	title, meta := summarizeExecuteToolCall("Bash", json.RawMessage(`{
+		"command":"go test ./...",
+		"description":"Run the test suite"
+	}`), nil)
+	if title != "Run the test suite" {
+		t.Fatalf("title = %q, want tool description", title)
+	}
+	if meta["command"] != "go test ./..." || meta["description"] != "Run the test suite" {
+		t.Fatalf("meta = %#v, want command and description", meta)
+	}
+}
+
+func TestSummarizeExecuteToolCallFallsBackToNaturalLanguageTitle(t *testing.T) {
+	title, meta := summarizeExecuteToolCall("Bash", json.RawMessage(`{"command":"go test ./..."}`), nil)
+	if title != "Run command" {
+		t.Fatalf("title = %q, want natural-language fallback", title)
+	}
+	if meta["command"] != "go test ./..." {
+		t.Fatalf("meta = %#v, want original command in details", meta)
 	}
 }
 

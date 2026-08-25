@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"mindfs/server/internal/agent/logs"
 	types "mindfs/server/internal/agent/types"
@@ -30,20 +31,21 @@ const (
 var codexVersionPattern = regexp.MustCompile(`v?([0-9]+(?:\.[0-9]+){1,3}(?:[-+._A-Za-z0-9]*)?)`)
 
 type OpenOptions struct {
-	AgentName        string
-	SessionKey       string
-	Model            string
-	Effort           string
-	FastService      string
-	PlanMode         bool
-	Probe            bool
-	RootPath         string
-	Command          string
-	Args             []string
-	Env              map[string]string
-	ResumeSessionID  string
-	ForkSessionID    string
-	CodexUserOrdinal *int
+	AgentName             string
+	SessionKey            string
+	Model                 string
+	Effort                string
+	FastService           string
+	PlanMode              bool
+	Probe                 bool
+	RootPath              string
+	Command               string
+	Args                  []string
+	Env                   map[string]string
+	DeveloperInstructions string
+	ResumeSessionID       string
+	ForkSessionID         string
+	CodexUserOrdinal      *int
 }
 
 type Runtime struct {
@@ -62,12 +64,13 @@ func (r *Runtime) OpenSession(_ context.Context, opts OpenOptions) (types.Sessio
 	client := r.getOrCreateClient(opts)
 	var sess *session
 	threadOptions := codexsdk.ThreadOptions{
-		Model:                strings.TrimSpace(opts.Model),
-		ModelReasoningEffort: codexsdk.ModelReasoningEffort(strings.TrimSpace(opts.Effort)),
-		FastService:          strings.TrimSpace(opts.FastService),
-		SandboxMode:          codexsdk.SandboxModeFullAccess,
-		WorkingDirectory:     opts.RootPath,
-		ApprovalPolicy:       codexsdk.ApprovalModeNever,
+		Model:                 strings.TrimSpace(opts.Model),
+		ModelReasoningEffort:  codexsdk.ModelReasoningEffort(strings.TrimSpace(opts.Effort)),
+		FastService:           strings.TrimSpace(opts.FastService),
+		SandboxMode:           codexsdk.SandboxModeFullAccess,
+		WorkingDirectory:      opts.RootPath,
+		DeveloperInstructions: strings.TrimSpace(opts.DeveloperInstructions),
+		ApprovalPolicy:        codexsdk.ApprovalModeNever,
 		ApprovalHandler: func(_ codexsdk.ApprovalRequest) (codexsdk.ApprovalDecision, error) {
 			return codexsdk.ApprovalDecisionApproved, nil
 		},
@@ -957,7 +960,14 @@ func (s *session) ContextWindow(_ context.Context) (types.ContextWindow, error) 
 	return s.contextWindow, nil
 }
 
-func (s *session) Close() error { return nil }
+func (s *session) Close() error {
+	if s == nil || s.thread == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return s.thread.Close(ctx)
+}
 
 func (s *session) updateThreadIDFromThread() {
 	if s == nil || s.thread == nil {
@@ -1175,7 +1185,7 @@ func mapToolItem(item codexsdk.ThreadItem, started bool) (types.ToolCall, bool) 
 		}
 		return types.ToolCall{
 			CallID:  v.ID,
-			Title:   firstNonEmpty(v.Command, "command"),
+			Title:   codexCommandTitle(v.CommandActions, v.Command),
 			Status:  status,
 			Kind:    types.ToolKindExecute,
 			Content: content,
@@ -1205,7 +1215,7 @@ func mapToolItem(item codexsdk.ThreadItem, started bool) (types.ToolCall, bool) 
 		}
 		return types.ToolCall{
 			CallID:    v.ID,
-			Title:     "file_change",
+			Title:     "Update files",
 			Status:    status,
 			Kind:      types.ToolKindEdit,
 			Locations: locations,
@@ -1303,6 +1313,57 @@ func mapToolItem(item codexsdk.ThreadItem, started bool) (types.ToolCall, bool) 
 		return mapUnknownToolItem(v, started)
 	default:
 		return types.ToolCall{}, false
+	}
+}
+
+func codexCommandTitle(actions []codexsdk.CommandAction, command string) string {
+	command = firstNonEmpty(strings.TrimSpace(command), "command")
+	if len(actions) != 1 {
+		for _, action := range actions {
+			if action.Type == codexsdk.CommandActionTypeUnknown {
+				return command
+			}
+		}
+		if len(actions) > 1 {
+			return "Explore files · " + command
+		}
+		return command
+	}
+
+	action := actions[0]
+	path := ""
+	if action.Path != nil {
+		path = strings.TrimSpace(*action.Path)
+	}
+	switch action.Type {
+	case codexsdk.CommandActionTypeRead:
+		name := firstNonEmpty(strings.TrimSpace(action.Name), path)
+		if name != "" {
+			return "Read " + name + " · " + command
+		}
+		return "Read file · " + command
+	case codexsdk.CommandActionTypeListFiles:
+		if path != "" {
+			return "List files in " + path + " · " + command
+		}
+		return "List files · " + command
+	case codexsdk.CommandActionTypeSearch:
+		query := ""
+		if action.Query != nil {
+			query = strings.TrimSpace(*action.Query)
+		}
+		switch {
+		case query != "" && path != "":
+			return "Search for " + query + " in " + path + " · " + command
+		case query != "":
+			return "Search for " + query + " · " + command
+		case path != "":
+			return "Search in " + path + " · " + command
+		default:
+			return "Search files · " + command
+		}
+	default:
+		return command
 	}
 }
 
