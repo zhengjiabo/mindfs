@@ -1617,6 +1617,16 @@ func isNonRecoverableAgentError(err error) bool {
 		"remote compaction failed",
 		"compact_remote",
 		"responsetoomanyfailedattempts",
+		// Upstream provider overload patterns: the codex binary wraps
+		// upstream 500/503 responses as "auth_unavailable" or "service
+		// unavailable". The original Chinese text may also appear when
+		// the provider passes it through.
+		"503",
+		"service unavailable",
+		"auth_unavailable",
+		"负载已经达到上限",
+		"get_channel_failed",
+		"new_api_error",
 	}
 	for _, needle := range needles {
 		if strings.Contains(value, needle) {
@@ -1631,7 +1641,14 @@ func isHTTP429AgentError(err error) bool {
 		return false
 	}
 	value := strings.ToLower(strings.TrimSpace(err.Error()))
-	return strings.Contains(value, "429") || strings.Contains(value, "too many requests")
+	return strings.Contains(value, "429") ||
+		strings.Contains(value, "too many requests") ||
+		strings.Contains(value, "503") ||
+		strings.Contains(value, "service unavailable") ||
+		strings.Contains(value, "auth_unavailable") ||
+		strings.Contains(value, "负载已经达到上限") ||
+		strings.Contains(value, "get_channel_failed") ||
+		strings.Contains(value, "new_api_error")
 }
 
 func cancelRuntimeAfterNonRecoverableError(sess agenttypes.Session, pool *agent.Pool, agentName string, cause error) {

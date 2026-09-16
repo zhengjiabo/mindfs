@@ -1923,6 +1923,10 @@ func TestIsNonRecoverableAgentError(t *testing.T) {
 		{errors.New("remote compaction failed while compact_remote retried"), true},
 		{errors.New("usageLimitExceeded"), true},
 		{errors.New("responseTooManyFailedAttempts"), true},
+		{errors.New("codex thread error: unexpected status 503 Service Unavailable: auth_unavailable: no auth available"), true},
+		{errors.New("当前模型 gpt-6-astra 负载已经达到上限"), true},
+		{errors.New("get_channel_failed"), true},
+		{errors.New("new_api_error"), true},
 		{errors.New("temporary websocket EOF"), false},
 		{context.Canceled, false},
 	}
@@ -2116,6 +2120,22 @@ func TestHTTP429ClassificationExcludesPermanentUsageLimit(t *testing.T) {
 	}
 	if isHTTP429AgentError(errors.New("usage limit exceeded")) {
 		t.Fatal("permanent usage limit must not be classified as HTTP 429")
+	}
+}
+
+func TestHTTP429ClassificationIncludesUpstreamOverload(t *testing.T) {
+	// The codex binary wraps upstream 500/503 overload errors as
+	// "auth_unavailable" or "service unavailable". These must be
+	// classified as retriable (429-equivalent) so the rate-limit
+	// recovery loop kicks in instead of failing immediately.
+	if !isHTTP429AgentError(errors.New("codex thread error: unexpected status 503 Service Unavailable: auth_unavailable: no auth available")) {
+		t.Fatal("expected 503 auth_unavailable to be classified as retriable")
+	}
+	if !isHTTP429AgentError(errors.New("当前模型 gpt-6-astra 负载已经达到上限，请稍后重试")) {
+		t.Fatal("expected 负载已经达到上限 to be classified as retriable")
+	}
+	if !isHTTP429AgentError(errors.New("get_channel_failed")) {
+		t.Fatal("expected get_channel_failed to be classified as retriable")
 	}
 }
 

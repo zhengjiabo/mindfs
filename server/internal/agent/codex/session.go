@@ -456,10 +456,10 @@ func (s *session) handleStreamedEvents(events <-chan codexsdk.ThreadEvent) error
 				Data:      types.MessageDone{ContextWindow: contextWindow},
 			})
 		case *codexsdk.TurnFailedEvent:
-			log.Printf("[agent/codex] send.error session=%s err=%s", s.sessionKey, e.Error.Message)
+			log.Printf("[agent/codex] send.error session=%s err=%s raw=%s", s.sessionKey, e.Error.Message, string(raw))
 			return errors.New("codex turn failed: " + e.Error.Message)
 		case *codexsdk.ThreadErrorEvent:
-			log.Printf("[agent/codex] send.error session=%s err=%s", s.sessionKey, e.Message)
+			log.Printf("[agent/codex] send.error session=%s err=%s willRetry=%v raw=%s", s.sessionKey, e.Message, e.WillRetry, string(raw))
 			return errors.New("codex thread error: " + e.Message)
 		case *codexsdk.RawEvent:
 			if s.handleRawEvent(e) {
