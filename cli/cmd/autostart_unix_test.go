@@ -24,7 +24,7 @@ func TestLaunchAgentContentEscapesArguments(t *testing.T) {
 
 func TestSystemdUnitQuotesExecutableAndArguments(t *testing.T) {
 	content := systemdUnitContent("/opt/Mind FS/mindfs", []string{"--notify-script", `/tmp/a"b`})
-	for _, expected := range []string{`ExecStart="/opt/Mind FS/mindfs"`, `"/tmp/a\"b"`, "Restart=on-failure"} {
+	for _, expected := range []string{`ExecStart="/opt/Mind FS/mindfs"`, `"/tmp/a\"b"`, "Restart=on-failure", "OOMPolicy=continue"} {
 		if !strings.Contains(content, expected) {
 			t.Errorf("systemd unit does not contain %q:\n%s", expected, content)
 		}

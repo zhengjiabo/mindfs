@@ -135,6 +135,69 @@ func TestReadRelatedFileDiffRejectsHeadOutsideCurrentHistory(t *testing.T) {
 	}
 }
 
+func TestReadDiffScopesStatsToRequestedPath(t *testing.T) {
+	root := initTestRepo(t)
+	writeTestFile(t, root, "target.txt", "one\n")
+	writeTestFile(t, root, "other.txt", "one\n")
+	runTestGit(t, root, "add", ".")
+	runTestGit(t, root, "commit", "-m", "initial")
+
+	writeTestFile(t, root, "target.txt", "one\ntwo\n")
+	writeTestFile(t, root, "other.txt", "one\ntwo\nthree\nfour\n")
+
+	diff, err := ReadDiff(context.Background(), root, "target.txt")
+	if err != nil {
+		t.Fatalf("ReadDiff: %v", err)
+	}
+	if diff.Additions != 1 || diff.Deletions != 0 {
+		t.Fatalf("stats = +%d/-%d, want +1/-0", diff.Additions, diff.Deletions)
+	}
+	if strings.Contains(diff.Content, "other.txt") {
+		t.Fatalf("diff contains unrelated file:\n%s", diff.Content)
+	}
+}
+
+func TestReadDiffFindsUntrackedFileInNewDirectory(t *testing.T) {
+	root := initTestRepo(t)
+	writeTestFile(t, root, "README.md", "initial\n")
+	runTestGit(t, root, "add", ".")
+	runTestGit(t, root, "commit", "-m", "initial")
+	writeTestFile(t, root, "nested/new.txt", "first\nsecond\n")
+
+	diff, err := ReadDiff(context.Background(), root, "nested/new.txt")
+	if err != nil {
+		t.Fatalf("ReadDiff: %v", err)
+	}
+	if diff.Status != "??" {
+		t.Fatalf("Status = %q, want ??", diff.Status)
+	}
+	if diff.Additions != 2 {
+		t.Fatalf("Additions = %d, want 2", diff.Additions)
+	}
+	if !strings.Contains(diff.Content, "+first") {
+		t.Fatalf("diff content does not contain untracked file:\n%s", diff.Content)
+	}
+}
+
+func TestReadDiffFindsRenamedPath(t *testing.T) {
+	root := initTestRepo(t)
+	writeTestFile(t, root, "old.txt", "one\n")
+	runTestGit(t, root, "add", ".")
+	runTestGit(t, root, "commit", "-m", "initial")
+	runTestGit(t, root, "mv", "old.txt", "new.txt")
+
+	diff, err := ReadDiff(context.Background(), root, "new.txt")
+	if err != nil {
+		t.Fatalf("ReadDiff: %v", err)
+	}
+	if diff.Status != "R" {
+		t.Fatalf("Status = %q, want R", diff.Status)
+	}
+	if diff.OldPath != "old.txt" {
+		t.Fatalf("OldPath = %q, want old.txt", diff.OldPath)
+	}
+}
+
 func initTestRepo(t *testing.T) string {
 	t.Helper()
 	if _, err := exec.LookPath("git"); err != nil {

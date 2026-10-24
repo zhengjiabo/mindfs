@@ -530,19 +530,9 @@ func ReadDiff(ctx context.Context, rootPath, relPath string) (DiffResult, error)
 	if err != nil {
 		return DiffResult{}, err
 	}
-	items, err := repo.statusItems(ctx)
+	matched, err := repo.statusItemForPath(ctx, relPath)
 	if err != nil {
 		return DiffResult{}, err
-	}
-	var matched *StatusItem
-	for i := range items {
-		if items[i].Path == relPath {
-			matched = &items[i]
-			break
-		}
-	}
-	if matched == nil {
-		return DiffResult{}, errors.New("git diff not found for path")
 	}
 	content, err := repo.diffContent(ctx, *matched)
 	if err != nil {
@@ -550,6 +540,7 @@ func ReadDiff(ctx context.Context, rootPath, relPath string) (DiffResult, error)
 	}
 	return DiffResult{
 		Path:      matched.Path,
+		OldPath:   matched.OldPath,
 		Status:    matched.Status,
 		Additions: matched.Additions,
 		Deletions: matched.Deletions,
@@ -790,6 +781,14 @@ func loadRepoContext(ctx context.Context, rootPath string) (repoContext, error) 
 }
 
 func (r repoContext) statusItems(ctx context.Context) ([]StatusItem, error) {
+	rawItems, err := r.rawStatusItems(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return r.statusItemsFromRaw(ctx, rawItems)
+}
+
+func (r repoContext) rawStatusItems(ctx context.Context) ([]porcelainItem, error) {
 	args := []string{"status", "--porcelain=v1", "-z", "--untracked-files=normal"}
 	if r.prefix != "" {
 		args = append(args, "--", r.prefix)
@@ -798,11 +797,66 @@ func (r repoContext) statusItems(ctx context.Context) ([]StatusItem, error) {
 	if err != nil {
 		return nil, err
 	}
-	rawItems, err := parsePorcelainV1Z([]byte(output))
+	return parsePorcelainV1Z([]byte(output))
+}
+
+// statusItemForPath looks up one status entry and computes numstat only for that
+// entry. ReadDiff used to run the full-repository numstat for every related file,
+// which multiplied git's memory use on large dirty trees.
+func (r repoContext) statusItemForPath(ctx context.Context, relPath string) (*StatusItem, error) {
+	relPath = strings.TrimSpace(relPath)
+	if relPath == "" {
+		return nil, errors.New("path required")
+	}
+	target := strings.TrimSuffix(filepath.ToSlash(relPath), "/")
+	rawItems, err := r.rawStatusItems(ctx)
 	if err != nil {
 		return nil, err
 	}
+	var matched *porcelainItem
+	for i := range rawItems {
+		if r.fromRepoPath(rawItems[i].Path) == target {
+			matched = &rawItems[i]
+			break
+		}
+	}
+	if matched == nil {
+		// Untracked directories are collapsed by --untracked-files=normal. Retry
+		// with a pathspec so files inside a brand-new directory are still found.
+		repoPath := r.toRepoPath(relPath)
+		if repoPath == "" || repoPath == "." {
+			return nil, errors.New("path required")
+		}
+		args := []string{"status", "--porcelain=v1", "-z", "--untracked-files=all", "--", repoPath}
+		output, err := runGit(ctx, r.repoRoot, args...)
+		if err != nil {
+			return nil, err
+		}
+		rawItems, err = parsePorcelainV1Z([]byte(output))
+		if err != nil {
+			return nil, err
+		}
+		for i := range rawItems {
+			if r.fromRepoPath(rawItems[i].Path) == target {
+				matched = &rawItems[i]
+				break
+			}
+		}
+	}
+	if matched == nil {
+		return nil, errors.New("git diff not found for path")
+	}
+	items, err := r.statusItemsFromRaw(ctx, []porcelainItem{*matched})
+	if err != nil {
+		return nil, err
+	}
+	if len(items) == 0 {
+		return nil, errors.New("git diff not found for path")
+	}
+	return &items[0], nil
+}
 
+func (r repoContext) statusItemsFromRaw(ctx context.Context, rawItems []porcelainItem) ([]StatusItem, error) {
 	// Batch fetch numstat for all tracked files in one call
 	trackedItems := make([]porcelainItem, 0)
 	for _, item := range rawItems {
@@ -812,6 +866,7 @@ func (r repoContext) statusItems(ctx context.Context) ([]StatusItem, error) {
 	}
 	numstatCache := make(map[string][2]int) // repoPath -> [additions, deletions]
 	if len(trackedItems) > 0 {
+		var err error
 		numstatCache, err = r.batchNumstat(ctx, trackedItems)
 		if err != nil {
 			return nil, err
@@ -1315,6 +1370,11 @@ func runGit(ctx context.Context, dir string, args ...string) (string, error) {
 }
 
 func runGitBytes(ctx context.Context, dir string, args ...string) ([]byte, error) {
+	release, err := acquireGitCommandSlot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	// Add timeout if not already set (30 seconds for Windows compatibility)
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc

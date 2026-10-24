@@ -14,6 +14,31 @@ export type RelatedFileStatTarget = {
   repo_kind?: string;
 };
 
+// Each request makes the server run git commands. Keep the batch small so a
+// long related-file list does not turn into a process storm.
+const RELATED_FILE_STAT_CONCURRENCY = 3;
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workers = Array.from(
+    { length: Math.min(Math.max(1, limit), items.length) },
+    async () => {
+      while (nextIndex < items.length) {
+        const index = nextIndex;
+        nextIndex += 1;
+        results[index] = await fn(items[index]);
+      }
+    },
+  );
+  await Promise.all(workers);
+  return results;
+}
+
 export function relatedFileStatKey(file: RelatedFileStatTarget): string {
   return [
     file.repo_kind || "",
@@ -60,8 +85,10 @@ export function useRelatedFileStats(
     }
 
     let cancelled = false;
-    void Promise.all(
-      targets.map(async ([key, file]) => {
+    void mapWithConcurrency(
+      targets,
+      RELATED_FILE_STAT_CONCURRENCY,
+      async ([key, file]) => {
         try {
           const diff = await fetchGitRelatedFileDiff(rootId, file);
           return [
@@ -75,7 +102,7 @@ export function useRelatedFileStats(
         } catch {
           return null;
         }
-      }),
+      },
     ).then((results) => {
       if (cancelled) return;
       setStatsByKey(

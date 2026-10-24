@@ -124,7 +124,7 @@ func systemdUnitContent(exe string, args []string) string {
 		parts = append(parts, systemdQuote(arg))
 	}
 	return "[Unit]\nDescription=MindFS background service\nAfter=network.target\n\n" +
-		"[Service]\nType=simple\nExecStart=" + strings.Join(parts, " ") + "\nRestart=on-failure\nRestartSec=3\n\n" +
+		"[Service]\nType=simple\nExecStart=" + strings.Join(parts, " ") + "\nRestart=on-failure\nRestartSec=3\nOOMPolicy=continue\n\n" +
 		"[Install]\nWantedBy=default.target\n"
 }
 

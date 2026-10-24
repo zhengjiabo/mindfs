@@ -1924,6 +1924,8 @@ func TestIsNonRecoverableAgentError(t *testing.T) {
 		{errors.New("usageLimitExceeded"), true},
 		{errors.New("responseTooManyFailedAttempts"), true},
 		{errors.New("codex thread error: unexpected status 503 Service Unavailable: auth_unavailable: no auth available"), true},
+		{errors.New("codex thread error: write |1: broken pipe"), true},
+		{errors.New("read |1: closed pipe"), true},
 		{errors.New("当前模型 gpt-6-astra 负载已经达到上限"), true},
 		{errors.New("get_channel_failed"), true},
 		{errors.New("new_api_error"), true},

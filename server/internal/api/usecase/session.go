@@ -1715,6 +1715,10 @@ func isNonRecoverableAgentError(err error) bool {
 		"503",
 		"service unavailable",
 		"auth_unavailable",
+		// The local agent process is gone; keeping the pooled runtime would
+		// leave every later turn writing into a dead pipe.
+		"broken pipe",
+		"closed pipe",
 		"负载已经达到上限",
 		"get_channel_failed",
 		"new_api_error",
