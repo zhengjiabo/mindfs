@@ -28,6 +28,8 @@ type StreamHub struct {
 	pendingSessions map[string]*SessionPendingState
 	replayStates    map[string]*ClientReplayState
 	completed       map[string]*CompletedSessionState
+	edits           map[string]bool
+	jobs            map[string]int
 }
 
 type PendingUserMessage struct {
@@ -262,16 +264,21 @@ func (h *StreamHub) clearReplayStatesForSessionLocked(sessionKey string) {
 	}
 }
 
-func (h *StreamHub) RegisterClient(clientID string, conn *websocket.Conn) {
+func (h *StreamHub) RegisterClient(clientID string, conn *websocket.Conn) *websocket.Conn {
 	if blank(clientID) || conn == nil {
-		return
+		return nil
 	}
 	h.mu.Lock()
+	previous := h.clients[clientID]
 	h.clients[clientID] = conn
 	if _, ok := h.connLocks[conn]; !ok {
 		h.connLocks[conn] = &sync.Mutex{}
 	}
 	h.mu.Unlock()
+	if previous == conn {
+		return nil
+	}
+	return previous
 }
 
 func (h *StreamHub) UnregisterClient(clientID string, conn *websocket.Conn) {
@@ -281,11 +288,11 @@ func (h *StreamHub) UnregisterClient(clientID string, conn *websocket.Conn) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	existing := h.clients[clientID]
+	delete(h.connLocks, conn)
 	if existing != conn {
 		return
 	}
 	delete(h.clients, clientID)
-	delete(h.connLocks, conn)
 	for sessionKey, clientSet := range h.sessionClients {
 		delete(clientSet, clientID)
 		if len(clientSet) == 0 {
@@ -430,14 +437,36 @@ func (h *StreamHub) queueSnapshot(sessionKey string) (string, []QueuedUserMessag
 }
 
 func (h *StreamHub) EnqueueSessionMessage(rootID, sessionKey, sessionTitle string, item QueuedUserMessage) []QueuedUserMessage {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.enqueueSessionMessageLocked(rootID, sessionKey, sessionTitle, item)
+}
+
+// Reserve a turn before starting its goroutine so concurrent HTTP and WS
+// submissions queue behind the same active conversation.
+func (h *StreamHub) reserveOrQueueSessionMessage(rootID, key, title string, item QueuedUserMessage) ([]QueuedUserMessage, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	state := h.ensurePendingSessionLocked(key)
+	if state.Active || h.edits[key] {
+		if h.edits[key] {
+			state.QueueFrozen = true
+		}
+		return h.enqueueSessionMessageLocked(rootID, key, title, item), true
+	}
+	delete(h.completed, key)
+	state.RootID, state.SessionTitle, state.Active = rootID, title, true
+	state.UpdatedAt = time.Now().UTC()
+	return nil, false
+}
+
+func (h *StreamHub) enqueueSessionMessageLocked(rootID, sessionKey, sessionTitle string, item QueuedUserMessage) []QueuedUserMessage {
 	if item.ID == "" {
 		item.ID = time.Now().UTC().Format("20060102150405.000000000")
 	}
 	if item.Timestamp.IsZero() {
 		item.Timestamp = time.Now().UTC()
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	state := h.ensurePendingSessionLocked(sessionKey)
 	delete(h.completed, sessionKey)
 	state.RootID = rootID
@@ -510,6 +539,12 @@ func (h *StreamHub) UnfreezeQueuedSessionMessages(sessionKey string) ([]QueuedUs
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	state := h.pendingSessions[sessionKey]
+	if h.edits[sessionKey] {
+		if state == nil {
+			return nil, false
+		}
+		return cloneQueue(state.Queue), false
+	}
 	if state == nil || !state.QueueFrozen {
 		if state == nil {
 			return nil, false
@@ -525,8 +560,14 @@ func (h *StreamHub) PopQueuedSessionMessage(sessionKey, queueID string) (QueuedU
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	state := h.pendingSessions[sessionKey]
+	if h.edits[sessionKey] {
+		return QueuedUserMessage{}, nil, false
+	}
 	if state == nil || len(state.Queue) == 0 {
 		return QueuedUserMessage{}, nil, false
+	}
+	if state.Active {
+		return QueuedUserMessage{}, cloneQueue(state.Queue), false
 	}
 	index := 0
 	if trimmedQueueID := strings.TrimSpace(queueID); trimmedQueueID != "" {
@@ -544,6 +585,7 @@ func (h *StreamHub) PopQueuedSessionMessage(sessionKey, queueID string) (QueuedU
 		return QueuedUserMessage{}, cloneQueue(state.Queue), false
 	}
 	item := state.Queue[index]
+	state.Active = true
 	state.Queue = append(state.Queue[:index], state.Queue[index+1:]...)
 	state.UpdatedAt = time.Now().UTC()
 	h.clearReplayStatesForSessionLocked(sessionKey)
@@ -554,6 +596,9 @@ func (h *StreamHub) PromoteQueuedSessionMessage(sessionKey, queueID string) ([]Q
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	state := h.pendingSessions[sessionKey]
+	if h.edits[sessionKey] {
+		return nil, false
+	}
 	if state == nil || len(state.Queue) == 0 || strings.TrimSpace(queueID) == "" {
 		return nil, false
 	}

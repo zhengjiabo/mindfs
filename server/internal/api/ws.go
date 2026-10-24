@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"mindfs/server/internal/agent"
@@ -26,10 +27,11 @@ import (
 )
 
 const (
-	wsPingInterval = 30 * time.Second
-	wsPongWait     = 2 * time.Minute
-	wsProofQuery   = "e2ee_proof"
-	wsTSQuery      = "e2ee_ts"
+	wsPingInterval          = 30 * time.Second
+	wsPongWait              = 2 * time.Minute
+	wsProofQuery            = "e2ee_proof"
+	wsTSQuery               = "e2ee_ts"
+	wsCloseClientSuperseded = 4000
 
 	sessionDoneSettleWindow = 50 * time.Millisecond
 	sessionDoneMaxWait      = 2 * time.Second
@@ -178,7 +180,16 @@ func (h *WSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("[ws] connected client=%s remote=%s path=%s", clientID, r.RemoteAddr, r.URL.Path)
 	if h.AppContext != nil {
-		h.AppContext.GetSessionStreamHub().RegisterClient(clientID, conn)
+		previous := h.AppContext.GetSessionStreamHub().RegisterClient(clientID, conn)
+		if previous != nil {
+			log.Printf("[ws] superseded client=%s remote=%s path=%s", clientID, r.RemoteAddr, r.URL.Path)
+			_ = previous.WriteControl(
+				websocket.CloseMessage,
+				websocket.FormatCloseMessage(wsCloseClientSuperseded, "client_superseded"),
+				time.Now().Add(5*time.Second),
+			)
+			_ = previous.Close()
+		}
 		h.pushInitialAppUpdate(clientID)
 		h.pushInitialGitHubImports(clientID)
 	}
@@ -719,20 +730,27 @@ func (h *WSHandler) handleSessionMessage(ctx context.Context, conn *websocket.Co
 		ClientCtx:       clientCtx,
 		ExcludeClientID: clientID,
 	}
-	if streamHub.IsSessionReplying(key) && sessionType != session.TypeCommand {
-		queue := streamHub.EnqueueSessionMessage(rootID, key, sessionName, QueuedUserMessage{
-			ID:                 requestID,
-			PendingUserMessage: userMessage,
-			ClientCtx:          clientCtx,
+	h.submitSessionMessage(job)
+}
+
+// Both transports use the same queue and execution lifecycle. The HTTP request
+// context must not cancel the agent turn when the accepted response is sent.
+func (h *WSHandler) submitSessionMessage(job sessionMessageJob) bool {
+	streamHub := h.AppContext.GetSessionStreamHub()
+	if job.SessionType != session.TypeCommand {
+		queue, queued := streamHub.reserveOrQueueSessionMessage(job.RootID, job.Key, job.SessionName, QueuedUserMessage{
+			ID: job.RequestID, PendingUserMessage: job.User, ClientCtx: job.ClientCtx,
 		})
-		streamHub.BroadcastSessionQueueUpdated(rootID, key, queue)
-		log.Printf("[ws] session.queue.enqueue root=%s session=%s request=%s queue=%d", rootID, key, requestID, len(queue))
-		return
+		if queued {
+			streamHub.BroadcastSessionQueueUpdated(job.RootID, job.Key, queue)
+			return true
+		}
 	}
-	if queue, changed := streamHub.UnfreezeQueuedSessionMessages(key); changed {
-		streamHub.BroadcastSessionQueueUpdated(rootID, key, queue)
+	if queue, changed := streamHub.UnfreezeQueuedSessionMessages(job.Key); changed {
+		streamHub.BroadcastSessionQueueUpdated(job.RootID, job.Key, queue)
 	}
-	h.runSessionMessage(job)
+	go h.runSessionMessage(job)
+	return false
 }
 
 func (h *WSHandler) handleSessionSlashCommandRun(ctx context.Context, conn *websocket.Conn, clientID string, req WSRequest) {
@@ -881,6 +899,8 @@ func (h *WSHandler) switchSessionRuntimePlanMode(ctx context.Context, key string
 }
 
 func (h *WSHandler) runSessionMessage(job sessionMessageJob) {
+	h.AppContext.GetSessionStreamHub().trackSessionJob(job.Key, 1)
+	defer h.AppContext.GetSessionStreamHub().trackSessionJob(job.Key, -1)
 	rootID := job.RootID
 	key := job.Key
 	requestID := strings.TrimSpace(job.RequestID)
@@ -890,6 +910,8 @@ func (h *WSHandler) runSessionMessage(job sessionMessageJob) {
 	defer cancel()
 	updateTracker := newTurnUpdateTracker()
 	subTrackers := map[string]*turnUpdateTracker{}
+	var acceptUpdates atomic.Bool
+	acceptUpdates.Store(true)
 	var subTrackersMu sync.Mutex
 	subTrackerFor := func(sessionKey string) *turnUpdateTracker {
 		subTrackersMu.Lock()
@@ -925,6 +947,9 @@ func (h *WSHandler) runSessionMessage(job sessionMessageJob) {
 		OnUpdate: func(update agenttypes.Event) {
 			updateTracker.Begin()
 			defer updateTracker.End()
+			if !acceptUpdates.Load() {
+				return
+			}
 			if updateToEvent(update) == nil {
 				return
 			}
@@ -940,6 +965,9 @@ func (h *WSHandler) runSessionMessage(job sessionMessageJob) {
 			}
 		},
 		OnSubSessionUpdate: func(sessionKey string, update agenttypes.Event) {
+			if !acceptUpdates.Load() {
+				return
+			}
 			tracker := subTrackerFor(sessionKey)
 			tracker.Begin()
 			if updateToEvent(update) == nil {
@@ -958,6 +986,7 @@ func (h *WSHandler) runSessionMessage(job sessionMessageJob) {
 			tracker.End()
 		},
 	})
+	acceptUpdates.Store(false)
 	if err != nil {
 		log.Printf("[ws] session.message.error root=%s session=%s request=%s err=%v", rootID, key, requestID, err)
 		h.AppContext.BroadcastSessionError(rootID, key, err.Error())
@@ -999,6 +1028,7 @@ func (h *WSHandler) startNextQueuedSessionMessage(rootID, key string) {
 		SessionName:     sessionName,
 		Shell:           shell,
 		User:            item.PendingUserMessage,
+		RequestID:       item.ID,
 		ClientCtx:       item.ClientCtx,
 		Queued:          true,
 	})

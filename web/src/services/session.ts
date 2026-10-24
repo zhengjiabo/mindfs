@@ -17,6 +17,13 @@ export type QueuedUserMessage = {
   timestamp: string;
 };
 
+export type TokenUsage = {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+};
+
 const commandTerminalFontSize = 12;
 const commandTerminalFontFamily =
   '"Cascadia Mono", "Cascadia Code", Consolas, "Microsoft YaHei Mono", "Microsoft YaHei", "Noto Sans Mono CJK SC", monospace';
@@ -92,6 +99,7 @@ export type ExchangeAux = {
 
 export type Session = {
   key: string;
+  history_revision?: number;
   session_key?: string;
   root_id?: string;
   type: SessionType;
@@ -132,6 +140,7 @@ export type Session = {
       totalTokens: number;
       modelContextWindow: number;
     };
+    token_usage?: TokenUsage;
     timestamp?: string;
     toolCall?: ToolCall;
     todoUpdate?: TodoUpdate;
@@ -238,6 +247,7 @@ export type StreamEvent = { event_cursor?: string } & (
           totalTokens: number;
           modelContextWindow: number;
         };
+        tokenUsage?: TokenUsage;
       };
     }
   | { type: "error"; data: { message: string } }
@@ -308,7 +318,9 @@ class SessionService {
   private reconnectTimer: number | null = null;
   private connectTimeoutTimer: number | null = null;
   private probeTimeoutTimer: number | null = null;
+  private lifecycleCheckTimer: number | null = null;
   private activeProbeId: string | null = null;
+  private consecutiveProbeFailures = 0;
   private connectingStartedAt = 0;
   private openingSocket = false;
   private reconnectDelayMs = 1000;
@@ -319,23 +331,25 @@ class SessionService {
   private readonly maxReconnectDelayMs = 30000;
   private readonly fastReconnectDelayMs = 1000;
   private readonly fastReconnectWindowMs = 10000;
-  private readonly connectTimeoutMs = 5000;
-  private readonly probeTimeoutMs = 2000;
+  private readonly connectTimeoutMs = 15000;
+  private readonly probeTimeoutMs = 8000;
+  private readonly lifecycleCheckDelayMs = 750;
+  private readonly maxConsecutiveProbeFailures = 2;
   private readonly reconnectWatchdogMs = 3000;
   private contextCache = new Map<string, { selectionKey: string }>();
 
   constructor() {
     e2eeService.setClientId(this.clientId);
     if (typeof window !== "undefined") {
-      window.addEventListener("online", () => this.ensureConnection());
-      window.addEventListener("pageshow", () => this.ensureConnection());
-      window.addEventListener("focus", () => this.ensureConnection());
+      window.addEventListener("online", () => this.scheduleLifecycleCheck());
+      window.addEventListener("pageshow", () => this.scheduleLifecycleCheck());
+      window.addEventListener("focus", () => this.scheduleLifecycleCheck());
       window.setInterval(() => this.ensureReconnectLoop(), this.reconnectWatchdogMs);
     }
     if (typeof document !== "undefined") {
       document.addEventListener("visibilitychange", () => {
         if (document.visibilityState === "visible") {
-          this.ensureConnection();
+          this.scheduleLifecycleCheck();
         }
       });
     }
@@ -424,6 +438,7 @@ class SessionService {
       this.clearConnectTimeout();
       this.clearProbe();
       this.reconnectDelayMs = 1000;
+      this.consecutiveProbeFailures = 0;
       if (this.hasConnected) {
         this.emit({ type: "ws.reconnected" });
       } else {
@@ -440,6 +455,7 @@ class SessionService {
 
     ws.onmessage = (event) => {
       if (this.ws !== ws) return;
+      this.consecutiveProbeFailures = 0;
       this.clearProbe();
       void (async () => {
         try {
@@ -477,9 +493,12 @@ class SessionService {
   }
 
   disconnect() {
+    this.rootId = null;
     this.clearReconnectTimer();
     this.clearConnectTimeout();
     this.clearProbe();
+    this.clearLifecycleCheck();
+    this.consecutiveProbeFailures = 0;
     this.closeSocket();
     this.contextCache.clear();
   }
@@ -505,6 +524,22 @@ class SessionService {
       this.probeTimeoutTimer = null;
     }
     this.activeProbeId = null;
+  }
+
+  private clearLifecycleCheck() {
+    if (this.lifecycleCheckTimer) {
+      clearTimeout(this.lifecycleCheckTimer);
+      this.lifecycleCheckTimer = null;
+    }
+  }
+
+  private scheduleLifecycleCheck() {
+    if (!this.rootId) return;
+    this.clearLifecycleCheck();
+    this.lifecycleCheckTimer = window.setTimeout(() => {
+      this.lifecycleCheckTimer = null;
+      this.ensureConnection();
+    }, this.lifecycleCheckDelayMs);
   }
 
   private closeSocket() {
@@ -583,9 +618,20 @@ class SessionService {
     });
     this.probeTimeoutTimer = window.setTimeout(() => {
       if (this.activeProbeId !== probeId) return;
-      console.warn("[Session] WebSocket probe timed out, reconnecting");
+      this.consecutiveProbeFailures += 1;
+      const shouldReconnect =
+        this.consecutiveProbeFailures >= this.maxConsecutiveProbeFailures;
+      console.warn("[Session] WebSocket probe timed out", {
+        consecutiveFailures: this.consecutiveProbeFailures,
+        reconnecting: shouldReconnect,
+      });
       this.clearProbe();
-      this.reconnectNow();
+      if (shouldReconnect) {
+        this.consecutiveProbeFailures = 0;
+        this.reconnectNow();
+        return;
+      }
+      this.probeConnection();
     }, this.probeTimeoutMs);
   }
 
@@ -678,7 +724,56 @@ class SessionService {
     payload: Record<string, unknown>,
     msg: any,
   ) {
+    const key = this.eventCursorKey(String(payload.root_id || ""), sessionKey);
+    const previous = this.historyEventQueues.get(key);
+    if (type !== "session.truncated" && !previous) {
+      this.dispatchDecrypted(type, sessionKey, payload, msg);
+      return;
+    }
+    // Keep subsequent user/stream/done events behind the cache reset and any
+    // full-history recovery, so a late recovery cannot overwrite a new reply.
+    const next = (previous || Promise.resolve()).then(async () => {
+      if (type === "session.truncated") {
+        const revision = Number(payload.history_revision);
+        if ((this.truncatedRevisions.get(key) ?? -1) >= revision) return;
+        const rootId = String(payload.root_id || "");
+        const boundary = payload as unknown as SessionTruncation;
+        let recovered = await truncateCachedSession(rootId, sessionKey, boundary);
+        if (!recovered) {
+          recovered = await this.getSession(rootId, sessionKey);
+          if (recovered && Number(recovered.history_revision || 0) >= revision) {
+            await saveCachedSession(rootId, recovered);
+          } else {
+            recovered = null;
+          }
+        }
+        this.truncatedRevisions.set(key, revision);
+        this.dispatchDecrypted(type, sessionKey, { ...payload, recovered_session: recovered }, msg);
+      } else {
+        this.dispatchDecrypted(type, sessionKey, payload, msg);
+      }
+    }).catch((error) => console.error("[Session] History synchronization failed", error));
+    this.historyEventQueues.set(key, next);
+    void next.finally(() => {
+      if (this.historyEventQueues.get(key) === next) this.historyEventQueues.delete(key);
+    });
+  }
+
+  private historyEventQueues = new Map<string, Promise<void>>();
+  private truncatedRevisions = new Map<string, number>();
+
+  private dispatchDecrypted(
+    type: string,
+    sessionKey: string,
+    payload: Record<string, unknown>,
+    msg: any,
+  ) {
     const nextPayload = { ...payload };
+    if (type === "session.truncated") {
+      this.pendingStreams.delete(sessionKey);
+      this.activeStreams.delete(sessionKey);
+      this.clearEventCursor(String(payload.root_id || ""), sessionKey);
+    }
     this.emit({ type, sessionKey, payload: nextPayload });
 
     if (!sessionKey) return;
@@ -715,6 +810,7 @@ class SessionService {
           handler.onStream?.(nextPayload.event as StreamEvent);
         }
         break;
+      case "session.truncated":
       case "session.done":
         for (const handler of handlers) {
           handler.onDone?.();
@@ -1203,13 +1299,21 @@ class SessionService {
     }
   }
 
+  async getSessionLogPath(rootId: string, sessionKey: string): Promise<{ path: string; agentSessionId: string }> {
+    const data = await protectedJSON<{ path: string; agent_session_id?: string }>(
+      appURL(`/api/sessions/${encodeURIComponent(sessionKey)}/log-path`, new URLSearchParams({ root: rootId })),
+    );
+    return { path: data.path, agentSessionId: data.agent_session_id || "" };
+  }
+
   async getSession(
     rootId: string,
     sessionKey: string,
     seq?: number,
+    historyRevision = 0,
   ): Promise<Session | null> {
     try {
-      const params = new URLSearchParams({ root: rootId });
+      const params = new URLSearchParams({ root: rootId, history_revision: String(historyRevision) });
       if (typeof seq === "number" && seq > 0) {
         params.set("seq", String(seq));
       }
@@ -1227,9 +1331,10 @@ class SessionService {
     rootId: string,
     sessionKey: string,
     seq?: number,
+    historyRevision = 0,
   ): Promise<Session | null> {
     try {
-      const params = new URLSearchParams({ root: rootId });
+      const params = new URLSearchParams({ root: rootId, history_revision: String(historyRevision) });
       if (typeof seq === "number" && seq > 0) {
         params.set("seq", String(seq));
       }
@@ -1422,8 +1527,16 @@ class SessionService {
       );
     } catch (err) {
       console.error("[Session] Failed to fork session:", err);
-      return null;
+      throw err;
     }
+  }
+
+  async editMessage(rootId: string, sessionKey: string, seq: number, content: string, originalContent: string, originalTimestamp: string): Promise<void> {
+    await protectedJSON(appURL("/api/sessions/edit"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ root_id: rootId, session_key: sessionKey, seq, content, original_content: originalContent, original_timestamp: originalTimestamp }),
+    });
   }
 
   async fetchExternalSessions(
@@ -1777,6 +1890,9 @@ function appendSessionDelta(
   base: Session | null | undefined,
   incoming: Session | null | undefined,
 ): Session | null {
+  if (Number(incoming?.history_revision || 0) !== Number(base?.history_revision || 0)) {
+    return withSessionMeta(null, incoming);
+  }
   const baseWithMeta = withSessionMeta(base, incoming);
   if (!baseWithMeta) {
     return null;
@@ -1800,6 +1916,55 @@ function appendSessionDelta(
   };
 }
 
+export type SessionTruncation = {
+  from_seq: number;
+  previous_revision: number;
+  history_revision: number;
+};
+
+export function truncateSessionHistory(base: Session | null | undefined, boundary: SessionTruncation): Session | null {
+  if (!base || (base as any).history_incomplete) return null;
+  const revision = Number(base.history_revision || 0);
+  if (revision >= boundary.history_revision) return base;
+  if (revision !== boundary.previous_revision) return null;
+  const retained = (seq: unknown) => Number(seq) > 0 && Number(seq) < boundary.from_seq;
+  return {
+    ...base,
+    history_revision: boundary.history_revision,
+    exchanges: (base.exchanges || []).filter((item) => retained(item.seq) && !item.pending_ack),
+    exchange_aux: Object.fromEntries(Object.entries(base.exchange_aux || {})
+      .filter(([seq]) => retained(seq))
+      .map(([seq, items]) => [seq, items.filter((item) => retained(item.seq))])),
+    context_window: undefined,
+    pending: false,
+  } as Session;
+}
+
+// Read, validate and truncate in one transaction; other tabs may share this DB.
+async function truncateCachedSession(rootId: string, sessionKey: string, boundary: SessionTruncation): Promise<Session | null> {
+  try {
+    return await withSessionStore("readwrite", (store) => new Promise<Session | null>((resolve, reject) => {
+      const key = buildSessionCacheKey(rootId, sessionKey);
+      const get = store.get(key);
+      get.onerror = () => reject(get.error);
+      get.onsuccess = () => {
+        const record = get.result as CachedSessionRecord | undefined;
+        const next = truncateSessionHistory(record?.session, boundary);
+        // Keep a revision marker even when recovery is required. Deleting the
+        // record would let an older in-flight HTTP response recreate stale history.
+        const stored = next || {
+          key: sessionKey, history_revision: boundary.history_revision,
+          history_incomplete: true, exchanges: [], exchange_aux: {},
+        } as unknown as Session;
+        const write = store.put({ ...record, cacheKey: key, rootId, sessionKey,
+          session: toPersistentSession(stored), touchedAt: Date.now() });
+        write.onerror = () => reject(write.error);
+        write.onsuccess = () => resolve(next);
+      };
+    }));
+  } catch { return null; }
+}
+
 async function loadCachedSession(
   rootId: string,
   sessionKey: string,
@@ -1812,7 +1977,7 @@ async function loadCachedSession(
         >,
       ),
     );
-    return record?.session || null;
+    return (record?.session as any)?.history_incomplete ? null : record?.session || null;
   } catch {
     return null;
   }
@@ -1835,7 +2000,16 @@ async function saveCachedSession(
   };
   try {
     await withSessionStore("readwrite", (store) =>
-      sessionRequestToPromise(store.put(record)),
+      new Promise<void>((resolve, reject) => {
+        const get = store.get(record.cacheKey);
+        get.onerror = () => reject(get.error);
+        get.onsuccess = () => {
+          if (Number(get.result?.session?.history_revision || 0) > Number(persistentSession?.history_revision || 0)) { resolve(); return; }
+          const put = store.put(record);
+          put.onsuccess = () => resolve();
+          put.onerror = () => reject(put.error);
+        };
+      }),
     );
   } catch {}
 }
@@ -1932,8 +2106,8 @@ export async function syncSession(
   const base = await getCachedSession(rootId, sessionKey);
   const seq = getSessionMaxSeq(base);
   const incoming = options?.full
-    ? await sessionService.syncExternalSession(rootId, sessionKey, seq)
-    : await sessionService.getSession(rootId, sessionKey, seq);
+    ? await sessionService.syncExternalSession(rootId, sessionKey, seq, base?.history_revision || 0)
+    : await sessionService.getSession(rootId, sessionKey, seq, base?.history_revision || 0);
   if (!incoming) {
     return { session: base, hasDelta: false };
   }

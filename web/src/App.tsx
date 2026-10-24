@@ -1,10 +1,18 @@
+import { TaskGroupPanel } from "./components/TaskGroupPanel";
+import { TaskCardText } from "./components/TaskCardText";
+import { AgentSelector } from "./components/AgentSelector";
+import { patchTask, fetchTaskDetail, deleteCachedTask } from "./services/tasks";
 import React, {
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
+import { resolveInputSession } from "./services/inputSession";
+import { FileEditStore, fileEditKey } from "./services/fileEditing";
+import { normalizePathForRoot, shouldRedirectToRelayNodes } from "./services/fileNavigation";
 import { getViewModeSystemPrompt } from "./renderer/viewCatalog";
 import { Renderer } from "./renderer/Renderer";
 import {
@@ -18,11 +26,13 @@ import {
   sessionService,
   setCachedSessionRelatedFiles,
   syncSession,
+  truncateSessionHistory,
   type MultiRootSessionGroup,
   type SyncSessionResult,
   type RelatedFile,
   type RelatedWorktree,
   type Session,
+  type TokenUsage,
   type QueuedUserMessage,
 } from "./services/session";
 import { buildClientContext } from "./services/context";
@@ -46,7 +56,26 @@ import {
 } from "./services/api";
 import { reportError } from "./services/error";
 import {
+  loadSendShortcut,
+  persistSendShortcut,
+  type SendShortcut,
+} from "./services/sendShortcut";
+import {
+  loadBlueRingGestureConfig,
+  nextFontCycleScale,
+  persistBlueRingGestureConfig,
+  type BlueRingGestureConfig,
+} from "./services/quickSwitch";
+import { recordRecentDir } from "./services/recentDirs";
+import {
+  loadFontSizePreferences,
+  persistFontSizePreferences,
+  type FontSizePreferences,
+} from "./services/fontSize";
+import {
   fetchFile,
+  fetchEditableFile,
+  saveTextFile,
   clearFileCacheForRoot,
   getCachedFile,
   invalidateFileCache,
@@ -134,6 +163,7 @@ import { GitStatusPanel } from "./components/GitStatusPanel";
 import { SessionViewer } from "./components/SessionViewer";
 import { DefaultListView, type MainContentViewMode } from "./components/DefaultListView";
 import { MultiProjectSessionList, SessionList, type ProjectSessionGroup } from "./components/SessionList";
+import { HandoffPackDialog } from "./components/HandoffPackDialog";
 import { ExternalSessionList } from "./components/ExternalSessionList";
 import { InlineTokenText } from "./components/InlineTokenText";
 import { AgentIcon } from "./components/AgentIcon";
@@ -191,7 +221,9 @@ const CHILD_SESSION_PAGE_SIZE = 100;
 const MULTI_PROJECT_SESSION_LIMIT = 6;
 const SESSION_PAGE_SIZE = 50;
 const MULTI_PROJECT_SESSION_STORAGE_KEY = "mindfs-multi-project-session-list";
-const APP_DOCUMENT_TITLE = "MindFS";
+// Capture the server-rendered title before relay status updates add a node name.
+const APP_DOCUMENT_TITLE =
+  (typeof document !== "undefined" ? document.title.trim() : "") || "MindFS";
 
 function formatDocumentTitle(relayStatus: RelayStatusPayload | null): string {
   if (!isRelayNodePage()) {
@@ -212,6 +244,12 @@ function firstUserInputTemplate(template: TaskTemplate | null): string {
 
 function firstAgentStage(template: TaskTemplate | null): StageTemplate | null {
   return template?.stages?.map((stage) => stage.snapshot).find((stage) => stage.role === "agent") || null;
+}
+
+function taskAgentStage(task: KanbanTask, template?: TaskTemplate): StageTemplate | null {
+  const stage = firstAgentStage(template || null);
+  if (!stage) return null;
+  return { ...stage, agent: task.agent || stage.agent, model: task.model ?? (task.agent ? "" : stage.model) };
 }
 
 function isUnfinishedKanbanTask(task: KanbanTask): boolean {
@@ -369,6 +407,7 @@ export type SessionItem = {
       totalTokens: number;
       modelContextWindow: number;
     };
+    token_usage?: TokenUsage;
   }>;
   pending?: boolean;
 };
@@ -409,6 +448,9 @@ type TaskInlineAttachment = {
 };
 
 type TaskInlineEditState = {
+  agent?: string;
+  model?: string;
+  canEditExecution?: boolean;
   taskId?: string;
   templateId: string;
   templateName: string;
@@ -565,6 +607,7 @@ type Exchange = {
     totalTokens: number;
     modelContextWindow: number;
   };
+  token_usage?: TokenUsage;
   timestamp?: string;
   toolCall?: any;
   todoUpdate?: any;
@@ -627,6 +670,8 @@ function relatedFileSelectionKey(file: RelatedFileClickTarget | null | undefined
 type URLState = {
   root: string;
   file: string;
+  /** 目录视图深链（相对 root 的路径）；undefined/"."/"" = 不在目录视图，replaceState 时自动从 URL 消失 */
+  dir?: string;
   session: string;
   cursor: number;
   pluginQuery: Record<string, string>;
@@ -970,6 +1015,7 @@ function readURLState(): URLState {
   return {
     root: params.get("root") || "",
     file: params.get("file") || "",
+    dir: params.get("dir") || "",
     session: params.get("session") || "",
     cursor: parseCursor(params.get("cursor")),
     pluginQuery: parsePluginQuery(window.location.search),
@@ -980,6 +1026,7 @@ function buildURLSearch(next: URLState): string {
   const params = new URLSearchParams();
   if (next.root) params.set("root", next.root);
   if (next.file) params.set("file", next.file);
+  if (next.dir && next.dir !== ".") params.set("dir", next.dir);
   if (next.session) params.set("session", next.session);
   if (next.cursor > 0) params.set("cursor", String(next.cursor));
   Object.entries(next.pluginQuery).forEach(([key, value]) => {
@@ -1116,18 +1163,6 @@ function normalizePath(value: string): string {
   return String(value || "")
     .replace(/\\/g, "/")
     .replace(/^\/+|\/+$/g, "");
-}
-
-function normalizePathForRoot(value: string, rootPath?: string): string {
-  const normalized = normalizePath(value);
-  if (!normalized) return "";
-  const normalizedRoot = normalizePath(rootPath || "");
-  if (!normalizedRoot) return normalized;
-  if (normalized === normalizedRoot) return "";
-  if (normalized.startsWith(`${normalizedRoot}/`)) {
-    return normalized.slice(normalizedRoot.length + 1);
-  }
-  return normalized;
 }
 
 function relativeDisplayPathFromRoot(rootPath: string | undefined, absolutePath: string): string {
@@ -1406,6 +1441,7 @@ const SIDEBARS_SWAPPED_STORAGE_KEY = "mindfs-sidebars-swapped";
 const GIT_DIFF_SIDE_BY_SIDE_STORAGE_KEY = "mindfs-git-diff-side-by-side";
 const TASK_CREATE_WORKTREE_PREF_STORAGE_KEY = "mindfs-task-create-worktree-pref";
 const MAIN_CONTENT_VIEW_STORAGE_KEY = "mindfs-main-content-view";
+const DEFAULT_MAIN_CONTENT_VIEW_STORAGE_KEY = "mindfs-default-main-content-view";
 
 type TaskCreateWorktreePreference = {
   createWorktree: boolean;
@@ -1426,6 +1462,16 @@ function loadMainContentViewByRoot(): Record<string, MainContentViewMode> {
     ) as Record<string, MainContentViewMode>;
   } catch {
     return {};
+  }
+}
+
+function loadDefaultMainContentView(): MainContentViewMode {
+  if (typeof window === "undefined") return "task-kanban";
+  try {
+    const saved = window.localStorage.getItem(DEFAULT_MAIN_CONTENT_VIEW_STORAGE_KEY);
+    return isMainContentViewMode(saved) ? saved : "task-kanban";
+  } catch {
+    return "task-kanban";
   }
 }
 
@@ -1493,6 +1539,7 @@ function saveTaskCreateWorktreePreference(rootId: string, pref: TaskCreateWorktr
 }
 
 export function App({ onGoHome }: AppProps) {
+  const [fileEditStore] = useState(() => new FileEditStore({ load: fetchEditableFile, save: saveTextFile }));
   const { t } = useI18n();
   const pluginManagerRef = useRef<PluginManager>(new PluginManager());
   const completionAudioContextRef = useRef<AudioContext | null>(null);
@@ -1500,6 +1547,9 @@ export function App({ onGoHome }: AppProps) {
   const managedRootIdsRef = useRef<Set<string>>(new Set());
   const expandedRef = useRef<string[]>([]);
   const selectedDirRef = useRef<string | null>(null);
+  // selectedDir 属于哪个 root 的凭证：open_dir 换 root 时 setSelectedDir 要等 /api/tree
+  // 返回才更新，这段窗口里 selectedDirRef 还是旧 root 的目录；保存 ?dir= 前先对 key。
+  const selectedDirKeyRef = useRef<string | null>(null);
   const fileRef = useRef<FilePayload | null>(null);
   const selectedSessionRef = useRef<SessionItem | null>(null);
   const lastMainSessionSnapshotRef = useRef<Session | null>(null);
@@ -1601,6 +1651,11 @@ export function App({ onGoHome }: AppProps) {
   const taskCreateTemplateMenuRef = useRef<HTMLDivElement | null>(null);
   const [availableAgents, setAvailableAgents] = useState<AgentStatus[]>([]);
   const [scheduledAgentDialogOpen, setScheduledAgentDialogOpen] = useState(false);
+  const [scheduledAgentSession, setScheduledAgentSession] = useState<SessionItem | null>(null);
+  const openSessionScheduledTask = (session: SessionItem) => {
+    setScheduledAgentSession({ ...session, root_id: session.root_id || currentRootId || undefined });
+    setScheduledAgentDialogOpen(true);
+  };
   const [taskTemplates, setTaskTemplates] = useState<TaskTemplate[]>([]);
   const [taskTemplateDialogOpen, setTaskTemplateDialogOpen] = useState(false);
   const [taskTemplateDialogTemplate, setTaskTemplateDialogTemplate] = useState<TaskTemplate | null>(null);
@@ -1614,6 +1669,7 @@ export function App({ onGoHome }: AppProps) {
 	  const taskSessionKeysByIdRef = useRef<Record<string, string[]>>({});
 	  const [selectedKanbanTaskId, setSelectedKanbanTaskId] = useState("");
 	  const [expandedTaskInputIds, setExpandedTaskInputIds] = useState<Set<string>>(() => new Set());
+  const [overflowingTaskInputs, setOverflowingTaskInputs] = useState<Set<string>>(() => new Set());
   const [collapsedTaskCompletionGroups, setCollapsedTaskCompletionGroups] = useState<Set<string>>(() => new Set(["success", "fail", "cancelled"]));
   const [taskInlineEdit, setTaskInlineEdit] = useState<TaskInlineEditState | null>(null);
   const [taskSessionErrorDialog, setTaskSessionErrorDialog] = useState<{ title: string; message: string; details: string[] } | null>(null);
@@ -1674,13 +1730,18 @@ export function App({ onGoHome }: AppProps) {
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const { isMobile, isTablet } = useResponsive();
   const [mobileEnterKeySends, setMobileEnterKeySends] = useState(loadMobileEnterKeySends);
+  const [sendShortcut, setSendShortcut] = useState<SendShortcut | null>(loadSendShortcut);
+  const [blueRingGestures, setBlueRingGestures] = useState<BlueRingGestureConfig>(loadBlueRingGestureConfig);
   const [sidebarsSwapped, setSidebarsSwapped] = useState(loadSidebarsSwapped);
+  const [fontSizePreferences, setFontSizePreferences] = useState<FontSizePreferences>(loadFontSizePreferences);
   const [gitDiffSideBySide, setGitDiffSideBySide] = useState(loadGitDiffSideBySide);
   const [isLeftOpen, setIsLeftOpen] = useState(() => window.innerWidth >= 768);
   const [isRightOpen, setIsRightOpen] = useState(
     () => window.innerWidth >= 768,
   );
   const [onboardingOpen, setOnboardingOpen] = useState(false);
+  const [onboardingMainContentViewRoot, setOnboardingMainContentViewRoot] =
+    useState<string | null>(null);
   const onboardingAutoStartRef = useRef(false);
   const [currentRootId, setCurrentRootId] = useState<string | null>(null);
   const currentRootIdRef = useRef<string | null>(null);
@@ -2000,15 +2061,15 @@ export function App({ onGoHome }: AppProps) {
     const rootId = task.root_id || currentRootIdRef.current;
     if (!rootId) return;
     try {
-      const detail = taskDetailsById[task.id];
-      if (!detail) {
-        reportError("file.write_failed", t("task.detailNotSynced"));
-        return;
-      }
+      const detail = taskDetailsById[task.id] || await fetchTaskDetail(rootId,task.id);
       const firstInput = firstTaskInputFromDetail(detail);
       const currentInput = currentTaskInputFromDetail(detail);
+      const agentStage = taskAgentStage(detail.task, taskTemplates.find(item => item.id === detail.task.task_template_id));
 	      setTaskInlineEdit({
 	        taskId: task.id,
+            agent: agentStage?.agent,
+            model: agentStage?.model,
+            canEditExecution: !detail.task.main_session_key && !detail.task.scheduler_admitted && detail.task.current_stage_index===0,
 	        templateId: task.task_template_id,
 	        templateName: task.task_template_name || t("task.defaultTitle"),
 	        text: currentInput,
@@ -2016,7 +2077,7 @@ export function App({ onGoHome }: AppProps) {
 	        createWorktree: detail.task.create_worktree === true,
 	        worktreeBranchMode: detail.task.worktree_branch_mode === "existing" ? "existing" : "new",
 	        worktreeBranch: detail.task.worktree_branch || "",
-	        canToggleWorktree: detail.task.current_stage_index === 0 && !detail.task.worktree_path,
+	        canToggleWorktree: detail.task.current_stage_index === 0 && !detail.task.worktree_path && !detail.task.scheduler_admitted,
 	        attachments: [],
 	      });
       setTaskInlineActiveToken(null);
@@ -2031,7 +2092,7 @@ export function App({ onGoHome }: AppProps) {
     } catch (err) {
       reportError("file.write_failed", String((err as Error)?.message || t("task.editFailed")));
     }
-  }, [taskDetailsById, t]);
+  }, [taskDetailsById, taskTemplates, t]);
 
   const loadTaskWorktreeBranches = useCallback(async (rootId: string) => {
     if (!rootId) return;
@@ -2087,6 +2148,9 @@ export function App({ onGoHome }: AppProps) {
 	    setTaskInlineEdit({
 	      templateId,
 	      templateName: template?.name || t("task.defaultTitle"),
+        agent: template?.stages.find(s=>s.snapshot.role==="agent")?.snapshot.agent,
+        model: template?.stages.find(s=>s.snapshot.role==="agent")?.snapshot.model,
+        canEditExecution: true,
 	      text: initialText,
 	      previousInputs: [],
 	      createWorktree: taskCanCreateWorktree && worktreePref.createWorktree,
@@ -2251,15 +2315,13 @@ export function App({ onGoHome }: AppProps) {
       const taskCanCreateWorktree = managedRootByIdRef.current[rootId]?.is_git_repo === true;
       const createWorktree = taskCanCreateWorktree && edit.createWorktree;
       const detail = edit.taskId
-        ? await updateTaskInput(
-            rootId,
-            edit.taskId,
-            payload,
-            edit.canToggleWorktree ? createWorktree : undefined,
-            edit.canToggleWorktree && createWorktree ? edit.worktreeBranchMode : undefined,
-            edit.canToggleWorktree && createWorktree ? edit.worktreeBranch : undefined,
-          )
-        : await createTask(rootId, edit.templateId, payload, createWorktree, edit.worktreeBranchMode, edit.worktreeBranch);
+        ? (edit.canEditExecution
+          ? await patchTask(rootId, edit.taskId, {
+              ...(edit.canEditExecution ? {input:payload,agent:edit.agent,model:edit.model,
+                ...(edit.canToggleWorktree ? {create_worktree:createWorktree,worktree_branch_mode:edit.worktreeBranchMode,worktree_branch:edit.worktreeBranch}:{})}:{}),
+            })
+          : await updateTaskInput(rootId,edit.taskId,payload))
+        : await createTask(rootId, edit.templateId, payload, createWorktree, edit.worktreeBranchMode, edit.worktreeBranch, {agent:edit.agent,model:edit.model});
       applyTaskDetails(rootId, [detail]);
       if (detail.task.worktree_path) {
         void refreshTaskWorktree(rootId, detail.task.worktree_path);
@@ -2326,6 +2388,34 @@ export function App({ onGoHome }: AppProps) {
       // Ignore storage failures; the setting can still apply for this session.
     }
   }, [mobileEnterKeySends]);
+
+  useEffect(() => {
+    persistSendShortcut(sendShortcut);
+  }, [sendShortcut]);
+
+  useEffect(() => {
+    persistBlueRingGestureConfig(blueRingGestures);
+  }, [blueRingGestures]);
+
+  useEffect(() => {
+    persistFontSizePreferences(fontSizePreferences);
+  }, [fontSizePreferences]);
+
+  // Blue-ring font cycle: main session font walks 100%→140% then back down,
+  // looping; the walk direction lives for the session only. State updater must
+  // stay pure, so the walking value/direction live in refs and the updater
+  // only applies the precomputed result.
+  const mainFontCycleDirectionRef = useRef<"up" | "down">("up");
+  const mainFontCycleScaleRef = useRef(fontSizePreferences.main);
+  useEffect(() => {
+    mainFontCycleScaleRef.current = fontSizePreferences.main;
+  }, [fontSizePreferences.main]);
+  const cycleMainFontScale = useCallback(() => {
+    const next = nextFontCycleScale(mainFontCycleScaleRef.current, mainFontCycleDirectionRef.current);
+    mainFontCycleDirectionRef.current = next.direction;
+    mainFontCycleScaleRef.current = next.scale;
+    setFontSizePreferences((prev) => ({ ...prev, main: next.scale }));
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -2437,6 +2527,7 @@ export function App({ onGoHome }: AppProps) {
   useEffect(() => {
     if (isMobile && onboardingOpen) {
       setOnboardingOpen(false);
+      setOnboardingMainContentViewRoot(null);
     }
   }, [isMobile, onboardingOpen]);
   const [e2eeSecretInput, setE2eeSecretInput] = useState("");
@@ -2445,7 +2536,24 @@ export function App({ onGoHome }: AppProps) {
   const [editDraftRequest, setEditDraftRequest] = useState<{
     id: number;
     content: string;
+    mode?: "replace" | "append";
   } | null>(null);
+  const [handoffPackSession, setHandoffPackSession] = useState<SessionItem | null>(null);
+  const handleHandoffPack = useCallback((session: SessionItem) => {
+    setHandoffPackSession(session);
+  }, []);
+  const handleHandoffPackInsert = useCallback((pack: string) => {
+    // append：输入框已有草稿时由 ActionBar 拼接，避免静默覆盖
+    setEditDraftRequest((prev) => ({
+      id: (prev?.id || 0) + 1,
+      content: pack,
+      mode: "append",
+    }));
+    // 手机上会话列表在右侧抽屉里，填入后收起让用户看到输入框
+    if (isMobile) {
+      setIsRightOpen(false);
+    }
+  }, [isMobile]);
   const [entriesByPath, setEntriesByPath] = useState<
     Record<string, FileEntry[]>
   >({});
@@ -2505,8 +2613,12 @@ export function App({ onGoHome }: AppProps) {
   const [mainContentViewByRoot, setMainContentViewByRoot] = useState<Record<string, MainContentViewMode>>(
     () => loadMainContentViewByRoot(),
   );
+  const [defaultMainContentView, setDefaultMainContentView] = useState<MainContentViewMode>(
+    () => loadDefaultMainContentView(),
+  );
   const [status, setStatus] = useState<WSStatus>("disconnected");
   const [file, setFile] = useState<FilePayload | null>(null);
+  const currentFileEditing = useSyncExternalStore(fileEditStore.subscribe, () => !!file?.root && fileEditStore.has(file.root, file.path));
   const [viewerSelection, setViewerSelection] =
     useState<ViewerSelection | null>(null);
   const [attachedFileContext, setAttachedFileContext] =
@@ -2719,6 +2831,9 @@ export function App({ onGoHome }: AppProps) {
     selectedDirRef.current = selectedDir;
   }, [selectedDir]);
   useEffect(() => {
+    selectedDirKeyRef.current = selectedDirKey;
+  }, [selectedDirKey]);
+  useEffect(() => {
     entriesByPathRef.current = entriesByPath;
   }, [entriesByPath]);
   useEffect(() => {
@@ -2832,6 +2947,15 @@ export function App({ onGoHome }: AppProps) {
     );
   }, [mainContentViewByRoot]);
   useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem(
+      DEFAULT_MAIN_CONTENT_VIEW_STORAGE_KEY,
+      defaultMainContentView,
+    );
+  }, [defaultMainContentView]);
+  useEffect(() => {
     const rootID = currentRootId;
     if (!rootID) return;
     setActiveBoundSessionKey(boundSessionByRootRef.current[rootID] || null);
@@ -2903,14 +3027,71 @@ export function App({ onGoHome }: AppProps) {
     ? directorySortOverrides[currentDirectorySortKey]
     : undefined;
   const currentMainContentView: MainContentViewMode =
-    (currentRootId && mainContentViewByRoot[currentRootId]) || "task-kanban";
+    currentRootId && onboardingMainContentViewRoot === currentRootId
+      ? "task-kanban"
+      : (currentRootId && mainContentViewByRoot[currentRootId]) ||
+        defaultMainContentView;
+  const setMainContentViewForRoot = useCallback(
+    (rootID: string, mode: MainContentViewMode) => {
+      if (!rootID) return;
+      setMainContentViewByRoot((prev) => {
+        if (prev[rootID] === mode) return prev;
+        return { ...prev, [rootID]: mode };
+      });
+    },
+    [],
+  );
   const handleMainContentViewChange = useCallback((mode: MainContentViewMode) => {
     const rootID = currentRootIdRef.current;
     if (!rootID) return;
-    setMainContentViewByRoot((prev) => {
-      if (prev[rootID] === mode) return prev;
-      return { ...prev, [rootID]: mode };
-    });
+    setOnboardingMainContentViewRoot(null);
+    setMainContentViewForRoot(rootID, mode);
+    setDefaultMainContentView(mode);
+  }, [setMainContentViewForRoot]);
+
+  // Blue-ring actions over the home middle section: view toggle, kanban
+  // template cycle, task creation and the scheduled tasks dialog. The toggle
+  // reads the same effective view the middle pane renders (onboarding override
+  // included) so it always flips what the user is actually looking at.
+  const toggleMainContentView = useCallback(() => {
+    const rootID = currentRootIdRef.current;
+    if (!rootID) return;
+    const current = rootID && onboardingMainContentViewRoot === rootID
+      ? "task-kanban"
+      : mainContentViewByRoot[rootID] || defaultMainContentView;
+    if (onboardingMainContentViewRoot === rootID) setOnboardingMainContentViewRoot(null);
+    setMainContentViewForRoot(rootID, current === "task-kanban" ? "file-browser" : "task-kanban");
+  }, [onboardingMainContentViewRoot, mainContentViewByRoot, defaultMainContentView, setMainContentViewForRoot]);
+  const cycleKanbanTemplate = useCallback(() => {
+    const rootID = currentRootIdRef.current;
+    if (!rootID) return;
+    // 主视图不在看板时先切过去，否则手势改了过滤器用户却看不到任何反应。
+    if (onboardingMainContentViewRoot === rootID) {
+      setOnboardingMainContentViewRoot(null);
+      // 引导态清掉后露出的是该 root 记住的上次视图，可能不是看板——一并固化成看板，
+      // 与 toggleMainContentView 的持久化语义一致，避免过滤器在背后盲转。
+      setMainContentViewForRoot(rootID, "task-kanban");
+    } else if ((mainContentViewByRoot[rootID] || defaultMainContentView) !== "task-kanban") {
+      setMainContentViewForRoot(rootID, "task-kanban");
+    }
+    const order = [TASK_TEMPLATE_ALL_FILTER, ...taskTemplates.map((template) => template.id || "").filter(Boolean)];
+    if (order.length < 2) return;
+    const index = order.indexOf(taskTemplateFilter);
+    setTaskTemplateFilter(order[(index + 1) % order.length]);
+  }, [onboardingMainContentViewRoot, mainContentViewByRoot, defaultMainContentView, setMainContentViewForRoot, taskTemplateFilter, taskTemplates]);
+  const createTaskFromQuickAction = useCallback((templateId?: string) => {
+    const template = (templateId && taskTemplates.find((item) => item.id === templateId))
+      || (taskTemplateFilter && taskTemplateFilter !== TASK_TEMPLATE_ALL_FILTER
+        ? taskTemplates.find((item) => item.id === taskTemplateFilter)
+        : null)
+      || taskTemplates[0]
+      || null;
+    if (!template) return;
+    openTaskCreateDialog(template);
+  }, [taskTemplates, taskTemplateFilter, openTaskCreateDialog]);
+  const openScheduledTasksFromQuickAction = useCallback(() => {
+    setScheduledAgentSession(null);
+    setScheduledAgentDialogOpen(true);
   }, []);
   const currentDirectorySortMode = currentDirectorySortOverride || treeSortMode;
 
@@ -2932,7 +3113,7 @@ export function App({ onGoHome }: AppProps) {
       setFile(null);
       setGitDiff(null);
       setSelectedDir(currentRootId);
-      handleMainContentViewChange("task-kanban");
+      setOnboardingMainContentViewRoot(currentRootId);
       replaceURLState({ root: currentRootId, file: "", session: "", cursor: 0, pluginQuery: {} });
     }
 
@@ -2943,7 +3124,7 @@ export function App({ onGoHome }: AppProps) {
     }
     setIsLeftOpen(showingSidebar);
     setIsRightOpen(showingSessions);
-  }, [currentRootId, handleMainContentViewChange, isMobile, replaceURLState]);
+  }, [currentRootId, isMobile, replaceURLState]);
 
   const redirectToRelayLogin = useCallback(() => {
     const next = encodeURIComponent(
@@ -3009,16 +3190,15 @@ export function App({ onGoHome }: AppProps) {
         redirectToRelayLogin();
         return true;
       }
-      if (
-        status === 403 ||
-        status === 404 ||
-        status === 502 ||
-        status === 503 ||
-        code === "forbidden" ||
-        code === "node_not_found" ||
-        code === "node_offline" ||
-        code === "connector_unavailable"
-      ) {
+      if (await shouldRedirectToRelayNodes(status, code, async () => {
+        const nodeID = relayNodeIdFromPathname(window.location.pathname);
+        if (!nodeID) return 200;
+        const response = await fetch(`/n/${encodeURIComponent(nodeID)}/`, {
+          cache: "no-cache",
+          headers: { Accept: "application/json" },
+        });
+        return response.status;
+      })) {
         redirectToRelayNodes();
         return true;
       }
@@ -3478,10 +3658,12 @@ export function App({ onGoHome }: AppProps) {
       }
       const syncResult = await request;
       let fullSession = syncResult?.session;
+      const latestAfterSync = sessionCacheRef.current[cacheKey];
+      if (Number(latestAfterSync?.history_revision || 0) > Number(fullSession?.history_revision || 0)) return latestAfterSync;
       if (!fullSession) {
         return null;
       }
-      if (resumeCursor) {
+      if (resumeCursor && Number(cachedBeforeSync?.history_revision || 0) === Number(fullSession.history_revision || 0)) {
         const incomingExchanges = Array.isArray((fullSession as any).exchanges)
           ? ((fullSession as any).exchanges as Exchange[])
           : [];
@@ -3750,10 +3932,20 @@ export function App({ onGoHome }: AppProps) {
     }
   }, [sessions, syncSessionHeaderFromListItem]);
 
+  const getInputSession = useCallback(() => {
+    const root = currentRootIdRef.current;
+    return resolveInputSession(
+      root,
+      !!drawerOpenByRootRef.current[root || ""],
+      selectedSessionRef.current,
+      drawerSessionByRootRef.current[root || ""] || null,
+    );
+  }, []);
+
   const handleSetPlanMode = useCallback(
     async (enabled: boolean, targetSessionKey?: string, targetRootId?: string) => {
       const activeRoot = targetRootId || currentRootIdRef.current;
-      const session = currentSessionRef.current || drawerSessionByRootRef.current[activeRoot || ""];
+      const session = getInputSession();
       const sessionKey = targetSessionKey || session?.key || (session as any)?.session_key;
       if (!activeRoot) {
         reportError("session.sync_failed", t("session.planModeSelectFirst"));
@@ -3793,7 +3985,7 @@ export function App({ onGoHome }: AppProps) {
         reportError("network.disconnected", t("session.planModeSwitchFailedNotReady"));
       }
     },
-    [rootSessionKey, setDrawerSessionForRoot, bumpCacheVersion, t],
+    [getInputSession, rootSessionKey, setDrawerSessionForRoot, bumpCacheVersion, t],
   );
 
   const promotePendingSessionForRoot = useCallback(
@@ -4399,10 +4591,24 @@ export function App({ onGoHome }: AppProps) {
       rootID: string,
       sessionKey: string,
       contextWindow?: { totalTokens?: number; modelContextWindow?: number },
+      tokenUsage?: TokenUsage,
     ) => {
       const totalTokens = Math.max(0, Number(contextWindow?.totalTokens || 0));
       const modelContextWindow = Math.max(0, Number(contextWindow?.modelContextWindow || 0));
-      if (!totalTokens || !modelContextWindow) {
+      const hasContextWindow = totalTokens > 0 && modelContextWindow > 0;
+      const normalizedTokenUsage = tokenUsage
+        ? {
+            inputTokens: Math.max(0, Number(tokenUsage.inputTokens || 0)),
+            outputTokens: Math.max(0, Number(tokenUsage.outputTokens || 0)),
+            ...(Number.isFinite(tokenUsage.cacheReadTokens)
+              ? { cacheReadTokens: Math.max(0, Number(tokenUsage.cacheReadTokens)) }
+              : {}),
+            ...(Number.isFinite(tokenUsage.cacheWriteTokens)
+              ? { cacheWriteTokens: Math.max(0, Number(tokenUsage.cacheWriteTokens)) }
+              : {}),
+          }
+        : undefined;
+      if (!hasContextWindow && !normalizedTokenUsage) {
         return;
       }
       const cacheKey = rootSessionKey(rootID, sessionKey);
@@ -4416,10 +4622,12 @@ export function App({ onGoHome }: AppProps) {
           ) {
             list[i] = {
               ...item,
-              context_window: {
-                totalTokens,
-                modelContextWindow,
-              },
+              ...(hasContextWindow
+                ? { context_window: { totalTokens, modelContextWindow } }
+                : {}),
+              ...(normalizedTokenUsage
+                ? { token_usage: normalizedTokenUsage }
+                : {}),
             };
             break;
           }
@@ -4432,10 +4640,9 @@ export function App({ onGoHome }: AppProps) {
         sessionCacheRef.current[cacheKey] = {
           ...(cached as any),
           exchanges,
-          context_window: {
-            totalTokens,
-            modelContextWindow,
-          },
+          ...(hasContextWindow
+            ? { context_window: { totalTokens, modelContextWindow } }
+            : {}),
           updated_at: new Date().toISOString(),
         } as Session;
       }
@@ -4448,10 +4655,9 @@ export function App({ onGoHome }: AppProps) {
         return {
           ...(prev as any),
           exchanges: stampList((((prev as any).exchanges || []) as Exchange[])),
-          context_window: {
-            totalTokens,
-            modelContextWindow,
-          },
+          ...(hasContextWindow
+            ? { context_window: { totalTokens, modelContextWindow } }
+            : {}),
         } as SessionItem;
       });
       const drawer = drawerSessionByRootRef.current[rootID];
@@ -4459,10 +4665,9 @@ export function App({ onGoHome }: AppProps) {
         setDrawerSessionForRoot(rootID, {
           ...(drawer as any),
           exchanges: stampList((((drawer as any).exchanges || []) as Exchange[])),
-          context_window: {
-            totalTokens,
-            modelContextWindow,
-          },
+          ...(hasContextWindow
+            ? { context_window: { totalTokens, modelContextWindow } }
+            : {}),
         } as Session);
       }
       bumpCacheVersion();
@@ -4522,6 +4727,7 @@ export function App({ onGoHome }: AppProps) {
 
   const refreshCurrentFileContent = useCallback(
     async (rootID: string, changedPath: string) => {
+      if (fileEditStore.has(rootID, changedPath)) return;
       const currentFile = fileRef.current;
       if (!currentFile) return;
       const currentRoot = currentFile.root || currentRootIdRef.current || "";
@@ -4553,7 +4759,8 @@ export function App({ onGoHome }: AppProps) {
           !next ||
           !latestFile ||
           latestRoot !== rootID ||
-          latestFile.path !== changedPath
+          latestFile.path !== changedPath ||
+          fileEditStore.has(rootID, changedPath)
         ) {
           return;
         }
@@ -5257,6 +5464,32 @@ export function App({ onGoHome }: AppProps) {
     [runGitAction],
   );
 
+  const handleCreateBlankFile = useCallback(async () => {
+    const rootID = currentRootIdRef.current;
+    if (!rootID) return;
+    const targetDir = (selectedDirRef.current === rootID ? "." : selectedDirRef.current) || ".";
+    const input = window.prompt(t("directory.fileNamePrompt"), "");
+    if (input === null) return;
+    const name = input.trim();
+    if (!name || name === "." || name === ".." || /[/\\\x00]/.test(name)) {
+      window.alert(t("directory.invalidFileName"));
+      return;
+    }
+    try {
+      await apiProtectedJSON(appPath(`/api/file?${new URLSearchParams({ root: rootID })}`), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ dir: targetDir, name }),
+      });
+      const currentDir = (selectedDirRef.current === rootID ? "." : selectedDirRef.current) || ".";
+      await refreshTreeDir(rootID, targetDir, rootID === currentRootIdRef.current && currentDir === targetDir);
+    } catch (err) {
+      reportError("file.write_failed", err instanceof ProtectedAPIError && err.status === 409
+        ? t("directory.fileExists")
+        : String((err as Error)?.message || t("directory.createFileFailed")));
+    }
+  }, [refreshTreeDir, t]);
+
   const handleTreeUpload = useCallback(
     async (files: File[]) => {
       const rootID = currentRootIdRef.current;
@@ -5880,7 +6113,14 @@ export function App({ onGoHome }: AppProps) {
         reportError("session.sync_failed", t("session.forkMissing"));
         return;
       }
-      const result = await sessionService.forkSession(resolvedRoot, resolvedKey, seq);
+      let result: Awaited<ReturnType<typeof sessionService.forkSession>>;
+      try {
+        result = await sessionService.forkSession(resolvedRoot, resolvedKey, seq);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        reportError("session.sync_failed", `${t("session.forkFailed")}: ${detail}`);
+        return;
+      }
       const forked = result?.session;
       const forkedKey = String(result?.session_key || forked?.key || "").trim();
       if (!forkedKey) {
@@ -6164,46 +6404,14 @@ export function App({ onGoHome }: AppProps) {
     ) => {
       const activeRoot = currentRootIdRef.current;
       if (!activeRoot) return;
-      const selected = selectedSessionRef.current;
-      const selectedKey = selected?.key || selected?.session_key;
-      const selectedRoot =
-        (selected?.root_id as string | undefined) || activeRoot;
-      const currentBoundSessionKey =
-        boundSessionByRootRef.current[activeRoot] || null;
-      const isMainSessionView =
-        interactionModeRef.current !== "drawer" &&
-        !!selectedKey &&
-        selectedRoot === activeRoot;
-      let sendSessionKey: string | null | undefined =
-        isMainSessionView && selectedKey && !selectedKey.startsWith("pending-")
-          ? selectedKey
-          : currentBoundSessionKey;
-      let session: Session | null = null;
-      if (sendSessionKey) {
-        session =
-          sessionCacheRef.current[rootSessionKey(activeRoot, sendSessionKey)];
-        if (!session) {
-          const current = currentSessionRef.current;
-          if (current?.key === sendSessionKey) {
-            session = current as Session;
-          }
-        }
-        if (!session && selectedKey === sendSessionKey) {
-          session = { ...(selected as any), key: sendSessionKey } as Session;
-        }
-      } else {
-        if (
-          selectedRoot === activeRoot &&
-          selectedKey &&
-          !selectedKey.startsWith("pending-")
-        ) {
-          sendSessionKey = selectedKey;
-          session =
-            sessionCacheRef.current[
-              rootSessionKey(activeRoot, sendSessionKey)
-            ] || ({ ...selected, key: selectedKey } as Session);
-        }
-      }
+      const target = getInputSession();
+      let sendSessionKey: string | null | undefined = target?.key || target?.session_key;
+      // The server must assign a real key before this draft can receive more input.
+      if (sendSessionKey?.startsWith("pending-")) return;
+      let session: Session | null = sendSessionKey
+        ? sessionCacheRef.current[rootSessionKey(activeRoot, sendSessionKey)]
+          || ({ ...target, key: sendSessionKey } as Session)
+        : null;
       let effectiveMode = mode,
         effectiveAgent = agent,
         effectiveModel = model ?? "",
@@ -6231,36 +6439,31 @@ export function App({ onGoHome }: AppProps) {
       if (sendSessionKey && session) {
         const targetSessionKey = sendSessionKey;
         const previousAgent = session.agent || "";
-        const useTargetSessionDefaults =
-          !!currentBoundSessionKey && currentBoundSessionKey !== targetSessionKey;
         effectiveMode = normalizeMode(session.type as any);
         effectiveAgent =
-          (useTargetSessionDefaults ? previousAgent : agent) ||
+          agent ||
           previousAgent ||
           "";
-        effectiveModel = useTargetSessionDefaults
-          ? session.model || ""
-          : model !== undefined
-            ? model
-            : effectiveAgent === previousAgent
-              ? session.model || ""
-              : "";
+		effectiveModel =
+		  model !== undefined
+		    ? model
+		    : effectiveAgent === previousAgent
+		      ? session.model || ""
+		      : "";
         effectiveAgentMode =
-          (useTargetSessionDefaults ? (session as any).mode || "" : agentMode) ||
+          agentMode ||
           (effectiveAgent === previousAgent ? (session as any).mode || "" : "");
         effectiveEffort =
-          (useTargetSessionDefaults ? (session as any).effort || "" : effort) ||
+          effort ||
           (effectiveAgent === previousAgent ? (session as any).effort || "" : "");
         effectiveFastService =
-          (useTargetSessionDefaults
-            ? (((session as any).fast_service || "") as "" | "on" | "off")
-            : ((fastService || "") as "" | "on" | "off")) ||
+          ((fastService || "") as "" | "on" | "off") ||
           (effectiveAgent === previousAgent
             ? (((session as any).fast_service || "") as "" | "on" | "off")
             : "");
         effectiveShell =
           effectiveMode === "command"
-            ? ((useTargetSessionDefaults ? (session as any).shell || "" : shell) ||
+            ? (shell ||
                 (session as any).shell ||
                 "")
             : "";
@@ -6681,6 +6884,7 @@ export function App({ onGoHome }: AppProps) {
     },
     [
       attachedFileContext,
+      getInputSession,
       rootSessionKey,
       mergeSessionItems,
       setSelectedPendingByKey,
@@ -6803,57 +7007,30 @@ export function App({ onGoHome }: AppProps) {
   const handleRemoveQueuedMessage = useCallback(
     async (queueId: string) => {
       const activeRoot = currentRootIdRef.current;
-      const selected = selectedSessionRef.current;
-      const selectedRoot =
-        (selected?.root_id as string | undefined) || activeRoot || "";
-      const selectedKey = selected?.key || selected?.session_key || "";
-      const sessionKey =
-        interactionModeRef.current !== "drawer" &&
-        selectedRoot === activeRoot &&
-        selectedKey &&
-        !selectedKey.startsWith("pending-")
-          ? selectedKey
-          : boundSessionByRootRef.current[activeRoot || ""] || "";
+      const target = getInputSession();
+      const sessionKey = target?.key || target?.session_key || "";
       if (!activeRoot || !sessionKey || !queueId) return;
       await sessionService.removeQueuedMessage(activeRoot, sessionKey, queueId);
     },
-    [],
+    [getInputSession],
   );
 
   const handleUpdateQueuedMessage = useCallback(
     async (queueId: string, content: string) => {
       const activeRoot = currentRootIdRef.current;
-      const selected = selectedSessionRef.current;
-      const selectedRoot =
-        (selected?.root_id as string | undefined) || activeRoot || "";
-      const selectedKey = selected?.key || selected?.session_key || "";
-      const sessionKey =
-        interactionModeRef.current !== "drawer" &&
-        selectedRoot === activeRoot &&
-        selectedKey &&
-        !selectedKey.startsWith("pending-")
-          ? selectedKey
-          : boundSessionByRootRef.current[activeRoot || ""] || "";
+      const target = getInputSession();
+      const sessionKey = target?.key || target?.session_key || "";
       if (!activeRoot || !sessionKey || !queueId || !content.trim()) return;
       await sessionService.updateQueuedMessage(activeRoot, sessionKey, queueId, content);
     },
-    [],
+    [getInputSession],
   );
 
   const handleSendQueuedMessageNow = useCallback(
     async (queueId: string) => {
       const activeRoot = currentRootIdRef.current;
-      const selected = selectedSessionRef.current;
-      const selectedRoot =
-        (selected?.root_id as string | undefined) || activeRoot || "";
-      const selectedKey = selected?.key || selected?.session_key || "";
-      const sessionKey =
-        interactionModeRef.current !== "drawer" &&
-        selectedRoot === activeRoot &&
-        selectedKey &&
-        !selectedKey.startsWith("pending-")
-          ? selectedKey
-          : boundSessionByRootRef.current[activeRoot || ""] || "";
+      const target = getInputSession();
+      const sessionKey = target?.key || target?.session_key || "";
       if (!activeRoot || !sessionKey || !queueId) return;
       const cacheKey = rootSessionKey(activeRoot, sessionKey);
       const previousQueue = queuedMessagesBySessionRef.current[cacheKey] || [];
@@ -6872,33 +7049,8 @@ export function App({ onGoHome }: AppProps) {
         setQueueVersion((v) => v + 1);
       }
     },
-    [markSessionPending, rootSessionKey],
+    [getInputSession, markSessionPending, rootSessionKey],
   );
-
-  const handleNewSession = useCallback(() => {
-    const rootID = currentRootIdRef.current;
-    const previousBoundKey = rootID ? boundSessionByRootRef.current[rootID] : "";
-    if (rootID && previousBoundKey && !previousBoundKey.startsWith("pending-")) {
-      suppressedAutoBindSessionByRootRef.current[rootID] = previousBoundKey;
-    }
-    setMainViewPreferenceForRoot(rootID, "session");
-    selectedSessionRef.current = null;
-    currentSessionRef.current = null;
-    interactionModeRef.current = "main";
-    setSelectedSession(null);
-    if (rootID) {
-      selectedSessionByRootRef.current[rootID] = null;
-    }
-    setBoundSessionForRoot(rootID, null);
-    setDrawerSessionForRoot(rootID, null);
-    setInteractionMode("main");
-    setDrawerOpenForRoot(rootID, false);
-  }, [
-    setBoundSessionForRoot,
-    setDrawerOpenForRoot,
-    setDrawerSessionForRoot,
-    setMainViewPreferenceForRoot,
-  ]);
 
   const currentSelectionSource = useMemo(() => {
     if (file?.path) {
@@ -7136,14 +7288,17 @@ export function App({ onGoHome }: AppProps) {
           const fetchFileWithMode = async (
             mode: "full" | "incremental",
             timeoutMs?: number,
-          ) =>
-            fetchFile({
+          ) => {
+            const editing = fileEditStore.get(fileEditKey(String(root), String(path)));
+            if (editing?.file) return editing.file;
+            return fetchFile({
               rootId: String(root),
               path: String(path),
               readMode: mode,
               cursor,
               timeoutMs,
             });
+          };
 
           let readMode: "incremental" | "full" =
             params.readMode === "full" ? "full" : "incremental";
@@ -7272,6 +7427,7 @@ export function App({ onGoHome }: AppProps) {
           replaceURLState({
             root,
             file: "",
+            dir: targetIsRoot ? "" : targetPath,
             session: "",
             cursor: 0,
             pluginQuery: nextPluginQuery,
@@ -8861,8 +9017,10 @@ export function App({ onGoHome }: AppProps) {
       if (!file) return;
       const root = file.root || currentRootIdRef.current;
       if (!root) return;
+      const targetPath = path === "." ? root : path;
+      recordRecentDir({ rootId: root, path: targetPath });
       actionHandlers.open_dir({
-        path: path === "." ? root : path,
+        path: targetPath,
         root,
         isRoot: path === ".",
         suppressTreeExpand: path === ".",
@@ -8885,9 +9043,11 @@ export function App({ onGoHome }: AppProps) {
     (path: string) => {
       const root = currentRootIdRef.current;
       if (!root) return;
+      const targetPath = path === "." ? root : path;
+      recordRecentDir({ rootId: root, path: targetPath });
       setGitDiff(null);
       actionHandlers.open_dir({
-        path: path === "." ? root : path,
+        path: targetPath,
         root,
         isRoot: path === ".",
         suppressTreeExpand: path === ".",
@@ -8900,8 +9060,10 @@ export function App({ onGoHome }: AppProps) {
     (path: string) => {
       const root = currentRootIdRef.current;
       if (!root) return;
+      const targetPath = path === "." ? root : path;
+      recordRecentDir({ rootId: root, path: targetPath });
       actionHandlers.open_dir({
-        path: path === "." ? root : path,
+        path: targetPath,
         root,
         isRoot: path === ".",
         suppressTreeExpand: path === ".",
@@ -9361,6 +9523,7 @@ export function App({ onGoHome }: AppProps) {
             activeRoot,
             streamKey,
             event.data?.contextWindow,
+            event.data?.tokenUsage,
           );
           tokenStationRefreshRef.current?.();
           setCodexRateLimitsRefreshToken((value) => value + 1);
@@ -10036,6 +10199,7 @@ export function App({ onGoHome }: AppProps) {
           ) {
             const rootID = payload.root_id;
             const sessionKey = payload.session_key;
+            setSelectedPendingByKey(sessionKey, true);
             setMultiProjectSessionPending(rootID, sessionKey, true);
             const exchange = payload.exchange;
             const sessionMeta = payload.session;
@@ -10140,11 +10304,15 @@ export function App({ onGoHome }: AppProps) {
                       pending_ack: false,
                     },
                   ],
+              pending: true,
               updated_at:
                 sessionMeta?.updated_at ||
                 exchange?.timestamp ||
                 new Date().toISOString(),
             } as Session;
+            if (boundSessionByRootRef.current[rootID] === sessionKey) {
+              setDrawerSessionForRoot(rootID, sessionCacheRef.current[cacheKey]);
+            }
             const runtimeAgent = sessionMeta?.agent || exchange?.agent || "";
             if (runtimeAgent) {
               updateSessionAgentForKey(
@@ -10172,6 +10340,13 @@ export function App({ onGoHome }: AppProps) {
             }
           }
           break;
+        case "task.deleted":
+          if(payload?.root_id===currentRootIdRef.current && typeof payload?.task_id==="string"){
+            const id=payload.task_id;const next={...taskDetailsByIdRef.current};delete next[id];taskDetailsByIdRef.current=next;setTaskDetailsById(next);
+            setKanbanTaskCountItems(prev=>prev.filter(task=>task.id!==id));
+            void deleteCachedTask(payload.root_id,id).catch(console.error);
+          }
+          break;
         case "task.updated":
           if (
             typeof payload?.root_id === "string" &&
@@ -10195,6 +10370,26 @@ export function App({ onGoHome }: AppProps) {
             }
           }
           break;
+        case "session.truncated": {
+          const rootID = String(payload?.root_id || "");
+          const key = String(payload?.session_key || "");
+          if (rootID && key) {
+            const cacheKey = rootSessionKey(rootID, key);
+            const cached = sessionCacheRef.current[cacheKey];
+            if (cached && Number(cached.history_revision || 0) >= Number(payload.history_revision)) break;
+            const truncated = truncateSessionHistory(cached, payload);
+            const next = truncated || payload.recovered_session || {
+              ...cached, key, root_id: rootID, history_revision: payload.history_revision,
+              exchanges: [], exchange_aux: {}, pending: false, context_window: undefined,
+            };
+            sessionCacheRef.current[cacheKey] = next;
+            loadedSessionRef.current[cacheKey] = !!(truncated || payload.recovered_session);
+            if (boundSessionByRootRef.current[rootID] === key) setDrawerSessionForRoot(rootID, next);
+            bumpCacheVersion();
+            if (!truncated && !payload.recovered_session) void restoreActiveSession(rootID, key);
+          }
+          break;
+        }
         case "session.meta.updated":
           if (
             typeof payload?.root_id === "string" &&
@@ -10579,6 +10774,18 @@ export function App({ onGoHome }: AppProps) {
             preservePluginQuery: true,
           });
         } else {
+          if (urlState.dir && urlState.dir !== ".") {
+            // 深链 ?root=<id>&dir=<相对路径>：直接落到 root 下的子目录（外部入口如 AIOS 项目卡）
+            await ensurePluginsLoaded(preferredRoot);
+            if (cancelled) return;
+            actionHandlersRef.current.open_dir({
+              path: urlState.dir,
+              root: preferredRoot,
+              forceDirectory: true,
+              preservePluginQuery: true,
+            });
+            return;
+          }
           const restored = await tryShowBoundSessionForRoot(preferredRoot, {
             pluginQuery: urlState.pluginQuery,
           });
@@ -10677,6 +10884,9 @@ export function App({ onGoHome }: AppProps) {
   const describeE2EEPromptError = useCallback((err: unknown) => {
     const code = err instanceof Error ? String(err.message || "").trim() : "";
     switch (code) {
+      case "e2ee_rate_limited":
+      case "e2ee_open_failed_429":
+        return t("e2ee.rateLimited");
       case "e2ee_proof_invalid":
         return t("e2ee.invalidProof");
       case "e2ee_secure_context_required":
@@ -10695,7 +10905,8 @@ export function App({ onGoHome }: AppProps) {
   }, [t]);
 
   const submitE2EESecret = useCallback(async () => {
-    const trimmed = e2eeSecretInput.trim();
+    const trimmed = e2eeSecretInput.trim() ||
+      (bootstrapState.error === "e2ee_rate_limited" ? e2eeService.getSecret() : "");
     if (!trimmed) {
       setE2eePromptError(t("e2ee.codeRequired"));
       return;
@@ -10711,7 +10922,7 @@ export function App({ onGoHome }: AppProps) {
     } finally {
       setE2eePromptBusy(false);
     }
-  }, [describeE2EEPromptError, e2eeSecretInput, t]);
+  }, [bootstrapState.error, describeE2EEPromptError, e2eeSecretInput, t]);
 
   useEffect(() => {
     if (!isRelayPWAContext()) {
@@ -10773,6 +10984,15 @@ export function App({ onGoHome }: AppProps) {
         }
         return;
       }
+      if (state.dir && state.dir !== ".") {
+        actionHandlers.open_dir({
+          path: state.dir,
+          root: state.root,
+          forceDirectory: true,
+          preservePluginQuery: true,
+        });
+        return;
+      }
       void (async () => {
         const restored = await tryShowBoundSessionForRoot(state.root, {
           pluginQuery: state.pluginQuery,
@@ -10795,35 +11015,12 @@ export function App({ onGoHome }: AppProps) {
     return () => window.removeEventListener("popstate", handlePopState);
   }, [actionHandlers, loadSessionsForRoot, refreshTreeDir, tryShowBoundSessionForRoot]);
 
-  const selectedRoot =
-    (selectedSession?.root_id as string | undefined) || currentRootId || "";
-  const selectedInCurrentRoot =
-    !!selectedSession && !!currentRootId && selectedRoot === currentRootId;
-  const selectedKey =
-    selectedSession?.key || selectedSession?.session_key || "";
-  const boundFromSelected =
-    selectedInCurrentRoot && selectedKey === activeBoundSessionKey
-      ? (selectedSession as any)
-      : null;
-  const boundFromCache =
-    activeBoundSessionKey && currentRootId
-      ? (sessionCacheRef.current[
-          rootSessionKey(currentRootId, activeBoundSessionKey)
-        ] as any)
-      : null;
-  const isDetachedMainSessionTarget =
-    !!activeBoundSessionKey &&
-    selectedInCurrentRoot &&
-    !!selectedKey &&
-    selectedKey !== activeBoundSessionKey &&
-    interactionMode !== "drawer";
-  const actionBarSession = activeBoundSessionKey
-    ? isDetachedMainSessionTarget
-      ? (selectedSession as any)
-      : (currentSession as any) || boundFromCache || boundFromSelected
-    : selectedInCurrentRoot
-      ? (selectedSession as any)
-      : null;
+  const actionBarSession = resolveInputSession(
+    currentRootId,
+    isDrawerOpen,
+    selectedSession,
+    currentSession,
+  );
   const actionBarSessionKey =
     (actionBarSession as any)?.key ||
     (actionBarSession as any)?.session_key ||
@@ -10834,13 +11031,6 @@ export function App({ onGoHome }: AppProps) {
       actionBarSession as any,
     ) || (actionBarSession as any),
   );
-  const isBoundSessionInMain =
-    !!activeBoundSessionKey &&
-    selectedKey === activeBoundSessionKey &&
-    interactionMode !== "drawer";
-  const canOpenSessionDrawer = !!activeBoundSessionKey && !isBoundSessionInMain;
-  const detachedBoundSession =
-    isDetachedMainSessionTarget && !isDrawerOpen;
   const actionBarQueuedMessages = useMemo(() => {
     void queueVersion;
     if (!currentRootId || !actionBarSessionKey) return [];
@@ -10858,7 +11048,7 @@ export function App({ onGoHome }: AppProps) {
   }, [currentRootId, file, pluginVersion, pluginQuery]);
 
   useEffect(() => {
-    if (!file || pluginBypass || !matchedPlugin) return;
+    if (!file || currentFileEditing || pluginBypass || !matchedPlugin) return;
     if (inferReadModeFromPlugin(matchedPlugin) !== "full") return;
     if (!file.truncated) return;
     const root = file.root || currentRootId;
@@ -10875,6 +11065,7 @@ export function App({ onGoHome }: AppProps) {
     });
   }, [
     file,
+    currentFileEditing,
     pluginBypass,
     matchedPlugin,
     currentRootId,
@@ -11425,15 +11616,16 @@ export function App({ onGoHome }: AppProps) {
     );
   };
   const currentRootSlashCommandResult = slashCommandResultForSession(currentRootId, null);
-  const sessionViewerComposerOverlayInset =
-    String((actionBarSession as any)?.agent || "").toLowerCase() === "codex" ||
-    (actionBarSession as any)?.plan_mode ||
-    pendingPlanMode
-      ? 20
-      : 0;
+  // The memory badge is always rendered above the composer, so floating
+  // session controls must always clear that overlay row.
+  const sessionViewerComposerOverlayInset = 20;
   const sessionView = (
     <SessionViewer
       session={selectedSessionSnapshot}
+      onRenameSession={selectedSessionSnapshot ? (name) => handleRenameSession(selectedSessionSnapshot, name) : undefined}
+      onDeleteSession={selectedSessionSnapshot ? () => void handleDeleteSession(selectedSessionSnapshot) : undefined}
+      onHandoffPack={selectedSessionSnapshot ? () => handleHandoffPack(selectedSessionSnapshot) : undefined}
+      onScheduledTask={selectedSessionSnapshot ? () => openSessionScheduledTask(selectedSessionSnapshot) : undefined}
       agents={availableAgents}
       slashCommandResult={slashCommandResultForSession(
         selectedSession?.root_id || currentRootId,
@@ -12450,6 +12642,371 @@ export function App({ onGoHome }: AppProps) {
     });
   }
   kanbanStageColumns.sort((a, b) => a.index - b.index);
+  const renderKanbanTaskCard = (task: KanbanTask, columnName: string, detail?: TaskDetail, allTemplates = isAllTaskTemplateFilter, onNavigate?: () => void) => {
+    const isAllTaskTemplateFilter = allTemplates;
+                    const firstInput = detail?.stage_runs[0]?.input || taskFirstInputById[task.id] || "";
+                    const agentStage = taskAgentStage(task, taskTemplateById[task.task_template_id]);
+                    const agentBadge = agentStage?.agent ? (
+                      <span
+                        title={[agentStage.agent, agentStage.model].filter(Boolean).join(" / ")}
+                        aria-label={[agentStage.agent, agentStage.model].filter(Boolean).join(" / ")}
+                        style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10, color: "var(--text-secondary)" }}
+                      >
+                        <AgentIcon agentName={agentStage.agent} style={{ width: 14, height: 14, display: "block", flexShrink: 0 }} />
+                      </span>
+                    ) : null;
+                    const taskSessionKeys = detail?.stage_runs.some(run => run.session_key)
+                      ? [...new Set(detail.stage_runs.map(run => run.session_key).filter((key): key is string => Boolean(key)))]
+                      : taskSessionKeysById[task.id]?.length
+                      ? taskSessionKeysById[task.id]
+                      : task.main_session_key
+                        ? [task.main_session_key]
+                        : [];
+                    const taskSessionPending = taskSessionKeys.some((key) => !!sessionByKey[key]?.pending);
+                    const taskQueued = task.status === "queued";
+                    const taskCanRunImmediately = taskQueued && !task.scheduler_admitted && !taskSessionKeys.length;
+                    const auxFlags = task.aux_flags || {};
+                    const taskSessionError = parseTaskSessionErrorMessage(auxFlags.session_error);
+                    const taskSessionErrorDetails = parseTaskSessionErrorDetails(auxFlags.session_error);
+                    const taskAuxBadges = [
+                      auxFlags.ask_user_waiting ? { key: "ask_user", label: t("task.waitingUser"), icon: renderToolIcon("ask_user"), attention: true } : null,
+                      auxFlags.has_plan ? { key: "plan", label: t("task.hasPlan"), icon: <TaskPlanAuxIcon />, attention: false } : null,
+                      auxFlags.has_todos ? { key: "todos", label: t("task.hasTodos"), icon: renderToolIcon("todo"), attention: false } : null,
+                      auxFlags.has_task ? { key: "task", label: t("task.hasTask"), icon: renderToolIcon("task"), attention: false } : null,
+                    ].filter((item): item is { key: string; label: string; icon: React.ReactNode; attention: boolean } => Boolean(item));
+                    const inputExpanded = expandedTaskInputIds.has(task.id);
+                    const inputLayoutKey = `${detail ? "group" : "board"}:${task.id}`;
+                    const inputNeedsToggle = inputExpanded || overflowingTaskInputs.has(inputLayoutKey);
+                    const taskTerminal = isTerminalKanbanTask(task);
+                    const taskStageRunning = task.current_stage_status === "running";
+                    const taskCanComplete = !taskTerminal && task.status === "waiting_user" && isTaskAtLastKnownStage(task);
+                    const showTaskAdvanceButton = !taskTerminal && !taskStageRunning && !taskQueued;
+                    const taskStatusText = taskStatusLabel(task.status || "", t);
+                    const taskWorktreeEnabled = task.create_worktree === true;
+	                    const taskNumberLabel = task.task_number ? `#${task.task_number}` : "";
+	                    const taskStageName = task.current_stage_name || (task.current_stage_index >= 0 ? t("task.stageLabel", { index: task.current_stage_index + 1 }) : "");
+	                    const showStageName = isAllTaskTemplateFilter ? columnName === t("task.column.running") : Boolean(taskStageName);
+	                    const showTaskStatus = isAllTaskTemplateFilter && columnName === t("task.column.done");
+	                    const taskSelected = selectedKanbanTaskId === task.id;
+	                    return (
+	                      <article
+	                        key={task.id}
+	                        onClick={() => handleSelectKanbanTask(task)}
+	                        style={{
+	                          position: "relative",
+	                          border: taskSelected ? "1px solid rgba(14, 165, 233, 0.95)" : "1px solid rgba(96, 165, 250, 0.42)",
+	                          borderRadius: "8px",
+	                          background: "var(--menu-bg)",
+	                          padding: "8px",
+	                          boxShadow: taskSelected ? "0 0 0 2px rgba(14, 165, 233, 0.16)" : "0 1px 2px rgba(15, 23, 42, 0.06)",
+	                          cursor: "pointer",
+	                        }}
+	                      >
+                        {taskSessionPending ? (
+                          <span
+                            aria-label={t("task.replying")}
+                            title={t("task.replying")}
+                            style={taskReplyPulseStyle()}
+                          />
+                        ) : null}
+                        {isAllTaskTemplateFilter ? (
+                          <div
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: "5px",
+                              minWidth: 0,
+                              color: "var(--text-secondary)",
+                              fontSize: "10px",
+                              fontWeight: 700,
+                              lineHeight: "14px",
+                            }}
+                          >
+                            {taskNumberLabel ? (
+                              <span style={{ flex: "0 0 auto", color: "#0ea5e9", fontWeight: 800 }}>{taskNumberLabel}</span>
+                            ) : null}
+                            <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              {task.task_template_name || selectedTaskTemplateForFilter?.name || t("task.unnamedTemplate")}
+                            </span>
+                            {showStageName ? (
+                              <>
+                                <span style={{ flex: "0 0 auto", opacity: 0.55 }}>·</span>
+                                <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                  {taskStageName}
+                                </span>
+                              </>
+                            ) : null}
+	                            {showTaskStatus ? (
+	                              <>
+	                                <span style={{ flex: "0 0 auto", opacity: 0.55 }}>·</span>
+	                                <span style={{ flex: "0 0 auto" }}>{taskStatusText}</span>
+	                                {task.status === "fail" && taskSessionError ? (
+	                                  <button
+	                                    type="button"
+	                                    title={t("task.viewError")}
+	                                    aria-label={t("task.viewTaskError")}
+		                                    onClick={(event) => {
+		                                      event.stopPropagation();
+		                                      setTaskSessionErrorDialog({
+		                                        title: task.task_template_name || selectedTaskTemplateForFilter?.name || t("task.defaultTitle"),
+		                                        message: taskSessionError,
+		                                        details: taskSessionErrorDetails,
+		                                      });
+		                                    }}
+	                                    style={{ ...taskCardIconButtonStyle("warning"), width: "16px", height: "16px" }}
+	                                  >
+	                                    <TaskSessionErrorIcon />
+	                                  </button>
+	                                ) : null}
+	                              </>
+                            ) : null}
+                            <span
+                              title={taskWorktreeEnabled ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
+                              aria-label={taskWorktreeEnabled ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
+                              style={taskWorktreeTagStyle(taskWorktreeEnabled)}
+                            >
+                              {taskWorktreeEnabled ? null : <NoWorktreeIcon />}
+                              worktree
+                            </span>
+                            {agentBadge}
+                          </div>
+                        ) : null}
+                        <div
+                          style={{
+                            marginTop: isAllTaskTemplateFilter ? "5px" : 0,
+                            color: firstInput ? "var(--text-color)" : "var(--text-secondary)",
+                            fontSize: "12px",
+                            lineHeight: "18px",
+                            fontWeight: firstInput ? 700 : 500,
+                            ...(!isAllTaskTemplateFilter
+                              ? {
+                                  display: "flex",
+                                  alignItems: "flex-start",
+                                  gap: "6px",
+                                  minWidth: 0,
+                                }
+                              : {}),
+                          }}
+                        >
+                          <TaskCardText
+                            expanded={inputExpanded}
+                            onOverflowChange={overflow => setOverflowingTaskInputs(previous => {
+                              if (previous.has(inputLayoutKey) === overflow) return previous;
+                              const next = new Set(previous);
+                              if (overflow) next.add(inputLayoutKey);
+                              else next.delete(inputLayoutKey);
+                              return next;
+                            })}
+                            style={{
+                              ...(!isAllTaskTemplateFilter ? { flex: "1 1 auto", minWidth: 0 } : {}),
+                              whiteSpace: "pre-wrap",
+                              wordBreak: "break-word",
+                              ...(!inputExpanded
+                                ? {
+                                    display: "-webkit-box",
+                                    WebkitLineClamp: 3,
+                                    WebkitBoxOrient: "vertical",
+                                    overflow: "hidden",
+                                  }
+                                : {}),
+                            }}
+                          >
+                            {!isAllTaskTemplateFilter && taskNumberLabel ? (
+                              <span style={{ color: "#0ea5e9", fontWeight: 800, marginRight: "6px" }}>{taskNumberLabel}</span>
+                            ) : null}
+                            {firstInput ? <InlineTokenText content={firstInput} /> : <span>{t("task.noInput")}</span>}
+                          </TaskCardText>
+                          {!isAllTaskTemplateFilter ? (
+                            <span
+                              title={taskWorktreeEnabled ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
+                              aria-label={taskWorktreeEnabled ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
+                              style={taskWorktreeTagStyle(taskWorktreeEnabled)}
+                            >
+                              {taskWorktreeEnabled ? null : <NoWorktreeIcon />}
+                              worktree
+                            </span>
+                          ) : null}
+                          {!isAllTaskTemplateFilter && agentBadge}
+                        </div>
+                        {task.block_reason && <div style={{fontSize:11,color:"#b45309"}}>{task.block_reason}</div>}
+                        <div style={{ marginTop: "8px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "4px" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+                            {taskSessionKeys.length > 0 ? (
+                              taskSessionKeys.map((sessionKey, sessionIndex) => {
+                                const taskSession = sessionByKey[sessionKey] || null;
+                                return (
+                                  <button
+                                    key={`${task.id}-${sessionKey}`}
+                                    type="button"
+                                    title={taskSession?.name || t("task.openSession", { index: sessionIndex + 1 })}
+                                    aria-label={t("task.openSession", { index: sessionIndex + 1 })}
+	                                    onClick={(event) => {
+	                                      event.stopPropagation();
+	                                      onNavigate?.(); handleTaskSessionDrawerOpen(sessionKey, task.root_id || currentRootIdRef.current, task.id);
+	                                    }}
+                                    style={taskCardIconButtonStyle()}
+                                  >
+                                    <span
+                                      style={{
+                                        position: "relative",
+                                        width: "18px",
+                                        height: "18px",
+                                        display: "inline-flex",
+                                        alignItems: "center",
+                                        justifyContent: "center",
+                                      }}
+                                    >
+                                      <ModeIcon type="task" size={16} />
+                                      <span
+                                        style={{
+                                          position: "absolute",
+                                          right: "-2px",
+                                          bottom: "-2px",
+                                          width: "10px",
+                                          height: "10px",
+                                          borderRadius: "999px",
+                                          background: "var(--content-bg, #fff)",
+                                          border: "1px solid rgba(255,255,255,0.9)",
+                                          display: "flex",
+                                          alignItems: "center",
+                                          justifyContent: "center",
+                                          overflow: "hidden",
+                                        }}
+                                      >
+                                        <AgentIcon
+                                          agentName={taskSession?.agent || ""}
+                                          style={{ width: "10px", height: "10px", display: "block" }}
+                                        />
+                                      </span>
+                                    </span>
+                                  </button>
+                                );
+                              })
+                            ) : taskQueued ? (
+                              <>
+                                <span
+                                  title={t("task.waitingSchedule")}
+                                  aria-label={t("task.waitingSchedule")}
+                                  style={{
+                                    ...taskCardIconButtonStyle(),
+                                    cursor: "default",
+                                    color: "var(--accent-color)",
+                                  }}
+                                >
+                                  <TaskQueuedSpinnerIcon />
+                                </span>
+                                {taskCanRunImmediately ? (
+                                  <button
+                                    type="button"
+                                    title={t("task.runNow")}
+                                    aria-label={t("task.runNow")}
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      void handleMoveKanbanTask(task, "run-now");
+                                    }}
+                                    style={{
+                                      ...taskCardIconButtonStyle(),
+                                      width: "17px",
+                                      marginLeft: "-3px",
+                                      color: "#2563eb",
+                                    }}
+                                  >
+                                    <TaskRunNowIcon />
+                                  </button>
+                                ) : null}
+                              </>
+                            ) : null}
+	                            {taskSessionError && !(showTaskStatus && task.status === "fail") ? (
+                              <button
+                                type="button"
+                                title={t("task.viewError")}
+                                aria-label={t("task.viewTaskSessionError")}
+	                                onClick={(event) => {
+	                                  event.stopPropagation();
+	                                  setTaskSessionErrorDialog({
+	                                    title: task.task_template_name || selectedTaskTemplateForFilter?.name || t("task.sessionTitle"),
+	                                    message: taskSessionError,
+	                                    details: taskSessionErrorDetails,
+	                                  });
+	                                }}
+                                style={taskCardIconButtonStyle("warning")}
+                              >
+                                <TaskSessionErrorIcon />
+                              </button>
+                            ) : null}
+                            {taskAuxBadges.length > 0 ? (
+                              <div style={{ display: "inline-flex", alignItems: "center", gap: "2px" }}>
+                                {taskAuxBadges.map((badge) => (
+                                  <span
+                                    key={badge.key}
+                                    title={badge.label}
+                                    aria-label={badge.label}
+                                    style={taskAuxBadgeStyle(badge.attention)}
+                                  >
+                                    {badge.icon}
+                                  </span>
+                                ))}
+                              </div>
+                            ) : null}
+                            {inputNeedsToggle ? (
+                              <button
+                                type="button"
+                                title={inputExpanded ? t("common.collapse") : t("common.expand")}
+                                aria-label={inputExpanded ? t("task.collapseContent") : t("task.expandContent")}
+                                aria-expanded={inputExpanded}
+	                                onClick={(event) => {
+	                                  event.stopPropagation();
+	                                  setExpandedTaskInputIds((prev) => {
+                                    const next = new Set(prev);
+                                    if (next.has(task.id)) {
+                                      next.delete(task.id);
+                                    } else {
+                                      next.add(task.id);
+                                    }
+                                    return next;
+                                  });
+                                }}
+                                style={taskCardIconButtonStyle()}
+                              >
+                                <TaskExpandIcon collapsed={!inputExpanded} />
+                              </button>
+                            ) : null}
+                          </div>
+                          {!taskTerminal ? (
+                            <div style={{ display: "flex", justifyContent: "flex-end", gap: 0 }}>
+                              {showTaskAdvanceButton ? (
+                                <button
+                                  type="button"
+                                  title={taskCanComplete ? t("task.completeShort") : t("task.nextStage")}
+                                  aria-label={taskCanComplete ? t("task.complete") : t("task.nextStage")}
+	                                  onClick={(event) => {
+	                                    event.stopPropagation();
+	                                    void handleMoveKanbanTask(task, taskCanComplete ? "complete" : "next");
+	                                  }}
+                                  style={taskCardIconButtonStyle(taskCanComplete ? "success" : "accent")}
+                                >
+                                  {taskCanComplete ? <TaskCompleteIcon /> : <RunNowIcon />}
+                                </button>
+                              ) : null}
+	                              <button type="button" title={t("common.edit")} aria-label={t("task.edit")} onClick={(event) => {
+	                                event.stopPropagation();
+	                                onNavigate?.(); void openTaskEditDialog(task);
+	                              }} style={taskCardIconButtonStyle()}>
+                                {renderToolIcon("edit")}
+                              </button>
+	                              <button type="button" title={t("common.delete")} aria-label={t("task.delete")} onClick={(event) => {
+	                                event.stopPropagation();
+	                                void handleMoveKanbanTask(task, "cancel");
+	                              }} style={taskCardIconButtonStyle("danger")}>
+                                <DeleteIcon />
+                              </button>
+                            </div>
+                          ) : null}
+                        </div>
+	                      </article>
+	                    );
+
+  };
 	  const kanbanTaskPanel = currentRootId ? (
 	    <div
 	      data-onboarding="task-board"
@@ -12936,344 +13493,7 @@ export function App({ onGoHome }: AppProps) {
 	                          <span>{section.tasks.length}</span>
 	                        </button>
 	                      ) : null}
-	                      {!sectionCollapsed ? section.tasks.map((task) => {
-                    const firstInput = taskFirstInputById[task.id] || "";
-                    const taskSessionKeys = taskSessionKeysById[task.id]?.length
-                      ? taskSessionKeysById[task.id]
-                      : task.main_session_key
-                        ? [task.main_session_key]
-                        : [];
-                    const taskSessionPending = taskSessionKeys.some((key) => !!sessionByKey[key]?.pending);
-                    const taskQueued = task.status === "queued";
-                    const taskBlockedByConcurrency = taskQueued && !task.scheduler_admitted && !taskSessionKeys.length;
-                    const auxFlags = task.aux_flags || {};
-                    const taskSessionError = parseTaskSessionErrorMessage(auxFlags.session_error);
-                    const taskSessionErrorDetails = parseTaskSessionErrorDetails(auxFlags.session_error);
-                    const taskAuxBadges = [
-                      auxFlags.ask_user_waiting ? { key: "ask_user", label: t("task.waitingUser"), icon: renderToolIcon("ask_user"), attention: true } : null,
-                      auxFlags.has_plan ? { key: "plan", label: t("task.hasPlan"), icon: <TaskPlanAuxIcon />, attention: false } : null,
-                      auxFlags.has_todos ? { key: "todos", label: t("task.hasTodos"), icon: renderToolIcon("todo"), attention: false } : null,
-                      auxFlags.has_task ? { key: "task", label: t("task.hasTask"), icon: renderToolIcon("task"), attention: false } : null,
-                    ].filter((item): item is { key: string; label: string; icon: React.ReactNode; attention: boolean } => Boolean(item));
-                    const inputExpanded = expandedTaskInputIds.has(task.id);
-                    const inputNeedsToggle = firstInput.length > 120 || firstInput.split(/\r?\n/).length > 3;
-                    const taskTerminal = isTerminalKanbanTask(task);
-                    const taskStageRunning = task.current_stage_status === "running";
-                    const taskCanComplete = !taskTerminal && task.status === "waiting_user" && isTaskAtLastKnownStage(task);
-                    const showTaskAdvanceButton = !taskTerminal && !taskStageRunning && !taskQueued;
-                    const taskStatusText = taskStatusLabel(task.status || "", t);
-                    const taskWorktreeEnabled = task.create_worktree === true;
-	                    const taskNumberLabel = task.task_number ? `#${task.task_number}` : "";
-	                    const taskStageName = task.current_stage_name || (task.current_stage_index >= 0 ? t("task.stageLabel", { index: task.current_stage_index + 1 }) : "");
-	                    const showStageName = isAllTaskTemplateFilter ? column.name === t("task.column.running") : Boolean(taskStageName);
-	                    const showTaskStatus = isAllTaskTemplateFilter && column.name === t("task.column.done");
-	                    const taskSelected = selectedKanbanTaskId === task.id;
-	                    return (
-	                      <article
-	                        key={task.id}
-	                        onClick={() => handleSelectKanbanTask(task)}
-	                        style={{
-	                          position: "relative",
-	                          border: taskSelected ? "1px solid rgba(14, 165, 233, 0.95)" : "1px solid rgba(96, 165, 250, 0.42)",
-	                          borderRadius: "8px",
-	                          background: "var(--menu-bg)",
-	                          padding: "8px",
-	                          boxShadow: taskSelected ? "0 0 0 2px rgba(14, 165, 233, 0.16)" : "0 1px 2px rgba(15, 23, 42, 0.06)",
-	                          cursor: "pointer",
-	                        }}
-	                      >
-                        {taskSessionPending ? (
-                          <span
-                            aria-label={t("task.replying")}
-                            title={t("task.replying")}
-                            style={taskReplyPulseStyle()}
-                          />
-                        ) : null}
-                        {isAllTaskTemplateFilter ? (
-                          <div
-                            style={{
-                              display: "flex",
-                              alignItems: "center",
-                              gap: "5px",
-                              minWidth: 0,
-                              color: "var(--text-secondary)",
-                              fontSize: "10px",
-                              fontWeight: 700,
-                              lineHeight: "14px",
-                            }}
-                          >
-                            {taskNumberLabel ? (
-                              <span style={{ flex: "0 0 auto", color: "#0ea5e9", fontWeight: 800 }}>{taskNumberLabel}</span>
-                            ) : null}
-                            <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                              {task.task_template_name || selectedTaskTemplateForFilter?.name || t("task.unnamedTemplate")}
-                            </span>
-                            {showStageName ? (
-                              <>
-                                <span style={{ flex: "0 0 auto", opacity: 0.55 }}>·</span>
-                                <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                  {taskStageName}
-                                </span>
-                              </>
-                            ) : null}
-	                            {showTaskStatus ? (
-	                              <>
-	                                <span style={{ flex: "0 0 auto", opacity: 0.55 }}>·</span>
-	                                <span style={{ flex: "0 0 auto" }}>{taskStatusText}</span>
-	                                {task.status === "fail" && taskSessionError ? (
-	                                  <button
-	                                    type="button"
-	                                    title={t("task.viewError")}
-	                                    aria-label={t("task.viewTaskError")}
-		                                    onClick={(event) => {
-		                                      event.stopPropagation();
-		                                      setTaskSessionErrorDialog({
-		                                        title: task.task_template_name || selectedTaskTemplateForFilter?.name || t("task.defaultTitle"),
-		                                        message: taskSessionError,
-		                                        details: taskSessionErrorDetails,
-		                                      });
-		                                    }}
-	                                    style={{ ...taskCardIconButtonStyle("warning"), width: "16px", height: "16px" }}
-	                                  >
-	                                    <TaskSessionErrorIcon />
-	                                  </button>
-	                                ) : null}
-	                              </>
-                            ) : null}
-                            <span
-                              title={taskWorktreeEnabled ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
-                              aria-label={taskWorktreeEnabled ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
-                              style={taskWorktreeTagStyle(taskWorktreeEnabled)}
-                            >
-                              {taskWorktreeEnabled ? null : <NoWorktreeIcon />}
-                              worktree
-                            </span>
-                          </div>
-                        ) : null}
-                        <div
-                          style={{
-                            marginTop: isAllTaskTemplateFilter ? "5px" : 0,
-                            color: firstInput ? "var(--text-color)" : "var(--text-secondary)",
-                            fontSize: "12px",
-                            lineHeight: "18px",
-                            fontWeight: firstInput ? 700 : 500,
-                            ...(!isAllTaskTemplateFilter
-                              ? {
-                                  display: "flex",
-                                  alignItems: "flex-start",
-                                  gap: "6px",
-                                  minWidth: 0,
-                                }
-                              : {}),
-                          }}
-                        >
-                          <div
-                            style={{
-                              ...(!isAllTaskTemplateFilter ? { flex: "1 1 auto", minWidth: 0 } : {}),
-                              whiteSpace: "pre-wrap",
-                              wordBreak: "break-word",
-                              ...(!inputExpanded
-                                ? {
-                                    display: "-webkit-box",
-                                    WebkitLineClamp: 3,
-                                    WebkitBoxOrient: "vertical",
-                                    overflow: "hidden",
-                                  }
-                                : {}),
-                            }}
-                          >
-                            {!isAllTaskTemplateFilter && taskNumberLabel ? (
-                              <span style={{ color: "#0ea5e9", fontWeight: 800, marginRight: "6px" }}>{taskNumberLabel}</span>
-                            ) : null}
-                            {firstInput ? <InlineTokenText content={firstInput} /> : <span>{t("task.noInput")}</span>}
-                          </div>
-                          {!isAllTaskTemplateFilter ? (
-                            <span
-                              title={taskWorktreeEnabled ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
-                              aria-label={taskWorktreeEnabled ? t("task.worktreeTitle") : t("task.noWorktreeTitle")}
-                              style={taskWorktreeTagStyle(taskWorktreeEnabled)}
-                            >
-                              {taskWorktreeEnabled ? null : <NoWorktreeIcon />}
-                              worktree
-                            </span>
-                          ) : null}
-                        </div>
-                        <div style={{ marginTop: "8px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "4px" }}>
-                          <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
-                            {taskSessionKeys.length > 0 ? (
-                              taskSessionKeys.map((sessionKey, sessionIndex) => {
-                                const taskSession = sessionByKey[sessionKey] || null;
-                                return (
-                                  <button
-                                    key={`${task.id}-${sessionKey}`}
-                                    type="button"
-                                    title={taskSession?.name || t("task.openSession", { index: sessionIndex + 1 })}
-                                    aria-label={t("task.openSession", { index: sessionIndex + 1 })}
-	                                    onClick={(event) => {
-	                                      event.stopPropagation();
-	                                      handleTaskSessionDrawerOpen(sessionKey, task.root_id || currentRootIdRef.current, task.id);
-	                                    }}
-                                    style={taskCardIconButtonStyle()}
-                                  >
-                                    <span
-                                      style={{
-                                        position: "relative",
-                                        width: "18px",
-                                        height: "18px",
-                                        display: "inline-flex",
-                                        alignItems: "center",
-                                        justifyContent: "center",
-                                      }}
-                                    >
-                                      <ModeIcon type="task" size={16} />
-                                      <span
-                                        style={{
-                                          position: "absolute",
-                                          right: "-2px",
-                                          bottom: "-2px",
-                                          width: "10px",
-                                          height: "10px",
-                                          borderRadius: "999px",
-                                          background: "var(--content-bg, #fff)",
-                                          border: "1px solid rgba(255,255,255,0.9)",
-                                          display: "flex",
-                                          alignItems: "center",
-                                          justifyContent: "center",
-                                          overflow: "hidden",
-                                        }}
-                                      >
-                                        <AgentIcon
-                                          agentName={taskSession?.agent || ""}
-                                          style={{ width: "10px", height: "10px", display: "block" }}
-                                        />
-                                      </span>
-                                    </span>
-                                  </button>
-                                );
-                              })
-                            ) : taskQueued ? (
-                              <>
-                                <span
-                                  title={t("task.waitingSchedule")}
-                                  aria-label={t("task.waitingSchedule")}
-                                  style={{
-                                    ...taskCardIconButtonStyle(),
-                                    cursor: "default",
-                                    color: "var(--accent-color)",
-                                  }}
-                                >
-                                  <TaskQueuedSpinnerIcon />
-                                </span>
-                                {taskBlockedByConcurrency ? (
-                                  <button
-                                    type="button"
-                                    title={t("task.runNow")}
-                                    aria-label={t("task.runNow")}
-                                    onClick={(event) => {
-                                      event.stopPropagation();
-                                      void handleMoveKanbanTask(task, "run-now");
-                                    }}
-                                    style={{
-                                      ...taskCardIconButtonStyle(),
-                                      width: "17px",
-                                      marginLeft: "-3px",
-                                      color: "#2563eb",
-                                    }}
-                                  >
-                                    <TaskRunNowIcon />
-                                  </button>
-                                ) : null}
-                              </>
-                            ) : null}
-	                            {taskSessionError && !(showTaskStatus && task.status === "fail") ? (
-                              <button
-                                type="button"
-                                title={t("task.viewError")}
-                                aria-label={t("task.viewTaskSessionError")}
-	                                onClick={(event) => {
-	                                  event.stopPropagation();
-	                                  setTaskSessionErrorDialog({
-	                                    title: task.task_template_name || selectedTaskTemplateForFilter?.name || t("task.sessionTitle"),
-	                                    message: taskSessionError,
-	                                    details: taskSessionErrorDetails,
-	                                  });
-	                                }}
-                                style={taskCardIconButtonStyle("warning")}
-                              >
-                                <TaskSessionErrorIcon />
-                              </button>
-                            ) : null}
-                            {taskAuxBadges.length > 0 ? (
-                              <div style={{ display: "inline-flex", alignItems: "center", gap: "2px" }}>
-                                {taskAuxBadges.map((badge) => (
-                                  <span
-                                    key={badge.key}
-                                    title={badge.label}
-                                    aria-label={badge.label}
-                                    style={taskAuxBadgeStyle(badge.attention)}
-                                  >
-                                    {badge.icon}
-                                  </span>
-                                ))}
-                              </div>
-                            ) : null}
-                            {inputNeedsToggle ? (
-                              <button
-                                type="button"
-                                title={inputExpanded ? t("common.collapse") : t("common.expand")}
-                                aria-label={inputExpanded ? t("task.collapseContent") : t("task.expandContent")}
-	                                onClick={(event) => {
-	                                  event.stopPropagation();
-	                                  setExpandedTaskInputIds((prev) => {
-                                    const next = new Set(prev);
-                                    if (next.has(task.id)) {
-                                      next.delete(task.id);
-                                    } else {
-                                      next.add(task.id);
-                                    }
-                                    return next;
-                                  });
-                                }}
-                                style={taskCardIconButtonStyle()}
-                              >
-                                <TaskExpandIcon collapsed={!inputExpanded} />
-                              </button>
-                            ) : null}
-                          </div>
-                          {!taskTerminal ? (
-                            <div style={{ display: "flex", justifyContent: "flex-end", gap: 0 }}>
-                              {showTaskAdvanceButton ? (
-                                <button
-                                  type="button"
-                                  title={taskCanComplete ? t("task.completeShort") : t("task.nextStage")}
-                                  aria-label={taskCanComplete ? t("task.complete") : t("task.nextStage")}
-	                                  onClick={(event) => {
-	                                    event.stopPropagation();
-	                                    void handleMoveKanbanTask(task, taskCanComplete ? "complete" : "next");
-	                                  }}
-                                  style={taskCardIconButtonStyle(taskCanComplete ? "success" : "accent")}
-                                >
-                                  {taskCanComplete ? <TaskCompleteIcon /> : <RunNowIcon />}
-                                </button>
-                              ) : null}
-	                              <button type="button" title={t("common.edit")} aria-label={t("task.edit")} onClick={(event) => {
-	                                event.stopPropagation();
-	                                void openTaskEditDialog(task);
-	                              }} style={taskCardIconButtonStyle()}>
-                                {renderToolIcon("edit")}
-                              </button>
-	                              <button type="button" title={t("common.delete")} aria-label={t("task.delete")} onClick={(event) => {
-	                                event.stopPropagation();
-	                                void handleMoveKanbanTask(task, "cancel");
-	                              }} style={taskCardIconButtonStyle("danger")}>
-                                <DeleteIcon />
-                              </button>
-                            </div>
-                          ) : null}
-                        </div>
-	                      </article>
-	                    );
-	                  }) : null}
+	                      {!sectionCollapsed ? section.tasks.map(task => renderKanbanTaskCard(task, column.name)) : null}
 	                    </React.Fragment>
                       );
 	                  })}
@@ -13401,7 +13621,7 @@ export function App({ onGoHome }: AppProps) {
       />
     );
   } else if (file) {
-    if (pluginRender && pluginRender.output) {
+    if (pluginRender && pluginRender.output && !currentFileEditing) {
       workspaceView = (
         <div
           style={{
@@ -13481,7 +13701,7 @@ export function App({ onGoHome }: AppProps) {
             minHeight: 0,
           }}
         >
-          {pluginBypass && matchedPlugin ? (
+          {pluginBypass && matchedPlugin && !currentFileEditing ? (
             <div
               style={{
                 borderBottom: "1px solid var(--border-color)",
@@ -13547,6 +13767,30 @@ export function App({ onGoHome }: AppProps) {
           ) : null}
           <FileViewer
             file={file}
+            rootPath={managedRootByIdRef.current[file?.root || ""]?.root_path}
+            onFileOperationComplete={async () => {
+              if (!file?.root) return;
+              const parent = file.path.split("/").slice(0, -1).join("/") || ".";
+              clearFileCacheForRoot(file.root);
+              setEntriesByPath({});
+              await refreshTreeDir(file.root, parent, false);
+              await actionHandlers.open_dir({ root: file.root, path: parent === "." ? file.root : parent, isRoot: parent === ".", forceDirectory: true });
+              void refreshGitStatus(file.root);
+            }}
+            editStore={fileEditStore}
+            onFileUpdated={(next) => {
+              const current = fileRef.current;
+              if (current?.root === next.root && current?.path === next.path) {
+                setFile({ ...current, ...next, file_meta: current.file_meta });
+              }
+            }}
+            onFileSaved={(next) => {
+              const current = fileRef.current;
+              if (current?.root === next.root && current?.path === next.path) {
+                setFile({ ...current, ...next, file_meta: current.file_meta });
+              }
+              if (next.root) void refreshGitStatus(next.root);
+            }}
             isVisible={!selectedSession}
             onSelectionChange={handleViewerSelectionChange}
             initialScrollTop={
@@ -13573,6 +13817,16 @@ export function App({ onGoHome }: AppProps) {
     workspaceView = (
       <DefaultListView
         root={currentRootId || undefined}
+        rootPath={managedRootByIdRef.current[currentRootId || ""]?.root_path}
+        onFileOperationComplete={async () => {
+          if (!currentRootId) return;
+          const parent = (selectedDir || "").split("/").slice(0, -1).join("/") || ".";
+          clearFileCacheForRoot(currentRootId);
+          setEntriesByPath({});
+          await refreshTreeDir(currentRootId, parent, false);
+          await actionHandlers.open_dir({ root: currentRootId, path: parent === "." ? currentRootId : parent, isRoot: parent === ".", forceDirectory: true });
+          void refreshGitStatus(currentRootId);
+        }}
         path={selectedDir || ""}
         entries={currentMainContentView === "file-browser" ? visibleMainEntries : []}
         errorMessage={currentMainContentView === "file-browser" ? mainDirectoryError : ""}
@@ -13603,6 +13857,7 @@ export function App({ onGoHome }: AppProps) {
           });
         }}
         onUploadFiles={handleTreeUpload}
+        onCreateBlankFile={handleCreateBlankFile}
         onRenameRoot={handleRenameCurrentRoot}
         onRemoveRoot={handleRemoveCurrentRoot}
         isGitRepo={managedRootByIdRef.current[currentRootId || ""]?.is_git_repo === true}
@@ -13611,7 +13866,10 @@ export function App({ onGoHome }: AppProps) {
         onCreateWorktree={handleOpenWorktreeLocation}
         onSwitchWorktree={handleSwitchWorktreeStart}
         onRemoveWorktree={handleRemoveCurrentWorktree}
-        onOpenScheduledAgentTasks={() => setScheduledAgentDialogOpen(true)}
+        onOpenScheduledAgentTasks={() => {
+          setScheduledAgentSession(null);
+          setScheduledAgentDialogOpen(true);
+        }}
         menuOverlay={
           projectAddMode === "worktree_location"
             ? projectAddOverlay
@@ -14030,6 +14288,7 @@ export function App({ onGoHome }: AppProps) {
         onSync={handleSyncSession}
         onPin={handlePinSession}
         onRename={handleRenameSession}
+        onScheduledTask={openSessionScheduledTask}
         onDelete={handleDeleteSession}
         onProjectClick={(rootId) => {
           actionHandlers.open_dir({
@@ -14042,6 +14301,7 @@ export function App({ onGoHome }: AppProps) {
         }}
         onLoadMoreProject={loadMoreMultiProjectSessions}
         onLoadChildren={loadChildSessionsForParent}
+        onHandoffPack={handleHandoffPack}
       />
     ) : (
       <SessionList
@@ -14116,6 +14376,7 @@ export function App({ onGoHome }: AppProps) {
         onSync={handleSyncSession}
         onPin={handlePinSession}
         onRename={handleRenameSession}
+        onScheduledTask={openSessionScheduledTask}
         onDelete={handleDeleteSession}
         onLoadChildren={
           sessionSearchOpen && sessionSearchResultsMode
@@ -14137,6 +14398,7 @@ export function App({ onGoHome }: AppProps) {
             ? false
             : hasMoreSessions
         }
+        onHandoffPack={handleHandoffPack}
       />
     );
   const tokenStationBalanceText = tokenStationLoading
@@ -14306,6 +14568,9 @@ export function App({ onGoHome }: AppProps) {
         leftOpen={isLeftOpen}
         rightOpen={isRightOpen}
         sidebarsSwapped={sidebarsSwapped}
+        fileSidebarFontScale={fontSizePreferences.fileSidebar}
+        mainFontScale={fontSizePreferences.main}
+        sessionSidebarFontScale={fontSizePreferences.sessionSidebar}
         onCloseLeft={() => setIsLeftOpen(false)}
         onCloseRight={() => setIsRightOpen(false)}
         onOpenLeft={() => setIsLeftOpen(true)}
@@ -14343,14 +14608,15 @@ export function App({ onGoHome }: AppProps) {
               actionHandlers.open({ path: e.path, root: r });
               if (isMobile) setIsLeftOpen(false);
             }}
-            onSelectRoot={(e, r) =>
+            onSelectRoot={(e, r) => {
+              recordRecentDir({ rootId: r, path: e.path });
               actionHandlers.open_dir({
                 path: e.path,
                 root: r,
                 isRoot: e.is_root === true,
                 suppressTreeExpand: true,
-              })
-            }
+              });
+            }}
             onToggleDir={(e, r) =>
               actionHandlers.open_dir({
                 path: e.path,
@@ -14389,12 +14655,20 @@ export function App({ onGoHome }: AppProps) {
             showEnterKeySendOption={isMobile}
             enterKeySends={mobileEnterKeySends}
             onEnterKeySendsChange={setMobileEnterKeySends}
+            showSendShortcutOption={!isMobile}
+            sendShortcut={sendShortcut}
+            onSendShortcutChange={setSendShortcut}
             sidebarsSwapped={sidebarsSwapped}
             onSidebarsSwappedChange={setSidebarsSwapped}
+            blueRingGestures={blueRingGestures}
+            onBlueRingGesturesChange={setBlueRingGestures}
+            taskTemplates={taskTemplates.map((template) => ({ id: template.id || "", name: template.name || "" }))}
             gitDiffSideBySide={gitDiffSideBySide}
             onGitDiffSideBySideChange={setGitDiffSideBySide}
             multiProjectSessionsEnabled={multiProjectSessionsEnabled}
             onMultiProjectSessionsChange={setMultiProjectSessionsEnabled}
+            fontSizePreferences={fontSizePreferences}
+            onFontSizePreferencesChange={setFontSizePreferences}
             onRunAgentLifecycleCommand={handleRunAgentLifecycleCommand}
             onRestartAgent={handleRestartAgent}
             onGoHome={onGoHome}
@@ -14427,6 +14701,7 @@ export function App({ onGoHome }: AppProps) {
               <div
                 style={{
                   display: selectedSession ? "flex" : "none",
+                  flexDirection: "column",
                   flex: 1,
                   minHeight: 0,
                   minWidth: 0,
@@ -14471,17 +14746,67 @@ export function App({ onGoHome }: AppProps) {
               </div>
             ) : null}
             <ActionBar
+              onNewSession={() => {
+                const root = currentRootIdRef.current;
+                if (!root) return;
+                setPendingPlanMode(false);
+                selectedSessionRef.current = null;
+                currentSessionRef.current = null;
+                selectedSessionByRootRef.current[root] = null;
+                setSelectedSession(null);
+                setSelectedSessionLoading(false);
+                // 新建会话 = 回到空白首页：文件预览/diff 也一并退出，否则预览态无法快速返回
+                setFile(null);
+                setGitDiff(null);
+                setRelatedSelectedFileKey("");
+                // 目录视图保留 ?dir=：界面还停在原目录，URL 抹掉 dir 会让 F5 跳回根目录。
+                // key 对不上说明 selectedDirRef 还挂着旧 root 的目录（open_dir 拉树未返回），
+                // 此时宁可不带 dir，也不能把旧 root 的绝对路径塞进新 root 的 URL。
+                const dirCandidate = selectedDirRef.current && selectedDirRef.current !== root && selectedDirRef.current !== "."
+                  ? selectedDirRef.current
+                  : "";
+                const dir = dirCandidate && selectedDirKeyRef.current === buildDirectorySelectionKey(root, dirCandidate, false)
+                  ? dirCandidate
+                  : "";
+                replaceURLState({ root, file: "", session: "", cursor: 0, pluginQuery: {}, dir });
+                setDrawerSessionForRoot(root, null);
+                interactionModeRef.current = "main";
+                setInteractionMode("main");
+                setDrawerOpenForRoot(root, false);
+              }}
+              onSelectProject={(root) => {
+                void actionHandlers.open_dir({ path: root, root, isRoot: true, suppressTreeExpand: true });
+              }}
+              onSelectSession={(session) => { void handleSelectSession(session); }}
+              currentDirPath={selectedDir}
+              roots={managedRootIds.map((id) => ({ id, name: managedRootByIdRef.current[id]?.display_name || id }))}
+              onOpenRecentDirectory={(target) => {
+                if (!managedRootIdsRef.current.has(target.rootId)) return;
+                // 轮切目标不回写最近列表：该列表只收“手动点击”的目录，
+                // 否则每次轮切都会把目标顶到队首，永远在两个目录之间打转。
+                void actionHandlers.open_dir({
+                  path: target.path,
+                  root: target.rootId,
+                  isRoot: target.path === target.rootId,
+                  forceDirectory: true,
+                });
+              }}
+              onToggleMultiProjectSessions={() => setMultiProjectSessionsEnabled((value) => !value)}
+              onToggleEnterKeySends={() => setMobileEnterKeySends((value) => !value)}
+              onCycleMainFontScale={cycleMainFontScale}
+              onToggleMainContentView={toggleMainContentView}
+              onCycleKanbanTemplate={cycleKanbanTemplate}
+              onCreateTask={createTaskFromQuickAction}
+              onOpenScheduledTasks={openScheduledTasksFromQuickAction}
+              taskGroupBadge={actionBarSessionKey ? <TaskGroupPanel key={`${actionBarSession?.root_id || currentRootId}:${actionBarSessionKey}`} rootId={actionBarSession?.root_id || currentRootId || ""} sessionKey={actionBarSessionKey} renderTask={(detail, close) => renderKanbanTaskCard(detail.task, isTerminalKanbanTask(detail.task) ? t("task.column.done") : t("task.column.running"), detail, true, close)} /> : null}
               status={status}
               agentsVersion={agentsVersion}
               codexRateLimitsRefreshToken={codexRateLimitsRefreshToken}
               currentRootId={currentRootId}
               currentRootIsGitRepo={managedRootByIdRef.current[currentRootId || ""]?.is_git_repo === true}
-              currentSession={actionBarSession}
+              currentSession={actionBarSession ? { ...actionBarSession, name: actionBarSession.name || "", type: normalizeMode(actionBarSession.type), agent: actionBarSession.agent || "" } : null}
               pendingPlanMode={pendingPlanMode}
               attachedFileContext={attachedFileContext}
-              canOpenSessionDrawer={canOpenSessionDrawer}
-              sessionDrawerOpen={isDrawerOpen}
-              detachedBoundSession={detachedBoundSession}
               editDraftRequest={editDraftRequest}
               queuedMessages={actionBarQueuedMessages}
               inputHistory={actionBarInputHistory}
@@ -14492,32 +14817,13 @@ export function App({ onGoHome }: AppProps) {
               onUpdateQueuedMessage={handleUpdateQueuedMessage}
               onSendQueuedMessageNow={handleSendQueuedMessageNow}
               mobileEnterKeySends={mobileEnterKeySends}
-              onNewSession={handleNewSession}
+              sendShortcut={sendShortcut}
               onRequestFileContext={handleRequestFileContext}
               onClearFileContext={handleClearFileContext}
               onToggleLeftSidebar={() => setIsLeftOpen((v) => !v)}
               onToggleRightSidebar={() => setIsRightOpen((v) => !v)}
               sidebarsSwapped={sidebarsSwapped}
-              onSessionClick={() => {
-              const rootID = currentRootIdRef.current;
-              if (!activeBoundSessionKey) return;
-              const selectedKey =
-                selectedSession?.key || selectedSession?.session_key;
-              const isBoundSessionInMain =
-                selectedKey === activeBoundSessionKey &&
-                interactionMode !== "drawer";
-              if (isBoundSessionInMain) return;
-              const isDrawerCurrentlyOpen =
-                !!drawerOpenByRootRef.current[rootID || ""];
-              if (isDrawerCurrentlyOpen) {
-                interactionModeRef.current = "main";
-                setInteractionMode("main");
-                setDrawerOpenForRoot(rootID, false);
-                return;
-              }
-              setInteractionMode("drawer");
-              setDrawerOpenForRoot(rootID, true);
-              }}
+              blueRingGestures={blueRingGestures}
             />
           </div>
         }
@@ -14598,6 +14904,11 @@ export function App({ onGoHome }: AppProps) {
           </BottomSheet>
         }
       />
+      <HandoffPackDialog
+        session={handoffPackSession}
+        onClose={() => setHandoffPackSession(null)}
+        onInsert={handleHandoffPackInsert}
+      />
       {!isMobile ? <OnboardingTour
         open={onboardingOpen}
         isMobile={isMobile}
@@ -14605,6 +14916,7 @@ export function App({ onGoHome }: AppProps) {
         onComplete={() => {
           completeOnboarding();
           setOnboardingOpen(false);
+          setOnboardingMainContentViewRoot(null);
           if (isMobile) {
             setIsLeftOpen(false);
             setIsRightOpen(false);
@@ -14613,6 +14925,7 @@ export function App({ onGoHome }: AppProps) {
         onDismiss={() => {
           dismissOnboarding();
           setOnboardingOpen(false);
+          setOnboardingMainContentViewRoot(null);
           if (isMobile) {
             setIsLeftOpen(false);
             setIsRightOpen(false);
@@ -14675,9 +14988,9 @@ export function App({ onGoHome }: AppProps) {
                 outline: "none",
               }}
             />
-            {e2eePromptError ? (
+            {e2eePromptError || bootstrapState.error === "e2ee_rate_limited" ? (
               <div style={{ color: "#dc2626", fontSize: "13px" }}>
-                {e2eePromptError}
+                {e2eePromptError || t("e2ee.rateLimited")}
               </div>
             ) : null}
             <div style={{ display: "flex", justifyContent: "space-between", gap: "12px" }}>
@@ -14833,8 +15146,10 @@ export function App({ onGoHome }: AppProps) {
                     ) : null}
                   </>
                 ) : null}
+                {taskInlineEdit.canEditExecution ? <AgentSelector agent={taskInlineEdit.agent || "codex"} model={taskInlineEdit.model} agents={availableAgents} compact viewportMenu menuPlacement="bottom" onAgentChange={(agent,model)=>setTaskInlineEdit(prev=>prev?{...prev,agent,model:model||""}:prev)}/> : <span>{taskInlineEdit.agent} {taskInlineEdit.model}</span>}
               </div>
             </div>
+            {taskInlineEdit.createWorktree && taskInlineEdit.worktreeBranchMode === "new" && taskInlineEdit.canToggleWorktree && <input aria-label={t("task.newBranchName")} placeholder={t("task.newBranchName")} value={taskInlineEdit.worktreeBranch} onChange={e=>setTaskInlineEdit(prev=>prev?{...prev,worktreeBranch:e.target.value}:prev)} style={{margin:"8px 12px",padding:8}}/>}
             <div style={{ padding: "12px", overflow: "visible", position: "relative", minHeight: 0, display: "flex", flexDirection: "column" }}>
               {taskInlineActiveToken && taskInlineCandidates.length > 0 ? (
                 <div
@@ -15201,7 +15516,8 @@ export function App({ onGoHome }: AppProps) {
       ) : null}
       <ScheduledAgentTaskDialog
         open={scheduledAgentDialogOpen}
-        rootId={currentRootId}
+        rootId={scheduledAgentSession?.root_id || currentRootId}
+        session={scheduledAgentSession}
         agents={availableAgents}
         onClose={() => setScheduledAgentDialogOpen(false)}
       />

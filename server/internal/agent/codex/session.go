@@ -57,7 +57,7 @@ func NewRuntime() *Runtime {
 	return &Runtime{clients: make(map[string]*codexsdk.Codex)}
 }
 
-func (r *Runtime) OpenSession(_ context.Context, opts OpenOptions) (types.Session, error) {
+func (r *Runtime) OpenSession(ctx context.Context, opts OpenOptions) (types.Session, error) {
 	if opts.SessionKey == "" {
 		return nil, errors.New("session key required")
 	}
@@ -87,7 +87,7 @@ func (r *Runtime) OpenSession(_ context.Context, opts OpenOptions) (types.Sessio
 
 	var thread *codexsdk.Thread
 	if strings.TrimSpace(opts.ForkSessionID) != "" {
-		threadID, err := forkCodexThread(context.Background(), client, threadOptions, strings.TrimSpace(opts.ForkSessionID), opts.CodexUserOrdinal)
+		threadID, err := forkCodexThread(ctx, client, threadOptions, strings.TrimSpace(opts.ForkSessionID), opts.CodexUserOrdinal)
 		if err != nil {
 			return nil, err
 		}
@@ -106,6 +106,7 @@ func (r *Runtime) OpenSession(_ context.Context, opts OpenOptions) (types.Sessio
 		threadID = strings.TrimSpace(*id)
 	}
 	sess = &session{
+		agentName:     strings.TrimSpace(opts.AgentName),
 		client:        client,
 		thread:        thread,
 		threadOpts:    threadOptions,
@@ -131,14 +132,10 @@ func forkCodexThread(ctx context.Context, client *codexsdk.Codex, opts codexsdk.
 	if err != nil {
 		return "", err
 	}
-	var threadID string
-	if thread != nil && thread.ID() != nil {
-		threadID = strings.TrimSpace(*thread.ID())
-	}
-	if threadID == "" {
+	if thread == nil || thread.ID() == nil || strings.TrimSpace(*thread.ID()) == "" {
 		return "", errors.New("codex thread/fork did not return thread id")
 	}
-	return threadID, nil
+	return strings.TrimSpace(*thread.ID()), nil
 }
 
 func codexCollaborationMode(enabled bool) *codexsdk.CollaborationMode {
@@ -184,6 +181,22 @@ func (r *Runtime) getOrCreateClient(opts OpenOptions) *codexsdk.Codex {
 	client := newClient(opts)
 	r.clients[opts.AgentName] = client
 	return client
+}
+
+// ProcessIDs returns the app-server PID keyed by configured agent.
+func (r *Runtime) ProcessIDs() map[string]int {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make(map[string]int, len(r.clients))
+	for agentName, client := range r.clients {
+		if pid := client.ProcessID(); pid > 0 {
+			out[agentName] = pid
+		}
+	}
+	return out
 }
 
 func newClient(opts OpenOptions) *codexsdk.Codex {
@@ -274,6 +287,7 @@ func cloneStringMap(src map[string]string) map[string]string {
 }
 
 type session struct {
+	agentName  string
 	client     *codexsdk.Codex
 	thread     *codexsdk.Thread
 	threadOpts codexsdk.ThreadOptions
@@ -450,10 +464,11 @@ func (s *session) handleStreamedEvents(events <-chan codexsdk.ThreadEvent) error
 			s.updateThreadIDFromThread()
 			log.Printf("[agent/codex] output.done session=%s", s.sessionKey)
 			contextWindow, _ := s.ContextWindow(context.Background())
+			tokenUsage := codexTokenUsage(e.Usage)
 			s.emit(types.Event{
 				Type:      types.EventTypeMessageDone,
 				SessionID: s.SessionID(),
-				Data:      types.MessageDone{ContextWindow: contextWindow},
+				Data:      types.MessageDone{ContextWindow: contextWindow, TokenUsage: tokenUsage},
 			})
 		case *codexsdk.TurnFailedEvent:
 			log.Printf("[agent/codex] send.error session=%s err=%s raw=%s", s.sessionKey, e.Error.Message, string(raw))
@@ -825,6 +840,7 @@ func (s *session) ListModels(ctx context.Context) (types.ModelList, error) {
 	if strings.TrimSpace(defaults.Model) != "" {
 		currentModelID = strings.TrimSpace(defaults.Model)
 	}
+	models = supplementSavedProviderModels(s.agentName, models)
 	return types.ModelList{
 		CurrentModelID: currentModelID,
 		Models:         models,
@@ -1152,6 +1168,21 @@ func parseContextWindow(raw json.RawMessage) (types.ContextWindow, bool) {
 	}, true
 }
 
+func codexTokenUsage(usage codexsdk.Usage) *types.TokenUsage {
+	inputTokens := max(0, usage.InputTokens)
+	outputTokens := max(0, usage.OutputTokens)
+	cacheReadTokens := max(0, usage.CachedInputTokens)
+	if inputTokens == 0 && outputTokens == 0 && cacheReadTokens == 0 {
+		return nil
+	}
+	inputTokens = max(inputTokens, cacheReadTokens)
+	return &types.TokenUsage{
+		InputTokens:     inputTokens,
+		OutputTokens:    outputTokens,
+		CacheReadTokens: &cacheReadTokens,
+	}
+}
+
 func messageDelta(prev, next string) string {
 	if next == "" {
 		return ""
@@ -1215,7 +1246,6 @@ func mapToolItem(item codexsdk.ThreadItem, started bool) (types.ToolCall, bool) 
 		}
 		return types.ToolCall{
 			CallID:    v.ID,
-			Title:     "Update files",
 			Status:    status,
 			Kind:      types.ToolKindEdit,
 			Locations: locations,

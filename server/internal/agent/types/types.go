@@ -102,6 +102,16 @@ type ContextWindow struct {
 	ModelContextWindow int `json:"modelContextWindow"`
 }
 
+// TokenUsage is the normalized usage for one agent turn. InputTokens is the
+// logical input size before cache discounts. CacheReadTokens is nil when the
+// backend does not report cache telemetry.
+type TokenUsage struct {
+	InputTokens      int  `json:"inputTokens"`
+	OutputTokens     int  `json:"outputTokens"`
+	CacheReadTokens  *int `json:"cacheReadTokens,omitempty"`
+	CacheWriteTokens *int `json:"cacheWriteTokens,omitempty"`
+}
+
 type OpenSessionInput struct {
 	SessionKey            string
 	AgentName             string
@@ -162,10 +172,14 @@ type ImportExternalSessionInput struct {
 	AgentSessionID string
 	AfterTimestamp time.Time
 	Cursor         ExternalSessionCursor
+	// LookupCursor is supplied only for automatic sync, for independent child logs.
+	LookupCursor func(agentSessionID string) (ExternalSessionCursor, error)
 }
 
 type ExternalSessionCursor struct {
-	SourcePath      string
+	SourcePath string
+	// Offset is the size of the successfully synchronized file snapshot.
+	// Incremental parser offsets/state are maintained separately in historycache.
 	Offset          int64
 	ModTimeUnixNano int64
 }
@@ -207,6 +221,8 @@ type ImportedSubagentSession struct {
 	Title                string
 	Model                string
 	Exchanges            []ImportedExchange
+	Cursor               ExternalSessionCursor
+	Unchanged            bool
 }
 
 type ExternalSessionImporter interface {
@@ -297,6 +313,7 @@ type ThoughtChunk struct {
 
 type MessageDone struct {
 	ContextWindow   ContextWindow `json:"contextWindow"`
+	TokenUsage      *TokenUsage   `json:"tokenUsage,omitempty"`
 	ParentToolUseID string        `json:"parentToolUseId,omitempty"`
 	TaskID          string        `json:"taskId,omitempty"`
 	SubagentType    string        `json:"subagentType,omitempty"`

@@ -669,7 +669,9 @@ func copyForkHistory(ctx context.Context, manager *session.Manager, from, to *se
 		if agentName == "" {
 			agentName = strings.TrimSpace(fallbackAgent)
 		}
-		if err := manager.AddExchangeForAgentAt(ctx, to, exchange.Role, exchange.Content, agentName, exchange.Mode, exchange.Effort, exchange.FastService, exchange.Timestamp); err != nil {
+		exchangeCtx := session.WithExchangeModelDisplayName(ctx, exchange.ModelDisplayName)
+		exchangeCtx = session.WithExchangeTokenUsage(exchangeCtx, exchange.TokenUsage)
+		if err := manager.AddExchangeForAgentAt(exchangeCtx, to, exchange.Role, exchange.Content, agentName, exchange.Mode, exchange.Effort, exchange.FastService, exchange.Timestamp); err != nil {
 			return copied, err
 		}
 		copied++
@@ -696,9 +698,10 @@ func copyForkHistory(ctx context.Context, manager *session.Manager, from, to *se
 }
 
 type GetSessionInput struct {
-	RootID string
-	Key    string
-	Seq    int
+	RootID          string
+	Key             string
+	Seq             int
+	HistoryRevision int
 }
 
 func (s *Service) GetSession(ctx context.Context, in GetSessionInput) (*session.Session, error) {
@@ -709,13 +712,52 @@ func (s *Service) GetSession(ctx context.Context, in GetSessionInput) (*session.
 	if err != nil {
 		return nil, err
 	}
-	return manager.Get(ctx, in.Key, in.Seq)
+	current, err := manager.Get(ctx, in.Key, in.Seq)
+	if err == nil && in.Seq > 0 && current.HistoryRevision != in.HistoryRevision {
+		return manager.Get(ctx, in.Key, 0)
+	}
+	return current, err
 }
 
 type GetSessionExchangeAuxInput struct {
 	RootID string
 	Key    string
 	Seq    int
+}
+
+type SessionLogPath struct {
+	Path           string
+	AgentSessionID string
+}
+
+func (s *Service) GetSessionLogPath(ctx context.Context, in GetSessionInput) (SessionLogPath, error) {
+	if err := s.ensureRegistry(); err != nil {
+		return SessionLogPath{}, err
+	}
+	manager, err := s.Registry.GetSessionManager(in.RootID)
+	if err != nil {
+		return SessionLogPath{}, err
+	}
+	current, err := manager.Get(ctx, in.Key, 0)
+	if err != nil {
+		return SessionLogPath{}, err
+	}
+	path := manager.ExchangeLogAbsolutePath(in.Key)
+	if path == "" {
+		return SessionLogPath{}, errors.New("session log path unavailable")
+	}
+	out := SessionLogPath{Path: path}
+	agentName := strings.TrimSpace(session.InferAgentFromSession(current))
+	if agentName != "" {
+		binding, err := manager.FindAgentBinding(ctx, in.Key, agentName)
+		if err != nil {
+			// 静默降级为空 agent_session_id，但留日志便于排查接力包缺 ID 的反馈
+			log.Printf("[session] FindAgentBinding failed for %s/%s: %v", in.RootID, in.Key, err)
+		} else if binding != nil {
+			out.AgentSessionID = strings.TrimSpace(binding.AgentSessionID)
+		}
+	}
+	return out, nil
 }
 
 func (s *Service) GetSessionExchangeAux(ctx context.Context, in GetSessionExchangeAuxInput) (map[int][]session.ExchangeAux, error) {
@@ -935,7 +977,46 @@ func (s *Service) DeleteSession(ctx context.Context, in DeleteSessionInput) erro
 	for _, key := range keys {
 		cancelActiveSessionTurn(in.RootID, key)
 	}
+	if cleaner, ok := s.Registry.(interface {
+		DeleteSessionTaskGroups(context.Context, string, []string) ([]string, error)
+	}); ok {
+		executionKeys, err := cleaner.DeleteSessionTaskGroups(ctx, in.RootID, keys)
+		if err != nil {
+			return err
+		}
+		metas, err := manager.ListMetas(ctx)
+		if err != nil {
+			return err
+		}
+		existing := map[string]bool{}
+		for _, meta := range metas {
+			if meta != nil {
+				existing[meta.Key] = true
+			}
+		}
+		seen := map[string]bool{}
+		for _, key := range keys {
+			seen[key] = true
+		}
+		for _, key := range executionKeys {
+			if !existing[key] || seen[key] {
+				continue
+			}
+			children, err := deleteSessionCascadeKeys(ctx, manager, key)
+			if err != nil {
+				return err
+			}
+			for _, child := range children {
+				if !seen[child] {
+					keys = append(keys, child)
+					seen[child] = true
+				}
+			}
+		}
+	}
 	for _, key := range keys {
+		cancelActiveSessionTurn(in.RootID, key)
+
 		if err := manager.Delete(ctx, key); err != nil {
 			return err
 		}
@@ -1065,6 +1146,13 @@ func (s *Service) BuildPrompt(in BuildPromptInput) string {
 		prompt = buildPluginPrompt(clientCtx.PluginCatalog, in.Message, in.IsInitial, pluginDir)
 	} else if in.IsInitial && in.IncludeReplyTipsInUserMessage {
 		prompt = appendReplyTips(prompt)
+	}
+	if in.IsInitial && in.Manager != nil && in.Session != nil {
+		prompt += fmt.Sprintf("\n\nMindFS context: root_id=%s session_key=%s", in.Manager.Root().ID, in.Session.Key)
+		if in.Session.TaskID != "" {
+			prompt += " task_id=" + in.Session.TaskID
+		}
+		prompt += ". Use MindFS task orchestration only when the user explicitly requests it or clearly expresses intent to use it. General requests to plan, split, or execute work, task complexity, and the presence of this context do not imply that intent. Only when that intent is clear, read mindfs -orchestration; create a task group with this parent session_key, then create ordinary template tasks in that group.\n"
 	}
 	return prependSwitchHint(in, prompt)
 }
@@ -1434,6 +1522,9 @@ func (s *Service) SuggestSessionName(ctx context.Context, in SuggestSessionNameI
 	model := strings.TrimSpace(in.Model)
 	if prefs := s.Registry.GetPreferences(); prefs != nil {
 		namingDefaults := prefs.SessionNamingDefaults()
+		if namingDefaults.Disabled {
+			return nil, nil
+		}
 		if strings.TrimSpace(namingDefaults.Agent) != "" {
 			agentName = strings.TrimSpace(namingDefaults.Agent)
 			model = strings.TrimSpace(namingDefaults.Model)
@@ -2240,6 +2331,7 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 	var responseText string
 	sawAssistantChunk := false
 	var lastContextWindow agenttypes.ContextWindow
+	var turnTokenUsage *agenttypes.TokenUsage
 	plannedAssistantSeq := len(current.Exchanges) + 2
 	auxBuffer := make([]session.ExchangeAux, 0, 8)
 	defer manager.ClearPendingExchangeAux(context.Background(), current.Key)
@@ -2377,6 +2469,7 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 			} else if update.Type == agenttypes.EventTypeMessageDone {
 				if done, ok := update.Data.(agenttypes.MessageDone); ok {
 					lastContextWindow = done.ContextWindow
+					turnTokenUsage = done.TokenUsage
 				}
 			} else if update.Type == agenttypes.EventTypeThoughtChunk ||
 				update.Type == agenttypes.EventTypeToolCall ||
@@ -2495,6 +2588,7 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 	}
 	modelDisplayName := s.resolveExchangeModelDisplayName(in.Agent, resolvedModel)
 	exchangeCtx := session.WithExchangeModelDisplayName(ctx, modelDisplayName)
+	agentExchangeCtx := session.WithExchangeTokenUsage(exchangeCtx, turnTokenUsage)
 	if strings.TrimSpace(in.Agent) == "codex" {
 		if modelSpecified {
 			if err := manager.UpdateModel(ctx, current, preferredModel); err != nil {
@@ -2508,7 +2602,7 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 		log.Printf("[session] persist.user.error root=%s session=%s agent=%s err=%v", in.RootID, current.Key, in.Agent, err)
 		return err
 	}
-	if err := manager.AddExchangeForAgent(exchangeCtx, current, "agent", responseText, in.Agent, resolvedMode, resolvedEffort, resolvedFastService); err != nil {
+	if err := manager.AddExchangeForAgent(agentExchangeCtx, current, "agent", responseText, in.Agent, resolvedMode, resolvedEffort, resolvedFastService); err != nil {
 		log.Printf("[session] persist.agent.error root=%s session=%s agent=%s err=%v", in.RootID, current.Key, in.Agent, err)
 		return err
 	}
@@ -3705,6 +3799,9 @@ func (s *Service) AnswerQuestion(ctx context.Context, in AnswerQuestionInput) er
 }
 
 func currentAssistantLine(responseText string) int {
+	// Anchor auxiliary events after the last text line, before trailing empty
+	// lines that may be filled by subsequent chunks. Leave the response intact.
+	responseText = strings.TrimRight(responseText, "\n")
 	if responseText == "" {
 		return 0
 	}
@@ -4134,4 +4231,10 @@ func (s *Service) CancelSessionTurn(ctx context.Context, in CancelSessionTurnInp
 	}
 	active.cancel()
 	return nil
+}
+
+// SessionTurnActive lets background orchestration defer while the user is chatting.
+// SendMessage's existing per-session lock remains the final serialization guard.
+func SessionTurnActive(rootID, sessionKey string) bool {
+	return getActiveTurn(rootID, sessionKey) != nil
 }

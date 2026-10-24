@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,7 +34,10 @@ type Store struct {
 }
 
 type UserPreferences struct {
+	AgentPinnedModels               map[string][]string        `json:"agent_pinned_models,omitempty"`
+	LauncherNodes                   []LauncherNode             `json:"launcher_nodes,omitempty"`
 	Agents                          map[string]AgentDefaults   `json:"agents,omitempty"`
+	LastAgent                       string                     `json:"last_agent,omitempty"`
 	RateLimitRetry                  *RateLimitRetryPreferences `json:"rate_limit_retry,omitempty"`
 	SessionNaming                   SessionNamingDefaults      `json:"session_naming,omitempty"`
 	IdleSessionResourceReleaseHours int                        `json:"idle_session_resource_release_hours,omitempty"`
@@ -55,6 +59,48 @@ type RateLimitRetryPatch struct {
 	Enabled          bool
 	BaseDelaySeconds int
 	IncrementSeconds int
+}
+
+type LauncherNode struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	URL       string `json:"url"`
+	CreatedAt string `json:"createdAt"`
+}
+
+func (s *Store) LauncherNodes() []LauncherNode {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]LauncherNode{}, s.data.LauncherNodes...)
+}
+
+func (s *Store) UpdateLauncherNodes(nodes []LauncherNode) error {
+	if len(nodes) > 1000 {
+		return errors.New("too many nodes")
+	}
+	next := append([]LauncherNode{}, nodes...)
+	ids, urls := map[string]bool{}, map[string]bool{}
+	for i := range next {
+		n := &next[i]
+		n.ID, n.Name, n.URL = strings.TrimSpace(n.ID), strings.TrimSpace(n.Name), strings.TrimSpace(n.URL)
+		u, err := url.Parse(n.URL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || n.ID == "" || n.Name == "" || n.CreatedAt == "" {
+			return errors.New("invalid node: name, id, creation time and HTTP(S) URL are required")
+		}
+		if ids[n.ID] || urls[n.URL] {
+			return errors.New("duplicate node")
+		}
+		ids[n.ID], urls[n.URL] = true, true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	previous := s.data.LauncherNodes
+	s.data.LauncherNodes = next
+	if err := s.saveLocked(); err != nil {
+		s.data.LauncherNodes = previous
+		return err
+	}
+	return nil
 }
 
 func (s *Store) NewProjectMetaLocation() string {
@@ -115,8 +161,9 @@ func (s *Store) UpdateIdleSessionResourceReleaseHours(hours int) error {
 }
 
 type SessionNamingDefaults struct {
-	Agent string `json:"agent,omitempty"`
-	Model string `json:"model,omitempty"`
+	Agent    string `json:"agent,omitempty"`
+	Model    string `json:"model,omitempty"`
+	Disabled bool   `json:"disabled,omitempty"`
 }
 
 type AgentDefaults struct {
@@ -329,11 +376,20 @@ func (s *Store) UpdateAgentDefaultsIfChanged(agentName string, patch AgentDefaul
 	if patch.FastService != "" {
 		next.FastService = patch.FastService
 	}
-	if s.data.Agents[agentName] == next {
+	if s.data.Agents[agentName] == next && s.data.LastAgent == agentName {
 		return false, nil
 	}
+	previousDefaults, existed := s.data.Agents[agentName]
+	previousAgent := s.data.LastAgent
 	s.data.Agents[agentName] = next
+	s.data.LastAgent = agentName
 	if err := s.saveLocked(); err != nil {
+		if existed {
+			s.data.Agents[agentName] = previousDefaults
+		} else {
+			delete(s.data.Agents, agentName)
+		}
+		s.data.LastAgent = previousAgent
 		return false, err
 	}
 	return true, nil
@@ -365,6 +421,24 @@ func (s *Store) UpdateAgentLastConfigSelection(agentName string, selection LastC
 	return s.saveLocked()
 }
 
+// AgentLastConfigSelections returns a snapshot of every agent's last manual
+// config selection keyed by agent name. Callers must treat the result as
+// read-only.
+func (s *Store) AgentLastConfigSelections() map[string]LastConfigSelection {
+	out := map[string]LastConfigSelection{}
+	if s == nil {
+		return out
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for name, defaults := range s.data.Agents {
+		if defaults.LastConfigSelection != nil {
+			out[strings.TrimSpace(name)] = *defaults.LastConfigSelection
+		}
+	}
+	return out
+}
+
 func (s *Store) SessionNamingDefaults() SessionNamingDefaults {
 	if s == nil {
 		return SessionNamingDefaults{}
@@ -374,15 +448,16 @@ func (s *Store) SessionNamingDefaults() SessionNamingDefaults {
 	return s.data.SessionNaming
 }
 
-func (s *Store) UpdateSessionNamingDefaults(agentName, model string) error {
+func (s *Store) UpdateSessionNamingDefaults(agentName, model string, disabled bool) error {
 	if s == nil {
 		return nil
 	}
 	next := SessionNamingDefaults{
-		Agent: strings.TrimSpace(agentName),
-		Model: strings.TrimSpace(model),
+		Agent:    strings.TrimSpace(agentName),
+		Model:    strings.TrimSpace(model),
+		Disabled: disabled,
 	}
-	if next.Agent == "" {
+	if next.Agent == "" && !next.Disabled {
 		return errors.New("session naming agent is required")
 	}
 	s.mu.Lock()
@@ -400,15 +475,15 @@ func (s *Store) ApplyAgentDefaults(statuses []agent.Status) []agent.Status {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if len(s.data.Agents) == 0 {
+	if len(s.data.Agents) == 0 && s.data.LastAgent == "" && len(s.data.AgentPinnedModels) == 0 {
 		return statuses
 	}
 	out := append([]agent.Status(nil), statuses...)
 	for i := range out {
-		defaults, hasDefaults := s.data.Agents[strings.TrimSpace(out[i].Name)]
-		if !hasDefaults {
-			continue
-		}
+		name := strings.TrimSpace(out[i].Name)
+		out[i].PinnedModels = append([]string{}, s.data.AgentPinnedModels[name]...)
+		out[i].LastUsed = s.data.LastAgent == name
+		defaults := s.data.Agents[name]
 		// Codex follows ~/.codex/config.toml unless the user explicitly
 		// selected a model (stored as a non-empty preference).
 		if strings.TrimSpace(out[i].Name) == "codex" {

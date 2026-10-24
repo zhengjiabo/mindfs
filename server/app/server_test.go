@@ -10,6 +10,7 @@ import (
 
 	"mindfs/server/internal/agent"
 	"mindfs/server/internal/fs"
+	"mindfs/server/internal/testutil"
 )
 
 func TestResolveUpdateRepoUsesDefaultWhenEnvUnset(t *testing.T) {
@@ -124,7 +125,7 @@ func TestAutoAddExternalProjectRootsSkipsGitWorktrees(t *testing.T) {
 		t.Fatalf("write global state: %v", err)
 	}
 	t.Setenv("CODEX_HOME", codexHome)
-	t.Setenv("HOME", filepath.Join(workspace, "home"))
+	testutil.IsolateUserDirs(t, filepath.Join(workspace, "home"))
 	t.Setenv("TMPDIR", filepath.Join(workspace, "tmp"))
 
 	registry := fs.NewRegistry(filepath.Join(workspace, "registry.json"))

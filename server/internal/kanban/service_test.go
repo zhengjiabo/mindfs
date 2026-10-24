@@ -201,6 +201,7 @@ func TestCreateTaskAutoAdvanceControlsQueueAdmission(t *testing.T) {
 	root := fs.NewRootInfo("root", "root", t.TempDir())
 	store := NewTemplateStoreAt(t.TempDir())
 	svc := NewService(store, testRoots{root: root})
+	t.Cleanup(svc.Close)
 
 	manual, err := store.SaveTaskTemplate(TaskTemplate{
 		Name: "Manual",
@@ -273,6 +274,7 @@ func TestNextRequiresCurrentUserInputWhenTargetReferencesIt(t *testing.T) {
 	root := fs.NewRootInfo("root", "root", t.TempDir())
 	store := NewTemplateStoreAt(t.TempDir())
 	svc := NewService(store, testRoots{root: root})
+	t.Cleanup(svc.Close)
 	runner := &fakeRunner{}
 	svc.SetRunner(runner)
 	tmpl, err := store.SaveTaskTemplate(TaskTemplate{
@@ -325,6 +327,7 @@ func TestNextAllowsEmptyInputWhenTargetDoesNotReferenceIt(t *testing.T) {
 	root := fs.NewRootInfo("root", "root", t.TempDir())
 	store := NewTemplateStoreAt(t.TempDir())
 	svc := NewService(store, testRoots{root: root})
+	t.Cleanup(svc.Close)
 	runner := &fakeRunner{}
 	svc.SetRunner(runner)
 	tmpl, err := store.SaveTaskTemplate(TaskTemplate{
@@ -368,6 +371,7 @@ func TestNextRequiresCurrentInputFromAgentStageWhenTargetReferencesIt(t *testing
 	root := fs.NewRootInfo("root", "root", t.TempDir())
 	store := NewTemplateStoreAt(t.TempDir())
 	svc := NewService(store, testRoots{root: root})
+	t.Cleanup(svc.Close)
 	runner := &fakeRunner{}
 	svc.SetRunner(runner)
 	tmpl, err := store.SaveTaskTemplate(TaskTemplate{
@@ -439,6 +443,7 @@ func TestTaskCreateWorktreeIsTaskScoped(t *testing.T) {
 	root := fs.NewRootInfo("root", "root", t.TempDir())
 	store := NewTemplateStoreAt(t.TempDir())
 	svc := NewService(store, testRoots{root: root})
+	t.Cleanup(svc.Close)
 
 	tmpl, err := store.SaveTaskTemplate(TaskTemplate{
 		Name: "Task scoped worktree",
@@ -486,6 +491,7 @@ func TestTaskTemplateEditBlockedByUnfinishedTasksExceptConcurrency(t *testing.T)
 	root := fs.NewRootInfo("root", "root", t.TempDir())
 	store := NewTemplateStoreAt(t.TempDir())
 	svc := NewService(store, testRoots{root: root})
+	t.Cleanup(svc.Close)
 
 	tmpl, err := store.SaveTaskTemplate(TaskTemplate{
 		Name:           "Bug fix",
@@ -528,6 +534,7 @@ func TestTaskWorktreeNameUsesTaskNumber(t *testing.T) {
 	root := fs.NewRootInfo("root", "root", t.TempDir())
 	store := NewTemplateStoreAt(t.TempDir())
 	svc := NewService(store, testRoots{root: root})
+	t.Cleanup(svc.Close)
 	runner := &fakeRunner{}
 	svc.SetRunner(runner)
 
@@ -607,6 +614,7 @@ func TestTaskWorktreeCreateErrorStoredOnTask(t *testing.T) {
 	root := fs.NewRootInfo("root", "root", t.TempDir())
 	store := NewTemplateStoreAt(t.TempDir())
 	svc := NewService(store, testRoots{root: root})
+	t.Cleanup(svc.Close)
 	runner := &fakeRunner{worktreeErr: errors.New("git worktree add failed")}
 	svc.SetRunner(runner)
 
@@ -675,6 +683,7 @@ func TestUpdateCurrentInputKeepsPreviousStageInput(t *testing.T) {
 	root := fs.NewRootInfo("root", "root", t.TempDir())
 	store := NewTemplateStoreAt(t.TempDir())
 	svc := NewService(store, testRoots{root: root})
+	t.Cleanup(svc.Close)
 
 	tmpl, err := store.SaveTaskTemplate(TaskTemplate{
 		Name: "Current input",
@@ -738,6 +747,7 @@ func TestCompleteFinalWaitingTask(t *testing.T) {
 	root := fs.NewRootInfo("root", "root", t.TempDir())
 	store := NewTemplateStoreAt(t.TempDir())
 	svc := NewService(store, testRoots{root: root})
+	t.Cleanup(svc.Close)
 
 	tmpl, err := store.SaveTaskTemplate(TaskTemplate{
 		Name: "Final review",
@@ -780,6 +790,7 @@ func TestTaskNumbersIncrement(t *testing.T) {
 	root := fs.NewRootInfo("root", "root", t.TempDir())
 	store := NewTemplateStoreAt(t.TempDir())
 	svc := NewService(store, testRoots{root: root})
+	t.Cleanup(svc.Close)
 	tmpl, err := store.SaveTaskTemplate(TaskTemplate{
 		Name: "Numbered",
 		Stages: []TaskTemplateStage{{
@@ -813,33 +824,23 @@ func TestTaskNumbersIncrement(t *testing.T) {
 	}
 }
 
-func TestBuildAgentPromptAppendsOnlyConfiguredContext(t *testing.T) {
+func TestBuildAgentPromptReplacesOnlyProvidedVariables(t *testing.T) {
 	values := map[string]string{
 		"previous_input":     "fix this",
 		"task_initial_input": "first input",
 		"task_number":        "12",
 	}
-	prompt := BuildAgentPrompt("Do: {previous_input}", values, TaskControlPromptContext{})
+	prompt := BuildAgentPrompt("Do: {previous_input}", values)
 	if prompt != "Do: fix this" {
 		t.Fatalf("prompt = %q", prompt)
 	}
-	withTaskNumber := BuildAgentPrompt("Do: {task_initial_input} #{task_number}", values, TaskControlPromptContext{})
+	withTaskNumber := BuildAgentPrompt("Do: {task_initial_input} #{task_number}", values)
 	if withTaskNumber != "Do: first input #12" {
 		t.Fatalf("task placeholders not replaced: %q", withTaskNumber)
 	}
-	legacy := BuildAgentPrompt("Root: {root_id}", values, TaskControlPromptContext{})
+	legacy := BuildAgentPrompt("Root: {root_id}", values)
 	if legacy != "Root: {root_id}" {
 		t.Fatalf("legacy placeholder was replaced: %q", legacy)
-	}
-	withControl := BuildAgentPrompt("Do: {previous_input}", values, TaskControlPromptContext{
-		RootID:            "root",
-		TaskNumber:        12,
-		CurrentStageIndex: "1",
-		CurrentStageName:  "Agent",
-		Enabled:           true,
-	})
-	if !containsAll(withControl, []string{"Task control context:", "task_number: 12", "mindfs root -task 12", "mindfs root -task 12 -next"}) {
-		t.Fatalf("control prompt missing context: %q", withControl)
 	}
 }
 
@@ -848,6 +849,7 @@ func TestSchedulerRunsAgentStageAndStoresSessionKey(t *testing.T) {
 	root := fs.NewRootInfo("root", "root", t.TempDir())
 	store := NewTemplateStoreAt(t.TempDir())
 	svc := NewService(store, testRoots{root: root})
+	t.Cleanup(svc.Close)
 	runner := &fakeRunner{}
 	svc.SetRunner(runner)
 	tmpl, err := store.SaveTaskTemplate(TaskTemplate{
@@ -920,11 +922,12 @@ func TestSchedulerRunsAgentStageAndStoresSessionKey(t *testing.T) {
 	}
 }
 
-func TestAgentStageSessionErrorKeepsTaskAndStageRunning(t *testing.T) {
+func TestAgentStageSessionErrorWaitsForUser(t *testing.T) {
 	ctx := context.Background()
 	root := fs.NewRootInfo("root", "root", t.TempDir())
 	store := NewTemplateStoreAt(t.TempDir())
 	svc := NewService(store, testRoots{root: root})
+	t.Cleanup(svc.Close)
 	runner := &fakeRunner{runErr: errors.New("agent unavailable")}
 	svc.SetRunner(runner)
 	tmpl, err := store.SaveTaskTemplate(TaskTemplate{
@@ -971,12 +974,12 @@ func TestAgentStageSessionErrorKeepsTaskAndStageRunning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
-	if detail.Task.Status != StatusRunning || !detail.Task.SchedulerAdmitted {
-		t.Fatalf("task status/admitted = %s/%t, want running/true", detail.Task.Status, detail.Task.SchedulerAdmitted)
+	if detail.Task.Status != StatusWaitingUser || !detail.Task.SchedulerAdmitted {
+		t.Fatalf("task status/admitted = %s/%t, want waiting_user/true", detail.Task.Status, detail.Task.SchedulerAdmitted)
 	}
 	run := detail.StageRuns[len(detail.StageRuns)-1]
-	if run.Status != StageStatusRunning {
-		t.Fatalf("stage status = %s, want running", run.Status)
+	if run.Status != StageStatusFail || run.FinishedAt == "" {
+		t.Fatalf("stage status/finished_at = %s/%q, want fail/non-empty", run.Status, run.FinishedAt)
 	}
 	if detail.Task.AuxFlags.SessionError != "agent unavailable" {
 		t.Fatalf("session error = %q, want agent unavailable", detail.Task.AuxFlags.SessionError)
@@ -990,11 +993,77 @@ func TestAgentStageSessionErrorKeepsTaskAndStageRunning(t *testing.T) {
 	}
 }
 
-func TestNextRejectsRunningCurrentStage(t *testing.T) {
+func TestAutoAdvanceAgentStageFailureWaitsForUserAtCurrentStage(t *testing.T) {
 	ctx := context.Background()
 	root := fs.NewRootInfo("root", "root", t.TempDir())
 	store := NewTemplateStoreAt(t.TempDir())
 	svc := NewService(store, testRoots{root: root})
+	t.Cleanup(svc.Close)
+	svc.SetRunner(&fakeRunner{runErr: errors.New("agent unavailable")})
+	tmpl, err := store.SaveTaskTemplate(TaskTemplate{
+		Name: "Auto advance failure",
+		Stages: []TaskTemplateStage{{
+			Position: 0,
+			Snapshot: StageTemplate{
+				Name: "Describe",
+				Role: RoleUser,
+			},
+		}, {
+			Position: 1,
+			Snapshot: StageTemplate{
+				Name:           "Implement",
+				Role:           RoleAgent,
+				AutoAdvance:    true,
+				Agent:          "codex",
+				PromptTemplate: "Implement {previous_input}",
+			},
+		}, {
+			Position: 2,
+			Snapshot: StageTemplate{
+				Name: "Review",
+				Role: RoleUser,
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("SaveTaskTemplate: %v", err)
+	}
+	detail, err := svc.CreateTask(ctx, CreateTaskInput{RootID: root.ID, TaskTemplateID: tmpl.ID, Input: "change"})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	if _, err := svc.Next(ctx, MoveInput{RootID: root.ID, TaskID: detail.Task.ID}); err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		detail, err = svc.GetTask(ctx, root.ID, detail.Task.ID)
+		if err == nil && detail.Task.Status == StatusWaitingUser && detail.Task.AuxFlags.SessionError != "" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if detail.Task.CurrentStageIndex != 1 || detail.Task.Status != StatusWaitingUser {
+		t.Fatalf("task stage/status = %d/%s, want 1/waiting_user", detail.Task.CurrentStageIndex, detail.Task.Status)
+	}
+	if len(detail.StageRuns) != 2 {
+		t.Fatalf("stage run count = %d, want 2 (no auto-advanced run)", len(detail.StageRuns))
+	}
+	latest := detail.StageRuns[len(detail.StageRuns)-1]
+	if latest.Status != StageStatusFail {
+		t.Fatalf("stage status = %s, want fail", latest.Status)
+	}
+}
+
+func TestNextAdvancesFailedCurrentStageAfterUserReview(t *testing.T) {
+	ctx := context.Background()
+	root := fs.NewRootInfo("root", "root", t.TempDir())
+	store := NewTemplateStoreAt(t.TempDir())
+	svc := NewService(store, testRoots{root: root})
+	t.Cleanup(svc.Close)
 	runner := &fakeRunner{runErr: errors.New("agent unavailable")}
 	svc.SetRunner(runner)
 	tmpl, err := store.SaveTaskTemplate(TaskTemplate{
@@ -1050,15 +1119,22 @@ func TestNextRejectsRunningCurrentStage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetTask: %v", err)
 	}
-	if _, err := svc.Next(ctx, MoveInput{RootID: root.ID, TaskID: detail.Task.ID}); err == nil {
-		t.Fatalf("Next from running stage succeeded, want error")
+	if _, err := svc.Next(ctx, MoveInput{RootID: root.ID, TaskID: detail.Task.ID}); err != nil {
+		t.Fatalf("Next from failed stage: %v", err)
 	}
-	detail, err = svc.GetTask(ctx, root.ID, detail.Task.ID)
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		detail, err = svc.GetTask(ctx, root.ID, detail.Task.ID)
+		if err == nil && detail.Task.CurrentStageIndex == 2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if err != nil {
-		t.Fatalf("GetTask after failed next: %v", err)
+		t.Fatalf("GetTask after next: %v", err)
 	}
-	if detail.Task.CurrentStageIndex != 1 {
-		t.Fatalf("current stage = %d, want 1", detail.Task.CurrentStageIndex)
+	if detail.Task.CurrentStageIndex != 2 {
+		t.Fatalf("current stage = %d, want 2", detail.Task.CurrentStageIndex)
 	}
 }
 
@@ -1067,6 +1143,7 @@ func TestCompletingAdmittedTaskSchedulesNextQueuedTask(t *testing.T) {
 	root := fs.NewRootInfo("root", "root", t.TempDir())
 	store := NewTemplateStoreAt(t.TempDir())
 	svc := NewService(store, testRoots{root: root})
+	t.Cleanup(svc.Close)
 	runner := &fakeRunner{}
 	svc.SetRunner(runner)
 	tmpl, err := store.SaveTaskTemplate(TaskTemplate{
@@ -1149,6 +1226,7 @@ func TestAgentStageAllowsBlankModel(t *testing.T) {
 	root := fs.NewRootInfo("root", "root", t.TempDir())
 	store := NewTemplateStoreAt(t.TempDir())
 	svc := NewService(store, testRoots{root: root})
+	t.Cleanup(svc.Close)
 	runner := &fakeRunner{}
 	svc.SetRunner(runner)
 	tmpl, err := store.SaveTaskTemplate(TaskTemplate{
@@ -1210,6 +1288,7 @@ func TestRunNowBypassesConcurrencySlot(t *testing.T) {
 	root := fs.NewRootInfo("root", "root", t.TempDir())
 	store := NewTemplateStoreAt(t.TempDir())
 	svc := NewService(store, testRoots{root: root})
+	t.Cleanup(svc.Close)
 	svc.SetRunner(&fakeRunner{})
 	tmpl, err := store.SaveTaskTemplate(TaskTemplate{
 		Name:           "Serial Agent Flow",
@@ -1290,6 +1369,7 @@ func TestCancellingAdmittedTaskSchedulesNextQueuedTask(t *testing.T) {
 	root := fs.NewRootInfo("root", "root", t.TempDir())
 	store := NewTemplateStoreAt(t.TempDir())
 	svc := NewService(store, testRoots{root: root})
+	t.Cleanup(svc.Close)
 	svc.SetRunner(&fakeRunner{})
 	tmpl, err := store.SaveTaskTemplate(TaskTemplate{
 		Name:           "Two Slot Agent Flow",

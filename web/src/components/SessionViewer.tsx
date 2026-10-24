@@ -1,20 +1,23 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { defaultRangeExtractor, useVirtualizer } from "@tanstack/react-virtual";
 import { useSessionStream, type TimelineItem } from "../hooks/useSessionStream";
 import { sessionService, type TodoUpdate } from "../services/session";
 import { ThinkingBlock } from "./stream/ThinkingBlock";
-import { ToolCallCard, renderToolIcon } from "./stream/ToolCallCard";
+import { ToolCallCard, renderToolIcon, type ToolCallViewCache } from "./stream/ToolCallCard";
 import { AgentIcon } from "./AgentIcon";
 import { InlineTokenText } from "./InlineTokenText";
 import { MarkdownViewer } from "./MarkdownViewer";
 import { fetchProofProtectedBlob } from "../services/file";
-import type { ExchangeAux, RelatedFile, ToolCall } from "../services/session";
+import type { ExchangeAux, RelatedFile, TokenUsage, ToolCall } from "../services/session";
 import { savePrompt } from "../services/prompts";
 import { reportError } from "../services/error";
-import { rootBadgeButtonStyle } from "./rootBadgeStyle";
 import { copyText } from "../services/clipboard";
 import type { AgentStatus } from "../services/agents";
 import { useI18n, type Locale } from "../i18n";
 import { formatSessionDuration } from "../services/sessionDuration";
+import { DEFAULT_REPLY_INFO_PREFERENCES, useReplyInfoPreferences } from "../services/replyInfoPreferences";
+import { ReplyInfoMenu } from "./ReplyInfoMenu";
+import { SessionHeader, type SessionHeaderActions } from "./SessionHeader";
 import {
   relatedFileStatKey,
   useRelatedFileStats,
@@ -47,6 +50,7 @@ type SessionItem = {
       totalTokens: number;
       modelContextWindow: number;
     };
+    token_usage?: TokenUsage;
   }>;
   closed_at?: string;
   source?: string;
@@ -54,7 +58,7 @@ type SessionItem = {
   exchange_aux?: Record<string, ExchangeAux[]>;
 };
 
-type SessionViewerProps = {
+type SessionViewerProps = SessionHeaderActions & {
   session: SessionItem | null;
   loading?: boolean;
   slashCommandResult?: {
@@ -255,6 +259,58 @@ function formatCompactTokenCount(value: number) {
   return String(Math.round(value));
 }
 
+function formatTurnTokenCount(value: number) {
+  const tokens = Math.max(0, Number(value || 0));
+  const compact = (amount: number, suffix: string) => {
+    const digits = amount >= 100 ? 0 : amount >= 10 ? 1 : 2;
+    return `${Number(amount.toFixed(digits))}${suffix}`;
+  };
+  if (tokens >= 1_000_000) {
+    return compact(tokens / 1_000_000, "m");
+  }
+  if (tokens >= 1_000) {
+    return compact(tokens / 1_000, "k");
+  }
+  return String(Math.round(tokens));
+}
+
+function TurnTokenUsage({ usage, totalUsage }: { usage?: TokenUsage; totalUsage: TokenUsage }) {
+  if (!usage) {
+    return null;
+  }
+  const inputTokens = Math.max(0, Number(usage.inputTokens || 0));
+  const outputTokens = Math.max(0, Number(usage.outputTokens || 0));
+  if (!inputTokens && !outputTokens) {
+    return null;
+  }
+  const cacheReadReported = Number.isFinite(usage.cacheReadTokens);
+  const cacheReadTokens = Math.max(0, Number(usage.cacheReadTokens || 0));
+  const hitPercent = inputTokens > 0 && cacheReadReported
+    ? Math.round(Math.min(1, cacheReadTokens / inputTokens) * 100)
+    : null;
+  const cacheLabel = hitPercent === null ? "—" : `${hitPercent}%`;
+  return (
+    <span
+      title={`${inputTokens}(♻${cacheLabel}·Σ${totalUsage.inputTokens})→${outputTokens}(Σ${totalUsage.outputTokens})`}
+      style={{
+        display: "inline-flex",
+        alignItems: "baseline",
+        flexWrap: "wrap",
+        minWidth: 0,
+        fontVariantNumeric: "tabular-nums",
+      }}
+    >
+      <span>{formatTurnTokenCount(inputTokens)}</span>
+      <span>
+        {`(♻${cacheLabel}·Σ${formatTurnTokenCount(totalUsage.inputTokens)})`}
+      </span>
+      <span>→</span>
+      <span>{formatTurnTokenCount(outputTokens)}</span>
+      <span>{`(Σ${formatTurnTokenCount(totalUsage.outputTokens)})`}</span>
+    </span>
+  );
+}
+
 function modelDisplayName(
   agents: AgentStatus[] | undefined,
   agentName?: string,
@@ -288,7 +344,7 @@ function formatAssistantExchangeMeta(
   if (`${item.fastService || ""}`.trim().toLowerCase() === "on") {
     parts.push("fast");
   }
-  return parts.join(" · ");
+  return parts.join("·").replace(/\s+/g, "");
 }
 
 function ContextWindowBadge({
@@ -313,13 +369,15 @@ function ContextWindowBadge({
         display: "inline-flex",
         alignItems: "center",
         justifyContent: "center",
+        flexWrap: "wrap",
+        minWidth: 0,
         color: hue,
         lineHeight: 1.1,
-        flexShrink: 0,
         fontSize: "10px",
         fontWeight: 700,
         letterSpacing: "0.01em",
         fontVariantNumeric: "tabular-nums",
+        overflowWrap: "anywhere",
       }}
     >
       <span>{metrics.percent}%</span>
@@ -331,16 +389,6 @@ function ContextWindowBadge({
       </span>
     </span>
   );
-}
-
-function previousUserTimestamp(timeline: TimelineItem[], index: number): string {
-  for (let i = index - 1; i >= 0; i -= 1) {
-    const item = timeline[i];
-    if (item.type === "user_text") {
-      return item.timestamp || "";
-    }
-  }
-  return "";
 }
 
 const formatTime = (isoString: string | undefined, locale: Locale) => {
@@ -1022,6 +1070,10 @@ function SessionViewerInner({
   onForkAgentMessage,
   agents,
   composerOverlayInset = 0,
+  onRenameSession,
+  onDeleteSession,
+  onHandoffPack,
+  onScheduledTask,
 }: SessionViewerProps) {
   const { locale, t } = useI18n();
   const [relatedFilesCollapsed, setRelatedFilesCollapsed] = useState(false);
@@ -1031,6 +1083,8 @@ function SessionViewerInner({
     }
     return window.matchMedia("(max-width: 767px)").matches;
   });
+  const replyInfoPreferences = useReplyInfoPreferences();
+  const visibleReplyInfo = isMobile ? replyInfoPreferences : DEFAULT_REPLY_INFO_PREFERENCES;
   const [savedPromptKeys, setSavedPromptKeys] = useState<Record<string, true>>(
     {},
   );
@@ -1045,6 +1099,35 @@ function SessionViewerInner({
   const userSummaryRootRef = useRef<HTMLDivElement | null>(null);
   const userSummaryListRef = useRef<HTMLDivElement | null>(null);
   const sessionKey = session?.key || session?.session_key || null;
+  const [editingMessage, setEditingMessage] = useState<{ seq: number; original: string; timestamp: string; content: string } | null>(null);
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [editError, setEditError] = useState("");
+  const editSubmitting = useRef(false);
+  const editVersion = useRef(0);
+  const editComposing = useRef(false);
+  useEffect(() => {
+    ++editVersion.current;
+    editSubmitting.current = false;
+    editComposing.current = false;
+    setSavingEdit(false);
+    return () => { ++editVersion.current; };
+  }, [rootId, sessionKey]);
+  const submitEdit = async () => {
+    if (!rootId || !sessionKey || !editingMessage?.content.trim() || editSubmitting.current) return;
+    const version = editVersion.current;
+    editSubmitting.current = true;
+    setSavingEdit(true);
+    setEditError("");
+    try {
+      await sessionService.editMessage(rootId, sessionKey, editingMessage.seq, editingMessage.content, editingMessage.original, editingMessage.timestamp);
+      if (version === editVersion.current) setEditingMessage(null);
+    } catch (error) {
+      if (version === editVersion.current) setEditError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (version === editVersion.current) { editSubmitting.current = false; setSavingEdit(false); }
+    }
+  };
+  useEffect(() => { setEditingMessage(null); setEditError(""); }, [rootId, sessionKey]);
   const exchanges = Array.isArray(session?.exchanges) ? session.exchanges : [];
   const isAwaiting = !!(session as any)?.pending;
   const { timeline, isStreaming, streamVersion, streamStatusText, recoveryStatus } = useSessionStream(
@@ -1076,6 +1159,14 @@ function SessionViewerInner({
     if (!sent) setCancellingRecovery(false);
   }, [cancellingRecovery, rootId, sessionKey]);
   const shouldStickToBottomRef = useRef(true);
+  const latestUserIndex = timeline.reduce((last, item, index) => item.type === "user_text" ? index : last, -1);
+  const latestCompletedReplyIndex = useMemo(() => {
+    for (let index = timeline.length - 1; index >= 0; index--) {
+      if (timeline[index].type === "assistant_text" &&
+          (timeline[index + 1]?.type === "user_text" || (index === timeline.length - 1 && !isStreaming))) return index;
+    }
+    return -1;
+  }, [timeline, isStreaming]);
   const lastSessionKeyRef = useRef<string | null>(null);
   const targetSeqScrollKeyRef = useRef("");
   const targetSeqFrameRef = useRef<number | null>(null);
@@ -1085,6 +1176,53 @@ function SessionViewerInner({
   const [userSummaryPinnedOpen, setUserSummaryPinnedOpen] = useState(false);
   const [currentUserMessageIndex, setCurrentUserMessageIndex] = useState(0);
   const viewportStickFrameRef = useRef<number | null>(null);
+  const toolViewCache = useMemo<ToolCallViewCache>(
+    () => ({ expanded: new Map(), details: new Map() }),
+    [rootId, sessionKey],
+  );
+  const timelineNavigation = useMemo(() => {
+    let userIndex = 0;
+    let previousTimestamp = "";
+    const seqIndices = new Map<number, number>();
+    const userIndices: number[] = [];
+    const pendingQuestionIndices: number[] = [];
+    const rows = timeline.map((item, index) => {
+      const previousUserTime = previousTimestamp;
+      if (item.type === "user_text") {
+        userIndex += 1;
+        previousTimestamp = item.timestamp || "";
+        userIndices.push(index);
+      }
+      if ("seq" in item && item.seq && !seqIndices.has(item.seq)) seqIndices.set(item.seq, index);
+      // Keep unanswered forms mounted so scrolling cannot discard a user's draft.
+      if (item.type === "tool" && item.toolCall.kind === "ask_user" &&
+          ["running", "pending", "in_progress"].includes(item.toolCall.status || "")) {
+        pendingQuestionIndices.push(index);
+      }
+      return { userIndex, previousUserTime };
+    });
+    return { rows, seqIndices, userIndices, pendingQuestionIndices };
+  }, [timeline]);
+  const virtualized = timeline.length > 100;
+  const virtualizer = useVirtualizer({
+    count: timeline.length,
+    getScrollElement: () => scrollRef.current,
+    enabled: virtualized,
+    getItemKey: (index) => `${rootId}:${sessionKey}:${timeline[index].id || index}`,
+    estimateSize: (index) => timeline[index].type === "tool" ? 40 : 160,
+    overscan: 8,
+    rangeExtractor: (range) => Array.from(new Set([
+      ...defaultRangeExtractor(range), ...timelineNavigation.pendingQuestionIndices,
+    ])).sort((a, b) => a - b),
+    onChange: (instance) => {
+      if (!shouldStickToBottomRef.current || instance.isScrolling) return;
+      if (viewportStickFrameRef.current !== null) cancelAnimationFrame(viewportStickFrameRef.current);
+      viewportStickFrameRef.current = requestAnimationFrame(() => {
+        viewportStickFrameRef.current = null;
+        if (shouldStickToBottomRef.current) stickSessionToBottom();
+      });
+    },
+  });
 
   const cancelTargetSeqScroll = () => {
     if (targetSeqFrameRef.current !== null) {
@@ -1136,6 +1274,18 @@ function SessionViewerInner({
     copyResetTimersRef.current = {};
   }, [sessionKey]);
 
+  const cumulativeTokenUsage = useMemo(() => {
+    let inputTokens = 0;
+    let outputTokens = 0;
+    return timeline.map((item) => {
+      if (item.type === "assistant_text" && item.tokenUsage) {
+        inputTokens += Math.max(0, Number(item.tokenUsage.inputTokens || 0));
+        outputTokens += Math.max(0, Number(item.tokenUsage.outputTokens || 0));
+      }
+      return { inputTokens, outputTokens };
+    });
+  }, [timeline]);
+
   const userMessageSummaries = useMemo(
     () =>
       timeline
@@ -1153,6 +1303,10 @@ function SessionViewerInner({
     const container = scrollRef.current;
     if (!container) {
       return 0;
+    }
+    if (virtualized) {
+      const first = virtualizer.getVirtualItems().find((item) => item.end >= container.scrollTop - 24);
+      return first ? Math.max(1, timelineNavigation.rows[first.index]?.userIndex || 0) : 0;
     }
     const nodes = Array.from(
       container.querySelectorAll<HTMLElement>("[data-user-message-index]"),
@@ -1193,13 +1347,25 @@ function SessionViewerInner({
       lastBeforeViewport ||
       Number(nodes[0]?.dataset.userMessageIndex || 0)
     );
-  }, []);
+  }, [virtualized, virtualizer, timelineNavigation]);
 
   const refreshCurrentUserMessageIndex = useCallback(() => {
     setCurrentUserMessageIndex(readCurrentUserMessageIndex());
   }, [readCurrentUserMessageIndex]);
 
   const scrollToUserMessageSummary = (index: number) => {
+    if (virtualized) {
+      const target = timelineNavigation.userIndices[index - 1];
+      if (target === undefined) return;
+      shouldStickToBottomRef.current = false;
+      cancelTargetSeqScroll();
+      virtualizer.scrollToIndex(target, { align: "center" });
+      setShowJumpToLatest(true);
+      setUserSummaryPinnedOpen(false);
+      setUserSummaryHoverOpen(false);
+      setCurrentUserMessageIndex(index);
+      return;
+    }
     const container = scrollRef.current;
     if (!container) {
       return;
@@ -1348,6 +1514,31 @@ function SessionViewerInner({
       return;
     }
     let lastScrollTop = el.scrollTop;
+    let lastScrollHeight = el.scrollHeight;
+    let lastClientHeight = el.clientHeight;
+    let touchY: number | null = null;
+    const pauseFollowing = () => {
+      shouldStickToBottomRef.current = false;
+      setShowJumpToLatest(true);
+      cancelTargetSeqScroll();
+      if (viewportStickFrameRef.current !== null) {
+        window.cancelAnimationFrame(viewportStickFrameRef.current);
+        viewportStickFrameRef.current = null;
+      }
+    };
+    const onWheel = (event: WheelEvent) => {
+      if (event.deltaY < 0) pauseFollowing();
+    };
+    const onTouchStart = (event: TouchEvent) => {
+      touchY = event.touches.length === 1 ? event.touches[0].clientY : null;
+    };
+    const onTouchMove = (event: TouchEvent) => {
+      const nextY = event.touches.length === 1 ? event.touches[0].clientY : null;
+      // Moving the finger down scrolls toward older messages.
+      if (touchY !== null && nextY !== null && nextY > touchY) pauseFollowing();
+      touchY = nextY;
+    };
+    const onTouchEnd = () => { touchY = null; };
     const updateStickiness = () => {
       const viewportGap = window.visualViewport
         ? window.innerHeight - window.visualViewport.height - window.visualViewport.offsetTop
@@ -1357,21 +1548,38 @@ function SessionViewerInner({
       const isNearBottom = distanceFromBottom < 40;
       const movedUp = el.scrollTop < lastScrollTop;
       const movedDown = el.scrollTop > lastScrollTop;
-      if (isNearBottom) {
-        shouldStickToBottomRef.current = true;
-      } else if (movedUp) {
+      const geometryChanged = el.scrollHeight !== lastScrollHeight || el.clientHeight !== lastClientHeight;
+      // Upward motion wins even inside the bottom threshold. Stationary
+      // measurements must not resume following after a wheel/touch gesture.
+      // Measuring a virtual row can shrink the document and clamp scrollTop;
+      // that is not an upward reading gesture.
+      if (movedUp && !geometryChanged) {
         shouldStickToBottomRef.current = false;
-      } else if (movedDown && distanceFromBottom < 200) {
+      } else if (movedDown && isNearBottom) {
         shouldStickToBottomRef.current = true;
       }
       setShowJumpToLatest(!shouldStickToBottomRef.current);
       refreshCurrentUserMessageIndex();
       lastScrollTop = el.scrollTop;
+      lastScrollHeight = el.scrollHeight;
+      lastClientHeight = el.clientHeight;
     };
     updateStickiness();
-    el.addEventListener("scroll", updateStickiness, { passive: true });
+    // Observe intent and position before virtualizer scroll callbacks rerender.
+    const options = { passive: true, capture: true };
+    el.addEventListener("scroll", updateStickiness, options);
+    el.addEventListener("wheel", onWheel, options);
+    el.addEventListener("touchstart", onTouchStart, options);
+    el.addEventListener("touchmove", onTouchMove, options);
+    el.addEventListener("touchend", onTouchEnd, options);
+    el.addEventListener("touchcancel", onTouchEnd, options);
     return () => {
-      el.removeEventListener("scroll", updateStickiness);
+      el.removeEventListener("scroll", updateStickiness, true);
+      el.removeEventListener("wheel", onWheel, true);
+      el.removeEventListener("touchstart", onTouchStart, true);
+      el.removeEventListener("touchmove", onTouchMove, true);
+      el.removeEventListener("touchend", onTouchEnd, true);
+      el.removeEventListener("touchcancel", onTouchEnd, true);
     };
   }, [refreshCurrentUserMessageIndex, sessionKey]);
 
@@ -1386,6 +1594,16 @@ function SessionViewerInner({
     }
     const container = scrollRef.current;
     if (!container || !timeline.length) {
+      return;
+    }
+    if (virtualized) {
+      const index = timelineNavigation.seqIndices.get(targetSeq);
+      if (index === undefined) return;
+      targetSeqScrollKeyRef.current = scrollKey;
+      shouldStickToBottomRef.current = false;
+      cancelTargetSeqScroll();
+      virtualizer.scrollToIndex(index, { align: "center" });
+      setShowJumpToLatest(true);
       return;
     }
     const node = container.querySelector<HTMLElement>(
@@ -1432,7 +1650,7 @@ function SessionViewerInner({
       }, delay);
       targetSeqTimerRefs.current.push(timer);
     });
-  }, [sessionKey, targetSeq, targetSeqRequestKey, timeline]);
+  }, [sessionKey, targetSeq, targetSeqRequestKey, timeline, virtualized, virtualizer, timelineNavigation]);
 
   const rawRelated = session?.related_files || (session as any)?.outputs || [];
   const relatedFiles = (Array.isArray(rawRelated) ? rawRelated : [])
@@ -1627,11 +1845,15 @@ function SessionViewerInner({
     idx: number,
     spacing: string = "0",
   ) => {
-    const timelineItemKey = item.id || `${item.type}-${idx}`;
+    const timelineItemKey = `${rootId}:${sessionKey}:${item.id || `${item.type}-${idx}`}`;
     if (item.type === "thought") {
       return (
         <div key={timelineItemKey} style={{ marginTop: spacing }}>
-          <ThinkingBlock content={item.content || ""} defaultExpanded={false} />
+          <ThinkingBlock
+            content={item.content || ""}
+            defaultExpanded={toolViewCache.expanded.get(`thought:${timelineItemKey}`) ?? false}
+            onExpandedChange={(expanded) => toolViewCache.expanded.set(`thought:${timelineItemKey}`, expanded)}
+          />
         </div>
       );
     }
@@ -1669,7 +1891,9 @@ function SessionViewerInner({
               callId={tc.callId || ""}
               status={tc.status || "running"}
               content={tc.content}
-              result={formatToolCallFallbackResult(tc)}
+              getFallbackResult={formatToolCallFallbackResult}
+              viewCache={toolViewCache}
+              viewCacheKey={timelineItemKey}
               locations={tc.locations}
               meta={tc.meta}
               rootPath={rootPath || undefined}
@@ -1707,7 +1931,7 @@ function SessionViewerInner({
     }
     const isUser = item.type === "user_text";
     const userMessageIndex = isUser
-      ? timeline.slice(0, idx + 1).filter((timelineItem) => timelineItem.type === "user_text").length
+      ? timelineNavigation.rows[idx].userIndex
       : undefined;
     const next = idx + 1 < timeline.length ? timeline[idx + 1] : null;
     const hasFollowingAssistantFlow =
@@ -1740,9 +1964,11 @@ function SessionViewerInner({
       ? formatAssistantExchangeMeta(item, agents)
       : "";
     const assistantDurationLabel = !isUser
-      ? formatSessionDuration(previousUserTimestamp(timeline, idx), item.timestamp)
+      ? formatSessionDuration(timelineNavigation.rows[idx].previousUserTime, item.timestamp)
       : "";
     const canForkAgentMessage = !isUser && Number(item.seq || 0) > 0 && !!onForkAgentMessage;
+    const canEditInPlace = isUser && idx === latestUserIndex && !item.pendingAck && !!item.timestamp && session?.type === "chat" && !(session as any)?.closed_at;
+    const isEditing = isUser && editingMessage?.timestamp === item.timestamp && editingMessage?.original === item.content;
     return (
       <div
         key={timelineItemKey}
@@ -1751,8 +1977,8 @@ function SessionViewerInner({
         style={{
           marginTop: spacing,
           alignSelf: isUser ? "flex-end" : "flex-start",
-          width: isUser ? userMessageWidth : "100%",
-          maxWidth: isUser ? "80%" : "100%",
+          width: isEditing ? "min(560px, 100%)" : isUser ? userMessageWidth : "100%",
+          maxWidth: isEditing ? "100%" : isUser ? "80%" : "100%",
           minWidth: 0,
           position: "relative",
           display: "flex",
@@ -1766,12 +1992,12 @@ function SessionViewerInner({
               flexDirection: "column",
               alignItems: "stretch",
               gap: "6px",
-              width: userMessageWidth,
+              width: isEditing ? "100%" : userMessageWidth,
               maxWidth: "100%",
               minWidth: 0,
             }}
           >
-            {hasRichUserAttachments ? (
+            {!isEditing && hasRichUserAttachments ? (
               <div
                 style={{
                   width: "100%",
@@ -1846,7 +2072,7 @@ function SessionViewerInner({
                 ) : null}
               </div>
             ) : null}
-            {!hasRichUserAttachments && displayContent ? (
+            {!isEditing && !hasRichUserAttachments && displayContent ? (
               <div
                 style={{
                   padding: "10px 16px",
@@ -1871,13 +2097,32 @@ function SessionViewerInner({
                 />
               </div>
             ) : null}
+            {isEditing && editingMessage ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <textarea autoFocus aria-label={t("session.editMessage")} value={editingMessage.content} disabled={savingEdit}
+                  onChange={(event) => setEditingMessage({ ...editingMessage, content: event.target.value })}
+                  onCompositionStart={() => { editComposing.current = true; }}
+                  onCompositionEnd={() => { editComposing.current = false; }}
+                  onKeyDown={(event) => {
+                    if (editComposing.current || event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
+                    if (event.key === "Escape" && !editSubmitting.current) { event.preventDefault(); setEditingMessage(null); }
+                    if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submitEdit(); }
+                  }}
+                  rows={3} style={{ width: "100%", boxSizing: "border-box", resize: "vertical", padding: "10px 16px", border: "1px solid var(--border-color, #d1d5db)", borderRadius: "18px 18px 4px 18px", font: "inherit", fontSize: 14, lineHeight: 1.5, color: "var(--text-primary)", background: "rgba(148,163,184,0.14)" }} />
+                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  <span style={{ flex: "1 1 auto", minWidth: 0, fontSize: 11, lineHeight: 1.5, color: "var(--text-secondary, #64748b)" }}><svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" style={{ verticalAlign: "-2px", marginRight: 4 }}><circle cx="12" cy="12" r="9" /><path d="M12 11v6M12 7v1" /></svg>{t("session.editNotice")}</span>
+                  <button type="button" disabled={savingEdit} style={{ flexShrink: 0, padding: "2px 8px", fontSize: 12, lineHeight: "16px", borderRadius: 5, border: "1px solid var(--border-color, #d1d5db)", background: "transparent", color: "var(--text-primary)" }} onClick={() => setEditingMessage(null)}>{t("common.cancel")}</button>
+                  <button type="button" disabled={savingEdit || !editingMessage.content.trim()} style={{ flexShrink: 0, padding: "2px 8px", fontSize: 12, lineHeight: "16px", borderRadius: 5, border: "1px solid transparent", background: "#2563eb", color: "white", opacity: savingEdit || !editingMessage.content.trim() ? 0.5 : 1 }} onClick={() => void submitEdit()}>{t(savingEdit ? "session.editSaving" : "session.editRegenerate")}</button>
+                </div>
+                {editError && <span role="alert" style={{ fontSize: 12, color: "var(--text-danger, #dc2626)" }}>{editError}</span>}
+              </div>
+            ) : null}
             <span
               style={{
                 fontSize: "10px",
                 color: "var(--text-secondary)",
-                opacity: 0.5,
                 alignSelf: "flex-end",
-                display: "inline-flex",
+                display: isEditing ? "none" : "inline-flex",
                 alignItems: "center",
                 gap: "4px",
               }}
@@ -1896,15 +2141,19 @@ function SessionViewerInner({
                   }}
                 />
               ) : null}
-              <span>{time}</span>
+              <span style={{ opacity: 0.5 }}>{time}</span>
               <button
                 type="button"
                 onClick={() => {
-                  onEditUserMessage?.(item.content || "");
+                  if (canEditInPlace) {
+                    setEditError("");
+                    setEditingMessage({ seq: Number(item.seq || 0), original: item.content || "", timestamp: item.timestamp!, content: item.content || "" });
+                  } else { onEditUserMessage?.(item.content || ""); }
                 }}
                 style={userMetaButtonStyle}
-                aria-label={t("session.editMessage")}
-                title={t("session.editMessage")}
+                disabled={savingEdit}
+                aria-label={t(canEditInPlace ? "session.editMessage" : "session.copyToComposer")}
+                title={t(canEditInPlace ? "session.editMessage" : "session.copyToComposer")}
               >
                 {renderToolIcon("edit")}
               </button>
@@ -2061,112 +2310,185 @@ function SessionViewerInner({
                 style={{
                   alignSelf: "flex-start",
                   display: "inline-flex",
+                  flexWrap: "nowrap",
                   alignItems: "center",
-                  gap: "6px",
+                  gap: "8px",
+                  maxWidth: "100%",
+                  minWidth: 0,
                   fontSize: "10px",
                   color: "var(--text-secondary)",
-                  opacity: 0.5,
-                  marginTop: "-10px",
+                  marginTop: "0",
                   marginBottom: "4px",
                 }}
               >
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (!assistantMarkdownContent) {
-                      reportError(
-                        "clipboard.write_failed",
-                        t("session.emptyMessageCannotCopy"),
-                      );
-                      return;
-                    }
-                    void copyText(assistantMarkdownContent)
-                      .then(() => {
-                        setCopiedMessageKeys((prev) => ({
-                          ...prev,
-                          [promptKey]: true,
-                        }));
-                        if (copyResetTimersRef.current[promptKey]) {
-                          window.clearTimeout(
-                            copyResetTimersRef.current[promptKey],
-                          );
-                        }
-                        copyResetTimersRef.current[promptKey] =
-                          window.setTimeout(() => {
-                            setCopiedMessageKeys((prev) => {
-                              const next = { ...prev };
-                              delete next[promptKey];
-                              return next;
-                            });
-                            delete copyResetTimersRef.current[promptKey];
-                          }, 1000);
-                      })
-                      .catch((err) => {
-                        reportError(
-                          "clipboard.write_failed",
-                          String((err as Error)?.message || t("session.copyFailed")),
-                        );
-                      });
+                <span
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "3px",
+                    flexShrink: 0,
                   }}
-                  style={userMetaButtonStyle}
-                  aria-label={t("session.copyMarkdown")}
-                  title={t("session.copyMarkdown")}
                 >
-                  {copySucceeded ? (
-                    <span
-                      aria-hidden="true"
-                      style={{
-                        fontSize: "13px",
-                        fontWeight: 800,
-                        lineHeight: 1,
-                      }}
-                    >
-                      ✓
-                    </span>
-                  ) : (
-                    <svg
-                      xmlns="http://www.w3.org/2000/svg"
-                      width="14"
-                      height="14"
-                      viewBox="0 0 24 24"
-                      aria-hidden="true"
-                    >
-                      <path
-                        fill="currentColor"
-                        d="M20 2H10c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h10c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2m0 12H10V4h10z"
-                      />
-                      <path
-                        fill="currentColor"
-                        d="M14 20H4V10h2V8H4c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h10c1.1 0 2-.9 2-2v-2h-2z"
-                      />
-                    </svg>
-                  )}
-                </button>
-                {canForkAgentMessage ? (
                   <button
                     type="button"
                     onClick={() => {
-                      const seq = Number(item.seq || 0);
-                      if (seq > 0) {
-                        void onForkAgentMessage?.(seq);
+                      if (!assistantMarkdownContent) {
+                        reportError(
+                          "clipboard.write_failed",
+                          t("session.emptyMessageCannotCopy"),
+                        );
+                        return;
                       }
+                      void copyText(assistantMarkdownContent)
+                        .then(() => {
+                          setCopiedMessageKeys((prev) => ({
+                            ...prev,
+                            [promptKey]: true,
+                          }));
+                          if (copyResetTimersRef.current[promptKey]) {
+                            window.clearTimeout(
+                              copyResetTimersRef.current[promptKey],
+                            );
+                          }
+                          copyResetTimersRef.current[promptKey] =
+                            window.setTimeout(() => {
+                              setCopiedMessageKeys((prev) => {
+                                const next = { ...prev };
+                                delete next[promptKey];
+                                return next;
+                              });
+                              delete copyResetTimersRef.current[promptKey];
+                            }, 1000);
+                        })
+                        .catch((err) => {
+                          reportError(
+                            "clipboard.write_failed",
+                            String((err as Error)?.message || t("session.copyFailed")),
+                          );
+                        });
                     }}
                     style={userMetaButtonStyle}
-                    aria-label={t("session.forkFromMessage")}
-                    title={t("session.forkFromMessage")}
+                    aria-label={t("session.copyMarkdown")}
+                    title={t("session.copyMarkdown")}
                   >
-                    <ForkIcon />
+                    {copySucceeded ? (
+                      <span
+                        aria-hidden="true"
+                        style={{
+                          fontSize: "13px",
+                          fontWeight: 800,
+                          lineHeight: 1,
+                        }}
+                      >
+                        ✓
+                      </span>
+                    ) : (
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        width="14"
+                        height="14"
+                        viewBox="0 0 24 24"
+                        aria-hidden="true"
+                      >
+                        <path
+                          fill="currentColor"
+                          d="M20 2H10c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h10c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2m0 12H10V4h10z"
+                        />
+                        <path
+                          fill="currentColor"
+                          d="M14 20H4V10h2V8H4c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h10c1.1 0 2-.9 2-2v-2h-2z"
+                        />
+                      </svg>
+                    )}
                   </button>
-                ) : null}
-                <AgentIcon
-                  agentName={item.agent || ""}
-                  style={{ width: "12px", height: "12px" }}
-                />
-                {assistantExchangeMeta ? (
-                  <span>{assistantExchangeMeta}</span>
-                ) : null}
-                <span>{time}{assistantDurationLabel ? ` ${assistantDurationLabel}` : ""}</span>
-                <ContextWindowBadge contextWindow={item.contextWindow} />
+                  {canForkAgentMessage ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const seq = Number(item.seq || 0);
+                        if (seq > 0) {
+                          void onForkAgentMessage?.(seq);
+                        }
+                      }}
+                      style={userMetaButtonStyle}
+                      aria-label={t("session.forkFromMessage")}
+                      title={t("session.forkFromMessage")}
+                    >
+                      <ForkIcon />
+                    </button>
+                  ) : null}
+                  {visibleReplyInfo.agent && <AgentIcon
+                    agentName={item.agent || ""}
+                    style={{ width: "12px", height: "12px", flexShrink: 0, opacity: 0.5 }}
+                  />}
+                </span>
+                <span
+                  style={{
+                    display: "inline-flex",
+                    flex: "1 1 auto",
+                    flexWrap: "wrap",
+                    alignItems: "center",
+                    gap: "0 8px",
+                    minWidth: 0,
+                    lineHeight: "16px",
+                    opacity: 0.5,
+                  }}
+                >
+                  {visibleReplyInfo.model && assistantExchangeMeta ? (
+                    <span
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        minHeight: "16px",
+                        minWidth: 0,
+                        maxWidth: "100%",
+                        overflowWrap: "anywhere",
+                      }}
+                    >
+                      {assistantExchangeMeta}
+                    </span>
+                  ) : null}
+                  {visibleReplyInfo.tokens && <span
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      minHeight: "16px",
+                      minWidth: 0,
+                      maxWidth: "100%",
+                      overflowWrap: "anywhere",
+                    }}
+                  >
+                    <TurnTokenUsage usage={item.tokenUsage} totalUsage={cumulativeTokenUsage[idx]} />
+                  </span>}
+                  {visibleReplyInfo.time && <span
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      minHeight: "16px",
+                      minWidth: 0,
+                      maxWidth: "100%",
+                      fontVariantNumeric: "tabular-nums",
+                      overflowWrap: "anywhere",
+                    }}
+                  >
+                    {time}{assistantDurationLabel}
+                  </span>}
+                  {visibleReplyInfo.context && <span
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      minHeight: "16px",
+                      minWidth: 0,
+                      maxWidth: "100%",
+                      overflowWrap: "anywhere",
+                    }}
+                  >
+                    <ContextWindowBadge contextWindow={item.contextWindow} />
+                  </span>}
+                </span>
+                {isMobile && idx === latestCompletedReplyIndex && (
+                  <ReplyInfoMenu key={sessionKey} preferences={replyInfoPreferences} />
+                )}
               </span>
             )}
           </div>
@@ -2387,55 +2709,19 @@ function SessionViewerInner({
       }}
     >
       {interactionMode === "drawer" ? null : (
-        <header
-          style={{
-            height: "36px",
-            padding: "0 16px",
-            borderBottom: "1px solid var(--border-color)",
-            display: "flex",
-            alignItems: "center",
-            background: "var(--mindfs-topbar-bg, transparent)",
-            boxSizing: "border-box",
-            zIndex: 10,
-            flexShrink: 0,
-          }}
-        >
-          <h1
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: "8px",
-              fontSize: "14px",
-              fontWeight: 600,
-              margin: 0,
-              minWidth: 0,
-            }}
-          >
-            {rootId ? (
-              <button
-                type="button"
-                onClick={() => onRootClick?.(rootId)}
-                style={{
-                  ...rootBadgeButtonStyle,
-                  flexShrink: 0,
-                  cursor: onRootClick ? "pointer" : "default",
-                }}
-              >
-                {rootId}
-              </button>
-            ) : null}
-            <span
-              style={{
-                minWidth: 0,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-            >
-              {displayName}
-            </span>
-          </h1>
-        </header>
+        <SessionHeader
+          key={`${rootId || ""}:${sessionKey || ""}`}
+          title={displayName}
+          sessionKey={sessionKey || ""}
+          rootId={rootId}
+          pending={isAwaiting}
+          chat={!session.type || session.type === "chat"}
+          onRootClick={onRootClick}
+          onRenameSession={onRenameSession}
+          onDeleteSession={onDeleteSession}
+          onHandoffPack={onHandoffPack}
+          onScheduledTask={onScheduledTask}
+        />
       )}
 
       {/* 滚动容器 */}
@@ -2482,7 +2768,20 @@ function SessionViewerInner({
                 ))}
               </div>
             ) : null}
-            {timeline.map((item, idx) =>
+            {virtualized ? (
+              <div style={{ height: virtualizer.getTotalSize(), position: "relative", width: "100%", overflowAnchor: "none" }}>
+                {virtualizer.getVirtualItems().map((row) => (
+                  <div
+                    key={row.key}
+                    data-index={row.index}
+                    ref={virtualizer.measureElement}
+                    style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${row.start}px)`, display: "flex", flexDirection: "column" }}
+                  >
+                    {renderTimelineItem(timeline[row.index], row.index, timelineItemSpacing(row.index > 0 ? timeline[row.index - 1] : null, timeline[row.index]))}
+                  </div>
+                ))}
+              </div>
+            ) : timeline.map((item, idx) =>
               renderTimelineItem(
                 item,
                 idx,
@@ -2847,7 +3146,7 @@ function SessionViewerInner({
                   }
                   shouldStickToBottomRef.current = true;
                   setShowJumpToLatest(false);
-                  stickSessionToBottom("smooth");
+                  stickSessionToBottom("instant");
                 }}
                 aria-label={t("session.jumpLatest")}
                 title={t("session.jumpLatest")}
@@ -3024,7 +3323,7 @@ function SessionViewerInner({
                       fontVariantNumeric: "tabular-nums",
                     }}
                   >
-                    {userMessageSummaries.length > 99 ? "99+" : userMessageSummaries.length}
+                    {userMessageSummaries.length}
                   </span>
                 </button>
               </div>
@@ -3062,5 +3361,9 @@ export const SessionViewer = memo(
     prev.targetSeqRequestKey === next.targetSeqRequestKey &&
     prev.composerOverlayInset === next.composerOverlayInset &&
     prev.gitFileStatsByPath === next.gitFileStatsByPath &&
-    prev.onRootClick === next.onRootClick,
+    prev.onRootClick === next.onRootClick &&
+    prev.onRenameSession === next.onRenameSession &&
+    prev.onDeleteSession === next.onDeleteSession &&
+    prev.onHandoffPack === next.onHandoffPack &&
+    prev.onScheduledTask === next.onScheduledTask,
 );

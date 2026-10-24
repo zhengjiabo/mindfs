@@ -21,7 +21,11 @@ import { fetchGitBranches, type GitBranchesPayload } from "../services/git";
 import { WorktreeBranchSelector } from "./WorktreeBranchSelector";
 import { NoWorktreeIcon } from "./NoWorktreeIcon";
 import { CodexRateLimitIndicator } from "./CodexRateLimitIndicator";
+import { AgentMemoryIndicator } from "./AgentMemoryIndicator";
 import { deletePrompt, savePrompt } from "../services/prompts";
+import { matchesSendShortcut, type SendShortcut } from "../services/sendShortcut";
+import type { BlueRingGestureConfig } from "../services/quickSwitch";
+import { SessionQuickActions, type SessionQuickActionsProps } from "./SessionQuickActions";
 
 type SessionInfo = {
   key: string;
@@ -71,6 +75,20 @@ function getSelectionPreview(text?: string): string {
 }
 
 type ActionBarProps = {
+  onNewSession: SessionQuickActionsProps["onNewSession"];
+  onSelectProject: SessionQuickActionsProps["onSelectProject"];
+  onSelectSession: SessionQuickActionsProps["onSelectSession"];
+  currentDirPath?: SessionQuickActionsProps["currentDirPath"];
+  roots?: SessionQuickActionsProps["roots"];
+  onOpenRecentDirectory?: SessionQuickActionsProps["onOpenRecentDirectory"];
+  onToggleMultiProjectSessions?: SessionQuickActionsProps["onToggleMultiProjectSessions"];
+  onToggleEnterKeySends?: SessionQuickActionsProps["onToggleEnterKeySends"];
+  onCycleMainFontScale?: SessionQuickActionsProps["onCycleMainFontScale"];
+  onToggleMainContentView?: SessionQuickActionsProps["onToggleMainContentView"];
+  onCycleKanbanTemplate?: SessionQuickActionsProps["onCycleKanbanTemplate"];
+  onCreateTask?: SessionQuickActionsProps["onCreateTask"];
+  onOpenScheduledTasks?: SessionQuickActionsProps["onOpenScheduledTasks"];
+  taskGroupBadge?: React.ReactNode;
   status?: WSStatus;
   agentsVersion?: number;
   codexRateLimitsRefreshToken?: number;
@@ -79,16 +97,15 @@ type ActionBarProps = {
   currentSession?: SessionInfo | null;
   pendingPlanMode?: boolean;
   attachedFileContext?: AttachedFileContext | null;
-  canOpenSessionDrawer?: boolean;
-  sessionDrawerOpen?: boolean;
-  detachedBoundSession?: boolean;
   editDraftRequest?: {
     id: number;
     content: string;
+    mode?: "replace" | "append";
   } | null;
   queuedMessages?: QueuedMessageInfo[];
   inputHistory?: string[];
   mobileEnterKeySends?: boolean;
+  sendShortcut?: SendShortcut | null;
   onSendMessage?: (
     message: string,
     mode: SessionMode,
@@ -113,13 +130,12 @@ type ActionBarProps = {
   onRemoveQueuedMessage?: (queueId: string) => void | Promise<void>;
   onUpdateQueuedMessage?: (queueId: string, content: string) => void | Promise<void>;
   onSendQueuedMessageNow?: (queueId: string) => void | Promise<void>;
-  onNewSession?: () => void;
   onRequestFileContext?: () => void;
   onClearFileContext?: () => void;
-  onSessionClick?: () => void;
   onToggleLeftSidebar?: () => void;
   onToggleRightSidebar?: () => void;
   sidebarsSwapped?: boolean;
+  blueRingGestures?: BlueRingGestureConfig;
 };
 
 function wsStatusMeta(status: WSStatus, t: (key: MessageKey) => string): {
@@ -155,17 +171,6 @@ function wsStatusMeta(status: WSStatus, t: (key: MessageKey) => string): {
       };
   }
 }
-
-const modePlaceholderKeys: Record<SessionMode, MessageKey> = {
-  chat: "action.placeholder.chat",
-  plugin: "action.placeholder.plugin",
-  command: "action.placeholder.command",
-};
-
-const chatBlurPlaceholderKeys: MessageKey[] = [
-  "action.placeholder.chat",
-  "action.placeholder.tip",
-];
 
 const MOBILE_BREAKPOINT = 768;
 const IME_ENTER_GUARD_MS = 120;
@@ -404,6 +409,10 @@ function stripPlanCommandPrefix(input: string): string {
 }
 
 export function ActionBar({
+  onNewSession,
+  onSelectProject,
+  onSelectSession,
+  taskGroupBadge,
   status = "disconnected",
   agentsVersion = 0,
   codexRateLimitsRefreshToken = 0,
@@ -412,9 +421,6 @@ export function ActionBar({
   currentSession,
   pendingPlanMode = false,
   attachedFileContext,
-  canOpenSessionDrawer = false,
-  sessionDrawerOpen = false,
-  detachedBoundSession = false,
   editDraftRequest = null,
   queuedMessages = [],
   inputHistory = [],
@@ -424,16 +430,27 @@ export function ActionBar({
   onRemoveQueuedMessage,
   onUpdateQueuedMessage,
   onSendQueuedMessageNow,
-  onNewSession,
   onRequestFileContext,
   onClearFileContext,
-  onSessionClick,
   onToggleLeftSidebar,
   onToggleRightSidebar,
   mobileEnterKeySends = false,
+  sendShortcut = null,
   sidebarsSwapped = false,
+  blueRingGestures,
+  currentDirPath,
+  roots,
+  onOpenRecentDirectory,
+  onToggleMultiProjectSessions,
+  onToggleEnterKeySends,
+  onCycleMainFontScale,
+  onToggleMainContentView,
+  onCycleKanbanTemplate,
+  onCreateTask,
+  onOpenScheduledTasks,
 }: ActionBarProps) {
   const { t } = useI18n();
+  const [modelSelectorSignal, setModelSelectorSignal] = useState(0);
   const [mode, setMode] = useState<SessionMode>("chat");
   const [agent, setAgent] = useState("");
   const [model, setModel] = useState("");
@@ -446,8 +463,6 @@ export function ActionBar({
   const [serializedInput, setSerializedInput] = useState("");
   const [inputHistoryIndex, setInputHistoryIndex] = useState<number | null>(null);
   const [activeToken, setActiveToken] = useState<{ type: "file" | "slash" | "prompt" | "command"; query: string } | null>(null);
-  const [dragX, setDragX] = useState(0);
-  const [isDragging, setIsDragging] = useState(false);
   const [sending, setSending] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null);
   const [cancelling, setCancelling] = useState(false);
@@ -455,10 +470,8 @@ export function ActionBar({
   const [editingQueueText, setEditingQueueText] = useState("");
   const [isMultiLine, setIsMultiLine] = useState(false);
   const [isFocused, setIsFocused] = useState(false);
+  const [placeholderVariant, setPlaceholderVariant] = useState(0);
   const [isDark, setIsDark] = useState(() => getEffectiveAppearanceMode() === "dark");
-  const [blurPlaceholderKey, setBlurPlaceholderKey] = useState<MessageKey>(
-    () => chatBlurPlaceholderKeys[Math.floor(Math.random() * chatBlurPlaceholderKeys.length)] || "action.placeholder.chat",
-  );
   const [candidates, setCandidates] = useState<CandidateItem[]>([]);
   const [activeCandidateIndex, setActiveCandidateIndex] = useState(0);
   const [addingPrompt, setAddingPrompt] = useState(false);
@@ -474,7 +487,6 @@ export function ActionBar({
   const [worktreeBranches, setWorktreeBranches] = useState<GitBranchesPayload>({ branches: [] });
   const [worktreeBranchesLoading, setWorktreeBranchesLoading] = useState(false);
   const [worktreeBranchError, setWorktreeBranchError] = useState("");
-  const dragStartRef = useRef(0);
   const syncedSessionSignatureRef = useRef<string>("");
   const editorRef = useRef<TokenEditorHandle>(null);
   const candidateAbortRef = useRef<AbortController | null>(null);
@@ -488,13 +500,31 @@ export function ActionBar({
   const applyingInputHistoryRef = useRef(false);
   const { isMobile } = useResponsive();
   const isConnected = status === "connected";
-  const connectionMeta = wsStatusMeta(status, t);
-  const DRAG_THRESHOLD = -40;
-  const boundRingColor = detachedBoundSession ? "#f59e0b" : "#2563eb";
-  const boundRingShadow = detachedBoundSession
-    ? "0 0 0 1px rgba(245,158,11,0.18)"
-    : "0 0 0 1px rgba(37,99,235,0.08)";
-  const boundArrowColor = detachedBoundSession ? "#f59e0b" : "#2563eb";
+  const [displayStatus, setDisplayStatus] = useState<WSStatus>(status);
+  const reconnectDisplayTimerRef = useRef<number | null>(null);
+  const connectionMeta = wsStatusMeta(displayStatus, t);
+
+  useEffect(() => {
+    if (reconnectDisplayTimerRef.current) {
+      window.clearTimeout(reconnectDisplayTimerRef.current);
+      reconnectDisplayTimerRef.current = null;
+    }
+    if (status !== "reconnecting") {
+      setDisplayStatus(status);
+      return;
+    }
+    setDisplayStatus("connecting");
+    reconnectDisplayTimerRef.current = window.setTimeout(() => {
+      reconnectDisplayTimerRef.current = null;
+      setDisplayStatus("reconnecting");
+    }, 800);
+    return () => {
+      if (reconnectDisplayTimerRef.current) {
+        window.clearTimeout(reconnectDisplayTimerRef.current);
+        reconnectDisplayTimerRef.current = null;
+      }
+    };
+  }, [status]);
 
   useEffect(() => {
     const media = window.matchMedia("(prefers-color-scheme: dark)");
@@ -519,9 +549,59 @@ export function ActionBar({
     };
   }, []);
 
+  const resetForNewSession = useCallback(() => {
+    const nextAgent = agents.find((item) => item.name === agent)
+      || agents.find((item) => item.available) || agents[0];
+    if (nextAgent) {
+      const defaults = getAgentDefaults(nextAgent);
+      setAgent(nextAgent.name);
+      setModel(defaults.model);
+      setAgentMode("");
+      setEffort(defaults.effort);
+      setFastService(defaults.fastService);
+    }
+    syncedSessionSignatureRef.current = "";
+  }, [agent, agents]);
+
+  // Blue-ring agent quick switch: ping-pong between the two most recently used
+  // agents. Switching always applies the target agent's default model/effort —
+  // nothing else is touched.
+  const lastAgentRef = useRef("");
+  const applyAgentSelection = useCallback((name: string) => {
+    const nextStatus = agents.find((item) => item.name === name);
+    if (!nextStatus) return false;
+    const defaults = getAgentDefaults(nextStatus);
+    setAgent(nextStatus.name);
+    setModel(defaults.model);
+    setAgentMode("");
+    setEffort(defaults.effort);
+    setFastService(defaults.fastService);
+    return true;
+  }, [agents]);
+  const toggleRecentAgent = useCallback(() => {
+    if (!agent) return;
+    // 上一个 agent 可能已被卸载/改名，失效时回退到第一个可用的其他 agent
+    const lastValid = lastAgentRef.current && lastAgentRef.current !== agent && agents.some((item) => item.name === lastAgentRef.current)
+      ? lastAgentRef.current
+      : "";
+    const target = lastValid || (agents.find((item) => item.available && item.name !== agent)?.name || "");
+    if (!target || !applyAgentSelection(target)) return;
+    lastAgentRef.current = agent;
+  }, [agent, agents, applyAgentSelection]);
+  const pickAgent = useCallback((name: string) => {
+    // 绑定的 pick 可能因 agent 卸载/改名而失效，回退到第一个可用 agent，避免手势静默无效
+    const status = name ? agents.find((item) => item.name === name) : null;
+    const target = status ? name : (agents.find((item) => item.available)?.name || "");
+    if (!target || target === agent) return;
+    if (applyAgentSelection(target)) {
+      lastAgentRef.current = agent;
+    }
+  }, [agent, agents, applyAgentSelection]);
+
   useEffect(() => {
     const sessionKey = currentSession?.key || currentSession?.session_key || null;
     if (!currentSession) {
+      if (syncedSessionSignatureRef.current) resetForNewSession();
       syncedSessionSignatureRef.current = "";
       return;
     }
@@ -544,7 +624,7 @@ export function ActionBar({
     setAgentMode(nextAgentMode);
     setEffort(nextEffort);
     setFastService(nextFastService);
-  }, [currentSession]);
+  }, [currentSession, resetForNewSession]);
 
   useEffect(() => {
     if (!currentSession?.pending) {
@@ -613,7 +693,8 @@ export function ActionBar({
   useEffect(() => {
     if (currentSession || agents.length === 0) return;
     if (agents.some((a) => a.name === agent)) return;
-    const preferred = agents.find((a) => a.available) ?? agents[0];
+    const preferred = agents.find((a) => a.last_used && a.available)
+      ?? agents.find((a) => a.available) ?? agents[0];
     if (!preferred) {
       return;
     }
@@ -802,13 +883,21 @@ export function ActionBar({
     if (!editDraftRequest) {
       return;
     }
-    const nextText = editDraftRequest.content || "";
+    const incoming = editDraftRequest.content || "";
+    // append 模式（接力包填入）：已有草稿时拼在后面，空草稿才直接放入
+    const existing = serializedInput.trim();
+    const nextText = editDraftRequest.mode === "append" && existing
+      ? `${serializedInput.replace(/\s+$/, "")}\n\n${incoming}`
+      : incoming;
     editorRef.current?.setText(nextText);
     setSerializedInput(nextText);
     setActiveToken(null);
     setCandidates([]);
     setActiveCandidateIndex(0);
-    requestAnimationFrame(syncEditorHeight);
+    requestAnimationFrame(() => {
+      syncEditorHeight();
+      editorRef.current?.focus();
+    });
   }, [editDraftRequest, syncEditorHeight]);
 
   const appendPendingAttachments = useCallback((files: File[]) => {
@@ -957,6 +1046,7 @@ export function ActionBar({
   }, [deletingPrompt, t]);
 
   const handleSend = useCallback(async () => {
+    if (currentSession?.key?.startsWith("pending-")) return;
     const messageText = serializedInput.trim();
     if ((!messageText && pendingAttachments.length === 0) || !isConnected || sending || (mode !== "command" && !agent)) return;
     const planCommand = pendingAttachments.length === 0 ? parsePlanCommand(messageText) : null;
@@ -1109,6 +1199,12 @@ export function ActionBar({
     if (isCompositionActive(e.nativeEvent)) {
       return;
     }
+    if (e.key !== "Enter" && !e.repeat && matchesSendShortcut(e.nativeEvent, sendShortcut)) {
+      e.preventDefault();
+      e.stopPropagation();
+      void handleSend();
+      return;
+    }
     if (candidates.length > 0) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
@@ -1146,12 +1242,18 @@ export function ActionBar({
         e.stopPropagation();
       }
     }
-  }, [candidates, activeCandidateIndex, applyCandidate, isCompositionActive, activeToken, navigateInputHistory]);
+  }, [candidates, activeCandidateIndex, applyCandidate, handleSend, isCompositionActive, activeToken, navigateInputHistory, sendShortcut]);
 
   const handleEditorEnter = useCallback((event: KeyboardEvent | null) => {
     if (isCompositionActive(event)) {
       // Stop Lexical's plain-text Enter handler without preventing the native
       // event, so an IME can finish committing its composition text.
+      return true;
+    }
+    if (event && !event.repeat && matchesSendShortcut(event, sendShortcut)) {
+      event.preventDefault();
+      event.stopPropagation();
+      void handleSend();
       return true;
     }
     if (event?.shiftKey) {
@@ -1178,7 +1280,7 @@ export function ActionBar({
       return true;
     }
     return false;
-  }, [candidates, activeCandidateIndex, applyCandidate, handleSend, isCompositionActive, isMobile, mobileEnterKeySends, mode]);
+  }, [candidates, activeCandidateIndex, applyCandidate, handleSend, isCompositionActive, isMobile, mobileEnterKeySends, mode, sendShortcut]);
 
   const handleEditorPaste = useCallback((event: React.ClipboardEvent<HTMLDivElement>) => {
     if (sending || !currentRootId) {
@@ -1196,59 +1298,8 @@ export function ActionBar({
     appendPendingAttachments(imageFiles);
   }, [appendPendingAttachments, currentRootId, sending]);
 
-  const resetForNewSession = useCallback(() => {
-    const nextAgent = agents.find((item) => item.name === agent)
-      || agents.find((item) => item.available)
-      || agents[0];
-    if (!nextAgent) {
-      return;
-    }
-    const defaults = getAgentDefaults(nextAgent);
-    setAgent(nextAgent.name);
-    setModel(defaults.model);
-    setAgentMode("");
-    setEffort(defaults.effort);
-    setFastService(defaults.fastService);
-    syncedSessionSignatureRef.current = "";
-  }, [agent, agents]);
-
-  const handleDragStart = (e: React.MouseEvent | React.TouchEvent) => {
-    const clientX = "touches" in e ? e.touches[0].clientX : e.clientX;
-    dragStartRef.current = clientX;
-    setIsDragging(true);
-  };
-
-  const handleDragEnd = useCallback(() => {
-    if (!isDragging) return;
-    if (dragX <= DRAG_THRESHOLD) {
-      resetForNewSession();
-      onNewSession?.();
-    }
-    setDragX(0);
-    setIsDragging(false);
-  }, [isDragging, dragX, onNewSession, resetForNewSession]);
-
-  useEffect(() => {
-    if (!isDragging) return;
-    const move = (e: MouseEvent | TouchEvent) => {
-      const clientX = "touches" in e ? e.touches[0].clientX : e.clientX;
-      setDragX(Math.min(0, clientX - dragStartRef.current));
-    };
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", handleDragEnd);
-    window.addEventListener("touchmove", move);
-    window.addEventListener("touchend", handleDragEnd);
-    return () => {
-      window.removeEventListener("mousemove", move);
-      window.removeEventListener("mouseup", handleDragEnd);
-      window.removeEventListener("touchmove", move);
-      window.removeEventListener("touchend", handleDragEnd);
-    };
-  }, [isDragging, handleDragEnd]);
-
   const isSelectedAgentUnavailable = agents.length > 0 ? agents.find((a) => a.name === agent)?.available === false : false;
-  const canSend = (!!serializedInput.trim() || pendingAttachments.length > 0) && isConnected && !sending && (mode === "command" || !!agent);
-  const hasBoundSession = !!currentSession;
+  const canSend = (!!serializedInput.trim() || pendingAttachments.length > 0) && isConnected && !sending && !currentSession?.key?.startsWith("pending-") && (mode === "command" || !!agent);
   const hasDraft = !!serializedInput.trim() || pendingAttachments.length > 0;
   const showCancel = !!currentSession?.pending && !!currentSession?.key && !hasDraft;
   const isModeLocked = !!currentSession;
@@ -1268,12 +1319,12 @@ export function ActionBar({
     return () => window.removeEventListener("keydown", cancelOnEscape);
   }, [handleCancel, isCompositionActive, isMobile, showCancel]);
 
-  const inputPlaceholder = currentSession && !currentSession.pending
-    ? t("action.placeholder.newSessionSwipe")
-    : mode === "chat" && !isFocused
-      ? t(blurPlaceholderKey)
-      : t(modePlaceholderKeys[mode]);
-  const editorRightInset = isMultiLine ? 14 : mode === "command" ? (isMobile ? 92 : 116) : isMobile ? 124 : 148;
+  const inputPlaceholder = mode === "chat"
+    ? !isFocused && placeholderVariant !== 0
+      ? t(placeholderVariant === 1 ? "action.placeholder.tip" : "action.placeholder.quickSwitch")
+      : t(currentSession ? "action.placeholder.continueSession" : "action.placeholder.newSession")
+    : t(mode === "command" ? "action.placeholder.command" : "action.placeholder.plugin");
+  const editorRightInset = isMultiLine ? 14 : mode === "command" ? (isMobile ? 84 : 108) : isMobile ? 116 : 140;
   const editorBottomInset = isMultiLine ? 44 : 12;
   const editorMinHeight = 44;
   const mobileFileSidebarButton = isMobile ? (
@@ -1308,12 +1359,11 @@ export function ActionBar({
   return (
     <div data-onboarding="action-bar" style={{ width: "100%", minWidth: 0, padding: isMobile ? "0 0 var(--mindfs-actionbar-bottom-padding, calc(env(safe-area-inset-bottom, 0px) + 2px))" : "0 16px 12px", display: "flex", justifyContent: "center", boxSizing: "border-box", background: "var(--content-bg)" }}>
       <div style={{ position: "relative", width: "100%", minWidth: 0, display: "flex", flexDirection: "column", gap: 0 }}>
-        {planModeActive || (!currentSession && currentRootIsGitRepo && mode !== "command") || (mode !== "command" && agent === "codex") ? (
-          <div
+        <div
             style={{
               position: "absolute",
-              left: isMobile ? "36px" : "2px",
-              right: isMobile ? "36px" : "8px",
+              left: "2px",
+              right: isMobile ? "2px" : "8px",
               bottom: "100%",
               zIndex: 7,
               minWidth: 0,
@@ -1327,12 +1377,13 @@ export function ActionBar({
             <div
               style={{
                 display: "flex",
-                alignItems: "center",
+                alignItems: "flex-end",
                 gap: "6px",
                 minWidth: 0,
                 pointerEvents: "auto",
               }}
             >
+              {taskGroupBadge}
               {planModeActive ? (
                 <div style={{ display: "inline-flex", alignItems: "center", gap: "5px", height: "20px", padding: "0 5px 0 8px", borderRadius: "999px", border: "1px solid rgba(37, 99, 235, 0.22)", background: "linear-gradient(rgba(37, 99, 235, 0.10), rgba(37, 99, 235, 0.10)), var(--mobile-overlay-bg)", color: "#2563eb", fontSize: "11px", fontWeight: 700, lineHeight: 1, flexShrink: 0 }}>
                   <span>Plan</span>
@@ -1341,7 +1392,7 @@ export function ActionBar({
                   </button>
                 </div>
               ) : null}
-              {!currentSession && currentRootIsGitRepo ? (
+              {mode !== "command" && !currentSession && currentRootIsGitRepo ? (
                 <>
                   <button type="button" onClick={() => setCreateWorktree((value) => !value)} disabled={sending} aria-label={createWorktree ? t("task.worktreeTitle") : t("task.noWorktreeTitle")} title={createWorktree ? t("task.worktreeTitle") : t("task.noWorktreeTitle")} style={{ height: "24px", borderRadius: "6px", border: createWorktree ? "1px solid rgba(22, 163, 74, 0.28)" : "1px solid var(--border-color)", background: createWorktree ? "linear-gradient(rgba(22, 163, 74, 0.08), rgba(22, 163, 74, 0.08)), var(--mobile-overlay-bg)" : "linear-gradient(rgba(100, 116, 139, 0.10), rgba(100, 116, 139, 0.10)), var(--mobile-overlay-bg)", color: createWorktree ? "#15803d" : "var(--text-secondary)", padding: createWorktree ? "0 8px" : "0 8px 0 5px", fontSize: "11px", fontWeight: 800, cursor: sending ? "not-allowed" : "pointer", whiteSpace: "nowrap", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: "3px" }}>
                     {createWorktree ? "worktree" : <><NoWorktreeIcon size={12} />worktree</>}
@@ -1350,11 +1401,11 @@ export function ActionBar({
                 </>
               ) : null}
             </div>
-            <div style={{ pointerEvents: "auto" }}>
+            <div style={{ pointerEvents: "auto", display: "inline-flex", alignItems: "flex-end", gap: "6px" }}>
+              <AgentMemoryIndicator refreshToken={agentsVersion + codexRateLimitsRefreshToken} />
               <CodexRateLimitIndicator agent={agent} refreshToken={codexRateLimitsRefreshToken} />
             </div>
-          </div>
-        ) : null}
+        </div>
         {queuedMessages.length > 0 ? (
           <div
             style={{
@@ -1542,7 +1593,7 @@ export function ActionBar({
                 display: "flex",
                 alignItems: "center",
                 position: "relative",
-                transition: isDragging ? "none" : "all 0.2s cubic-bezier(0.4, 0, 0.2, 1)",
+                transition: "all 0.2s cubic-bezier(0.4, 0, 0.2, 1)",
                 minHeight: `${editorMinHeight}px`,
                 minWidth: 0,
                 width: "100%",
@@ -1561,9 +1612,7 @@ export function ActionBar({
               onFocusChange={(focused) => {
                 setIsFocused(focused);
                 if (!focused && mode === "chat") {
-                  setBlurPlaceholderKey(
-                    chatBlurPlaceholderKeys[Math.floor(Math.random() * chatBlurPlaceholderKeys.length)] || "action.placeholder.chat",
-                  );
+                  setPlaceholderVariant((previous) => (previous + 1) % 3);
                 }
                 if (focused) {
                   if (mode === "command" && serializedInput.trim()) {
@@ -1828,86 +1877,9 @@ export function ActionBar({
             />
 
             <div data-onboarding="input-controls" style={{ position: "absolute", right: isMobile ? "4px" : "8px", bottom: isMultiLine ? "6px" : "50%", transform: isMultiLine ? "none" : "translateY(50%)", display: "flex", alignItems: "center", gap: isMobile ? "0px" : "2px", zIndex: 5, transition: "all 0.2s cubic-bezier(0.4, 0, 0.2, 1)" }}>
-              <div
-                data-onboarding="session-ring"
-                onMouseDown={handleDragStart}
-                onTouchStart={handleDragStart}
-                onClick={() => {
-                  if (Math.abs(dragX) < 5) {
-                    onSessionClick?.();
-                  }
-                }}
-                style={{
-                  width: "32px",
-                  height: "32px",
-                  cursor: "pointer",
-                  transform: `translateX(${dragX}px)`,
-                  transition: isDragging ? "none" : "all 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
-                  position: "relative",
-                  zIndex: 10,
-                  opacity: 1,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  touchAction: "none",
-                }}
-                title={t("action.swipeNewSession")}
-              >
-                {!hasBoundSession ? (
-                  <div
-                    style={{
-                      width: "14px",
-                      height: "14px",
-                      borderRadius: "50%",
-                      background: "transparent",
-                      border: "2px solid #94a3b8",
-                    }}
-                  />
-                ) : (
-                  <div
-                    style={{
-                      width: "14px",
-                      height: "14px",
-                      borderRadius: "50%",
-                      background: "transparent",
-                      border: `2px solid ${boundRingColor}`,
-                      boxShadow: boundRingShadow,
-                    }}
-                  />
-                )}
-                {canOpenSessionDrawer ? (
-                  <svg
-                    width="12"
-                    height="12"
-                    viewBox="0 0 12 12"
-                    fill="none"
-                    style={{
-                      position: "absolute",
-                      inset: 0,
-                      margin: "auto",
-                      color: boundArrowColor,
-                      pointerEvents: "none",
-                    }}
-                    aria-hidden="true"
-                  >
-                    <path
-                      d={sessionDrawerOpen ? "M3.25 4.75 6 7.5l2.75-2.75" : "M3.25 7.25 6 4.5l2.75 2.75"}
-                      stroke="currentColor"
-                      strokeWidth="1.8"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                ) : null}
-                {isDragging && dragX < -10 ? (
-                  <div style={{ position: "absolute", right: "100%", top: "50%", transform: "translateY(-50%)", marginRight: "8px", fontSize: "10px", fontWeight: 600, color: dragX <= DRAG_THRESHOLD ? "var(--accent-color)" : "#9ca3af", whiteSpace: "nowrap", opacity: Math.min(1, Math.abs(dragX) / 20), pointerEvents: "none" }}>
-                    {dragX <= DRAG_THRESHOLD ? t("action.releaseNewSession") : t("action.swipeNewSession")}
-                  </div>
-                ) : null}
-              </div>
-
+              <SessionQuickActions currentRootId={currentRootId} currentSessionKey={currentSession?.key || currentSession?.session_key} currentDirPath={currentDirPath} gestureConfig={blueRingGestures} roots={roots} onNewSession={() => { resetForNewSession(); onNewSession(); }} onSelectProject={onSelectProject} onSelectSession={onSelectSession} onToggleFileSidebar={onToggleLeftSidebar} onToggleSessionSidebar={onToggleRightSidebar} onOpenModelSelector={() => setModelSelectorSignal((value) => value + 1)} onToggleRecentAgent={toggleRecentAgent} onPickAgent={pickAgent} onOpenRecentDirectory={onOpenRecentDirectory} onToggleMultiProjectSessions={onToggleMultiProjectSessions} onToggleEnterKeySends={onToggleEnterKeySends} onCycleMainFontScale={onCycleMainFontScale} onToggleMainContentView={onToggleMainContentView} onCycleKanbanTemplate={onCycleKanbanTemplate} onCreateTask={onCreateTask} onOpenScheduledTasks={onOpenScheduledTasks} />
               <>
-                <ModeSelector mode={mode} onModeChange={setMode} compact={true} disabled={isModeLocked} onboardingId="mode-selector" />
+                <ModeSelector mode={mode} onModeChange={setMode} compact={true} disabled={isModeLocked} onboardingId="mode-selector" viewportMenu />
                 {mode !== "command" ? (
                   <div>
                     <AgentSelector
@@ -1919,6 +1891,9 @@ export function ActionBar({
                     onAgentChange={(nextAgent, nextModel) => {
                       const nextStatus = agents.find((item) => item.name === nextAgent);
                       const defaults = getAgentDefaults(nextStatus);
+                      if (nextAgent && nextAgent !== agent) {
+                        lastAgentRef.current = agent;
+                      }
                       setAgent(nextAgent);
                       // Keep empty string for Codex follow-config (do not use ||).
                       setModel(nextModel ?? defaults.model);
@@ -1943,6 +1918,8 @@ export function ActionBar({
                     warnUnavailable={isSelectedAgentUnavailable}
                     defaultExpandOptions
                     onboardingId="agent-selector"
+                    viewportMenu
+                    openSignal={modelSelectorSignal}
                     />
                   </div>
                 ) : (
@@ -1962,6 +1939,7 @@ export function ActionBar({
                 onClick={() => attachmentInputRef.current?.click()}
                 disabled={!currentRootId || sending}
                 style={{
+                  marginLeft: "-4px",
                   width: "28px",
                   height: "28px",
                   borderRadius: "8px",

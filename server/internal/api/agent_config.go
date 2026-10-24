@@ -354,12 +354,20 @@ func switchAgentConfig(req agentConfigSwitchRequest, app *AppContext) (agentConf
 	if err != nil {
 		return agentConfigManifestEntry{}, false, err
 	}
+	cfg, err := agent.LoadConfig("")
+	if err != nil {
+		return agentConfigManifestEntry{}, false, err
+	}
+	if _, ok := cfg.GetAgent(entry.Agent); !ok {
+		return agentConfigManifestEntry{}, false, fmt.Errorf("agent not configured: %s", entry.Agent)
+	}
 	for _, source := range entry.Sources {
 		sourcePath, err := expandUserPath(source.SourcePath)
 		if err != nil {
 			return agentConfigManifestEntry{}, false, err
 		}
-		if err := copyFile(filepath.Join(configRoot, filepath.FromSlash(source.BackupPath)), sourcePath); err != nil {
+		backupPath := filepath.Join(configRoot, filepath.FromSlash(source.BackupPath))
+		if err := copyFile(backupPath, sourcePath); err != nil {
 			return agentConfigManifestEntry{}, false, err
 		}
 	}

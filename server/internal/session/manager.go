@@ -32,7 +32,7 @@ const (
 	exchangeFileTpl  = "sessions/%s.jsonl"
 	auxFileTpl       = "sessions/%s.aux.jsonl"
 	selectSessionSQL = `
-	SELECT key, type, parent_session_key, parent_tool_call_id, source, task_id, model, shell, plan_mode, name, related_files_json, related_worktree_json, last_context_window_total_tokens, last_context_window_model_context_window, pinned_at, created_at, updated_at, closed_at
+	SELECT key, type, parent_session_key, parent_tool_call_id, source, task_id, model, shell, plan_mode, name, related_files_json, related_worktree_json, last_context_window_total_tokens, last_context_window_model_context_window, pinned_at, created_at, updated_at, closed_at, history_revision
 	FROM sessions`
 	deleteSessionSQL = `
 DELETE FROM sessions
@@ -450,6 +450,7 @@ func (m *Manager) Search(_ context.Context, opts SearchOptions) ([]SearchHit, er
 }
 
 type exchangeModelDisplayNameContextKey struct{}
+type exchangeTokenUsageContextKey struct{}
 
 func WithExchangeModelDisplayName(ctx context.Context, displayName string) context.Context {
 	displayName = strings.TrimSpace(displayName)
@@ -467,15 +468,35 @@ func exchangeModelDisplayNameFromContext(ctx context.Context) string {
 	return strings.TrimSpace(value)
 }
 
+func WithExchangeTokenUsage(ctx context.Context, usage *agenttypes.TokenUsage) context.Context {
+	if ctx == nil || usage == nil {
+		return ctx
+	}
+	copy := *usage
+	return context.WithValue(ctx, exchangeTokenUsageContextKey{}, &copy)
+}
+
+func exchangeTokenUsageFromContext(ctx context.Context) *agenttypes.TokenUsage {
+	if ctx == nil {
+		return nil
+	}
+	usage, _ := ctx.Value(exchangeTokenUsageContextKey{}).(*agenttypes.TokenUsage)
+	if usage == nil {
+		return nil
+	}
+	copy := *usage
+	return &copy
+}
+
 func (m *Manager) AddExchangeForAgent(ctx context.Context, session *Session, role, content, agent, mode, effort, fastService string) error {
-	return m.addExchangeForAgentAt(session, role, content, agent, exchangeModelDisplayNameFromContext(ctx), mode, effort, fastService, time.Time{})
+	return m.addExchangeForAgentAt(session, role, content, agent, exchangeModelDisplayNameFromContext(ctx), exchangeTokenUsageFromContext(ctx), mode, effort, fastService, time.Time{})
 }
 
 func (m *Manager) AddExchangeForAgentAt(ctx context.Context, session *Session, role, content, agent, mode, effort, fastService string, timestamp time.Time) error {
-	return m.addExchangeForAgentAt(session, role, content, agent, exchangeModelDisplayNameFromContext(ctx), mode, effort, fastService, timestamp)
+	return m.addExchangeForAgentAt(session, role, content, agent, exchangeModelDisplayNameFromContext(ctx), exchangeTokenUsageFromContext(ctx), mode, effort, fastService, timestamp)
 }
 
-func (m *Manager) addExchangeForAgentAt(session *Session, role, content, agent, modelDisplayName, mode, effort, fastService string, timestamp time.Time) error {
+func (m *Manager) addExchangeForAgentAt(session *Session, role, content, agent, modelDisplayName string, tokenUsage *agenttypes.TokenUsage, mode, effort, fastService string, timestamp time.Time) error {
 	if session == nil || strings.TrimSpace(session.Key) == "" {
 		return errors.New("session required")
 	}
@@ -509,6 +530,7 @@ func (m *Manager) addExchangeForAgentAt(session *Session, role, content, agent, 
 		Effort:           strings.TrimSpace(effort),
 		FastService:      fastService,
 		Content:          content,
+		TokenUsage:       tokenUsage,
 		Timestamp:        ts,
 	}
 	if err := m.appendExchange(session.Key, record); err != nil {
@@ -1144,9 +1166,13 @@ func (m *Manager) ExchangeLogPath(key string) string {
 
 func (m *Manager) ExchangeLogAbsolutePath(key string) string {
 	path, err := m.exchangePath(key)
-	if err != nil { return "" }
+	if err != nil {
+		return ""
+	}
 	metaDir := m.root.MetaDir()
-	if metaDir == "" { return "" }
+	if metaDir == "" {
+		return ""
+	}
 	return filepath.Join(metaDir, filepath.FromSlash(path))
 }
 
@@ -1180,6 +1206,9 @@ func (m *Manager) createSessionUnsafe(session *Session) error {
 }
 
 func (m *Manager) getSessionUnsafe(key string, afterSeq int) (*Session, error) {
+	if err := m.recoverHistoryEdit(key); err != nil {
+		return nil, err
+	}
 	if afterSeq <= 0 {
 		if cached, ok := m.sessions[key]; ok && cached != nil {
 			return cached, nil
@@ -1444,6 +1473,7 @@ func (m *Manager) loadExchanges(key string, afterSeq int) ([]Exchange, int, erro
 		return nil, 0, err
 	}
 	exchanges := make([]Exchange, 0)
+	indexBySeq := make(map[int]int)
 	total := 0
 	scanner := jsonlScanner(payload)
 	for scanner.Scan() {
@@ -1464,6 +1494,21 @@ func (m *Manager) loadExchanges(key string, afterSeq int) ([]Exchange, int, erro
 		if afterSeq > 0 && entry.Seq <= afterSeq {
 			continue
 		}
+		if index, exists := indexBySeq[entry.Seq]; exists {
+			previous := exchanges[index]
+			// Prefer a completed reply over an empty placeholder, regardless of
+			// append order. Otherwise the last record in the log wins. Keep the
+			// original position and seq so aux references and cursors stay valid.
+			if strings.TrimSpace(previous.Content) != "" && strings.TrimSpace(entry.Content) == "" {
+				continue
+			}
+			if strings.TrimSpace(previous.Content) != "" && previous.Content != entry.Content {
+				log.Printf("[session/load] conflicting duplicate seq session=%s seq=%d; using last non-empty record", key, entry.Seq)
+			}
+			exchanges[index] = entry
+			continue
+		}
+		indexBySeq[entry.Seq] = len(exchanges)
 		exchanges = append(exchanges, entry)
 	}
 	if err := scanner.Err(); err != nil {
@@ -1744,6 +1789,8 @@ func openSessionMetaDB(dbFile string) (db *sql.DB, err error) {
 		return nil, err
 	}
 	for _, stmt := range []string{
+		`CREATE TABLE IF NOT EXISTS session_edit_journal (session_key TEXT PRIMARY KEY, history BLOB, auxiliary BLOB)`,
+		`ALTER TABLE sessions ADD COLUMN history_revision INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE sessions ADD COLUMN parent_session_key TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE sessions ADD COLUMN parent_tool_call_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE sessions ADD COLUMN source TEXT NOT NULL DEFAULT ''`,
@@ -1888,6 +1935,7 @@ func scanSessionMetaRow(scanner rowScanner) (*Session, error) {
 		createdAtRaw        string
 		updatedAtRaw        string
 		closedAtRaw         sql.NullString
+		historyRevision     int
 	)
 	if err := scanner.Scan(
 		&key,
@@ -1908,10 +1956,12 @@ func scanSessionMetaRow(scanner rowScanner) (*Session, error) {
 		&createdAtRaw,
 		&updatedAtRaw,
 		&closedAtRaw,
+		&historyRevision,
 	); err != nil {
 		return nil, err
 	}
 	session := &Session{
+		HistoryRevision:  historyRevision,
 		Key:              key,
 		Type:             typ,
 		ParentSessionKey: parentSessionKey,

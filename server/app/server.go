@@ -52,6 +52,7 @@ type StartOptions struct {
 	E2EEConfig      E2EEConfig
 	WebPushEnabled  bool
 	NotifyScript    string
+	UITitle         string
 	UseTLS          bool
 	CertFile        string
 	KeyFile         string
@@ -152,6 +153,7 @@ func Start(ctx context.Context, addr string, opts StartOptions) error {
 	}
 	services.Kanban = kanban.NewService(taskTemplates, services)
 	services.Kanban.SetRunner(services)
+	services.Kanban.Start(ctx)
 	githubImportSvc, err := githubimport.NewService(services)
 	if err != nil {
 		return err
@@ -161,6 +163,7 @@ func Start(ctx context.Context, addr string, opts StartOptions) error {
 		AppContext: services,
 		StaticDir:  resolveStaticDir(),
 		Version:    opts.Version,
+		UITitle:    opts.UITitle,
 	}
 	wsHandler := &api.WSHandler{AppContext: services}
 
@@ -180,7 +183,7 @@ func Start(ctx context.Context, addr string, opts StartOptions) error {
 		return err
 	}
 	defer listener.Close()
-	localCLIToken, err := EnsureLocalCLIToken(addr)
+	localCLIToken, err := EnsureLocalCLIToken(addr, opts.UseTLS)
 	if err != nil {
 		return err
 	}

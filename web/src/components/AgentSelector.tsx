@@ -5,11 +5,16 @@ import React, {
   useLayoutEffect,
   useCallback,
   useMemo,
+  useSyncExternalStore,
 } from "react";
 import { createPortal } from "react-dom";
 import { AgentIcon } from "./AgentIcon";
+import { PinIcon } from "./PinIcon";
 import type { AgentStatus } from "../services/agents";
 import { setCodexConfigModel } from "../services/agentConfig";
+import { filterAgentModels, orderPinnedModels } from "./modelFiltering";
+import { getModelPins, getModelPinsRevision, setModelPinned, subscribeModelPins } from "../services/preferences";
+import { appPath } from "../services/base";
 import { useI18n } from "../i18n";
 
 type AgentSelectorProps = {
@@ -33,6 +38,8 @@ type AgentSelectorProps = {
   onboardingId?: string;
   viewportMenu?: boolean;
   allowDefaultModel?: boolean;
+  /** Bump to open the menu programmatically (e.g. from a blue ring gesture). */
+  openSignal?: number;
 };
 
 const AGENT_MENU_MAX_BODY_HEIGHT = 344;
@@ -55,6 +62,8 @@ function AgentMenuPortal({
   }
   return <>{children}</>;
 }
+
+const AGENT_MODEL_SEARCH_THRESHOLD = 8;
 
 function hasAgentOptions(agent?: AgentStatus): boolean {
   return !!(
@@ -161,6 +170,7 @@ export function AgentSelector({
   onboardingId,
   viewportMenu = false,
   allowDefaultModel = false,
+  openSignal,
 }: AgentSelectorProps) {
   const { t } = useI18n();
   const [isOpen, setIsOpen] = useState(false);
@@ -179,6 +189,38 @@ export function AgentSelector({
     null,
   );
   const [menuBodyHeight, setMenuBodyHeight] = useState<number | null>(null);
+  const [modelSearch, setModelSearch] = useState("");
+  useSyncExternalStore(subscribeModelPins, getModelPinsRevision, getModelPinsRevision);
+  const [pinsSaving, setPinsSaving] = useState(false);
+  const [pinsError, setPinsError] = useState(false);
+  const pinsVersion = useRef(0);
+  const pinsSavingRef = useRef(false);
+  const pinsScope = isOpen && submenuAgent ? `${appPath("/")}\u0000${submenuAgent}` : "";
+  useEffect(() => {
+    ++pinsVersion.current;
+    pinsSavingRef.current = false;
+    setPinsSaving(false);
+    setPinsError(false);
+    return () => { pinsVersion.current++; };
+  }, [pinsScope, submenuAgent]);
+  const pinReady = !!pinsScope;
+  const toggleModelPin = async (id: string) => {
+    if (!pinReady || !submenuAgent || pinsSavingRef.current) return;
+    const version = pinsVersion.current;
+    pinsSavingRef.current = true;
+    setPinsSaving(true);
+    setPinsError(false);
+    try {
+      await setModelPinned(submenuAgent, id, !pinnedModelIDs.includes(id));
+    } catch {
+      if (version === pinsVersion.current) setPinsError(true);
+    } finally {
+      if (version === pinsVersion.current) {
+        pinsSavingRef.current = false;
+        setPinsSaving(false);
+      }
+    }
+  };
   const [menuHorizontalOffset, setMenuHorizontalOffset] = useState(0);
   const [viewportMenuPosition, setViewportMenuPosition] = useState<{
     top: number;
@@ -187,6 +229,34 @@ export function AgentSelector({
   const dropdownRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const agentColumnRef = useRef<HTMLDivElement>(null);
+
+  const resetMenuState = useCallback((open: boolean) => {
+    setMenuHorizontalOffset(0);
+    const selectedAgent = agents.find((item) => item.name === agent);
+    setSubmenuAgent(open && defaultExpandOptions && hasAgentOptions(selectedAgent) ? agent : null);
+    setErrorAgent(null);
+    setModelSectionExpanded(true);
+    setModeSectionExpanded(false);
+    setEffortSectionExpanded(false);
+    setServiceTierSectionExpanded(false);
+    setMenuBodyHeight(null);
+  }, [agents, agent, defaultExpandOptions]);
+
+  const openAgentMenu = useCallback(() => {
+    setViewportMenuPosition(null);
+    resetMenuState(true);
+    setIsOpen(true);
+  }, [resetMenuState]);
+
+  // Lets a parent (e.g. a blue ring gesture) open the menu programmatically.
+  const handledOpenSignal = useRef(openSignal ?? 0);
+  useEffect(() => {
+    const signal = openSignal ?? 0;
+    if (!signal || handledOpenSignal.current === signal) return;
+    handledOpenSignal.current = signal;
+    openAgentMenu();
+  }, [openSignal, openAgentMenu]);
+
   const submenuAgentStatus = useMemo(
     () => agents.find((item) => item.name === submenuAgent) ?? null,
     [agents, submenuAgent],
@@ -199,6 +269,17 @@ export function AgentSelector({
     () => submenuAgentStatus?.models ?? [],
     [submenuAgentStatus],
   );
+  const enableModelSearch = submenuModels.length > AGENT_MODEL_SEARCH_THRESHOLD;
+  const pinnedModelIDs = getModelPins(submenuAgent || "", submenuAgentStatus?.pinned_models);
+  const filteredSubmenuModels = useMemo(
+    () => orderPinnedModels(filterAgentModels(submenuModels, modelSearch), pinnedModelIDs),
+    [submenuModels, modelSearch, pinnedModelIDs],
+  );
+  useEffect(() => {
+    if (!isOpen || !submenuAgent) {
+      setModelSearch("");
+    }
+  }, [isOpen, submenuAgent]);
   const submenuSelectedModel = useMemo(() => {
     if (!submenuAgentStatus) return null;
     const followConfig = submenuAgentStatus.name === "codex";
@@ -411,7 +492,13 @@ export function AgentSelector({
       const viewportHeight = viewport?.height ?? window.innerHeight;
       const margin = 8;
       const maxLeft = viewportLeft + viewportWidth - menu.width - margin;
-      const left = Math.max(viewportLeft + margin, Math.min(anchor.left, maxLeft));
+      // Match the original absolute positioning (`right: 0`): the menu's
+      // right edge stays aligned with the selector's right edge. The portal
+      // changes only the stacking context, not the visible placement.
+      const left = Math.max(
+        viewportLeft + margin,
+        Math.min(anchor.right - menu.width, maxLeft),
+      );
       const below = anchor.bottom + 8;
       const above = anchor.top - menu.height - 8;
       const top = menuPlacement === "bottom" && below + menu.height <= viewportTop + viewportHeight - margin
@@ -579,34 +666,10 @@ export function AgentSelector({
       <button
         type="button"
         onClick={() => {
-          setIsOpen((prev) => {
-            const next = !prev;
-            if (next) {
-              setMenuHorizontalOffset(0);
-              const selectedAgent = agents.find((item) => item.name === agent);
-              setSubmenuAgent(
-                defaultExpandOptions && hasAgentOptions(selectedAgent)
-                  ? agent
-                  : null,
-              );
-              setErrorAgent(null);
-              setModelSectionExpanded(true);
-              setModeSectionExpanded(false);
-              setEffortSectionExpanded(false);
-              setServiceTierSectionExpanded(false);
-              setMenuBodyHeight(null);
-            } else {
-              setMenuHorizontalOffset(0);
-              setSubmenuAgent(null);
-              setErrorAgent(null);
-              setModelSectionExpanded(true);
-              setModeSectionExpanded(false);
-              setEffortSectionExpanded(false);
-              setServiceTierSectionExpanded(false);
-              setMenuBodyHeight(null);
-            }
-            return next;
-          });
+          const next = !isOpen;
+          setViewportMenuPosition(null);
+          resetMenuState(next);
+          setIsOpen(next);
         }}
         title={buttonTitle}
         style={{
@@ -693,7 +756,7 @@ export function AgentSelector({
             border: "1px solid var(--menu-border)",
             borderRadius: "12px",
             boxShadow: "0 8px 32px rgba(0,0,0,0.15)",
-            zIndex: 1000,
+            zIndex: viewportMenu ? 10100 : 1000,
             width: "max-content",
             minWidth: "0",
             maxWidth: "calc(100vw - 16px)",
@@ -1074,7 +1137,42 @@ export function AgentSelector({
                         </span>
                       </button>
                     ) : null}
-                    {allowDefaultModel ? (
+                    {pinsError ? <div role="alert" style={{ padding: "8px 12px", fontSize: 12, color: "var(--text-secondary)" }}>{t("agent.modelPinsSaveFailed")}</div> : null}
+                    {enableModelSearch ? (
+                      <div
+                        style={{
+                          padding: "2px 10px",
+                          position: "sticky",
+                          top: 0,
+                          zIndex: 1,
+                          background: "var(--menu-bg)",
+                        }}
+                      >
+                        <input
+                          type="text"
+                          value={modelSearch}
+                          onChange={(event) =>
+                            setModelSearch(event.target.value)
+                          }
+                          placeholder={t("agent.modelSearchPlaceholder")}
+                          style={{
+                            display: "block",
+                            width: "100%",
+                            boxSizing: "border-box",
+                            height: "26px",
+                            padding: "0 10px",
+                            border: "1px solid var(--menu-divider)",
+                            borderRadius: "8px",
+                            background: "transparent",
+                            color: "var(--text-primary)",
+                            fontSize: "12px",
+                            outline: "none",
+                          }}
+                        />
+                      </div>
+                    ) : null}
+                    {allowDefaultModel &&
+                    filteredSubmenuModels.length > 0 ? (
                       <button
                         type="button"
                         onClick={() => handleAgentSelect(submenuAgentStatus.name, "")}
@@ -1240,53 +1338,39 @@ export function AgentSelector({
                         )}
                       </div>
                     ) : null}
-                    {submenuModels.map((item, index) => {
-                      const isSelected =
-                        submenuAgentStatus.name === agent &&
-                        !!model &&
-                        item.id === (submenuSelectedModel?.id || "");
-                      return (
-                        <button
+                    {filteredSubmenuModels.length === 0 ? (
+                      <div
+                        style={{
+                          padding: "10px 12px",
+                          fontSize: "12px",
+                          color: "var(--text-secondary)",
+                        }}
+                      >
+                        {t("agent.modelNoMatch")}
+                      </div>
+                    ) : (
+                      filteredSubmenuModels.map((item, index) => (
+                        <ModelMenuItem
                           key={item.id}
-                          type="button"
-                          onClick={() =>
-                            handleAgentSelect(submenuAgentStatus.name, item.id)
+                          item={item}
+                          selected={
+                            submenuAgentStatus.name === agent &&
+                            !!model &&
+                            item.id === (submenuSelectedModel?.id || "")
                           }
-                          style={sectionItemStyle(
-                            isSelected,
-                            allowDefaultModel || index > 0,
-                            item.hidden ? 0.66 : 1,
-                          )}
-                          title={item.description || item.id}
-                        >
-                          <span style={{ fontSize: "13px", fontWeight: 500 }}>
-                            {item.name || item.id}
-                          </span>
-                          {item.description ? (
-                            <span
-                              style={{
-                                fontSize: "11px",
-                                color: "var(--text-secondary)",
-                                whiteSpace: "normal",
-                                overflowWrap: "anywhere",
-                                wordBreak: "break-word",
-                              }}
-                            >
-                              {item.description}
-                            </span>
-                          ) : item.hidden ? (
-                            <span
-                              style={{
-                                fontSize: "11px",
-                                color: "var(--text-secondary)",
-                              }}
-                            >
-                              hidden
-                            </span>
-                          ) : null}
-                        </button>
-                      );
-                    })}
+                          topBorder={
+                            (allowDefaultModel &&
+                              filteredSubmenuModels.length > 0) ||
+                            index > 0
+                          }
+                          onSelect={handleAgentSelect}
+                          agentName={submenuAgentStatus.name}
+                          pinned={pinnedModelIDs.includes(item.id)}
+                          pinDisabled={!pinReady || pinsSaving}
+                          onTogglePin={() => void toggleModelPin(item.id)}
+                        />
+                      ))
+                    )}
                   </>
                 ) : null}
                 {submenuModes.length > 0 ? (
@@ -1558,4 +1642,74 @@ function sectionItemStyle(
     cursor: "pointer",
     opacity,
   };
+}
+
+function ModelMenuItem({
+  item,
+  selected,
+  topBorder,
+  onSelect,
+  agentName,
+  pinned,
+  pinDisabled,
+  onTogglePin,
+}: {
+  item: NonNullable<AgentStatus["models"]>[number];
+  selected: boolean;
+  topBorder: boolean;
+  onSelect: (agent: string, model?: string) => void;
+  agentName: string;
+  pinned: boolean;
+  pinDisabled: boolean;
+  onTogglePin: () => void;
+}) {
+  const { t } = useI18n();
+  const pinLabel = `${t(pinned ? "agent.unpinModel" : "agent.pinModel")}：${item.name || item.id}`;
+  return (
+    <div style={{ display: "flex", alignItems: "flex-start", borderTop: topBorder ? "1px solid var(--menu-divider)" : undefined, background: selected ? "rgba(59, 130, 246, 0.08)" : "transparent", opacity: item.hidden ? 0.66 : 1 }}>
+    <button
+      type="button"
+      onClick={() => onSelect(agentName, item.id)}
+      style={{ ...sectionItemStyle(selected), flex: "1 1 auto", background: "transparent", paddingRight: 4 }}
+      title={item.description || item.id}
+    >
+      <span style={{ fontSize: "13px", fontWeight: 500 }}>
+        {item.name || item.id}
+      </span>
+      {item.description ? (
+        <span
+          style={{
+            fontSize: "11px",
+            color: "var(--text-secondary)",
+            whiteSpace: "normal",
+            overflowWrap: "anywhere",
+            wordBreak: "break-word",
+          }}
+        >
+          {item.description}
+        </span>
+      ) : item.hidden ? (
+        <span
+          style={{
+            fontSize: "11px",
+            color: "var(--text-secondary)",
+          }}
+        >
+          hidden
+        </span>
+      ) : null}
+    </button>
+    <button
+      type="button"
+      aria-label={pinLabel}
+      title={pinLabel}
+      aria-pressed={pinned}
+      disabled={pinDisabled}
+      onClick={(event) => { event.stopPropagation(); onTogglePin(); }}
+      style={{ flex: "0 0 auto", display: "inline-flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, margin: "4px 6px 0 0", padding: 6, border: 0, borderRadius: 6, background: "transparent", color: pinned ? "var(--accent-color, #3b82f6)" : "var(--text-secondary)", cursor: pinDisabled ? "default" : "pointer", opacity: pinDisabled ? 0.5 : 1 }}
+    >
+      <span style={{ display: "inline-flex", fontSize: 12 }}><PinIcon pinned={pinned} /></span>
+    </button>
+    </div>
+  );
 }
